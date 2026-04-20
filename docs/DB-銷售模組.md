@@ -49,6 +49,7 @@ related: [[PRD-銷售模組]], [[DB-庫存模組]]
 | **應收 = 明細帳** | 用 `receivables` 記每筆「增加」與「沖抵」，餘額由 SUM 計算；不存靜態餘額 |
 | **員工餐特殊化** | 不開票、不走付款，月彙總產扣款清單 |
 | **多租戶** | `tenant_id` 所有表 |
+| **稽核四欄位** | 所有單頭 / 明細 / 主檔類（`customers`, `customer_tier_prices`, `sales_orders`, `sales_order_items`, `sales_deliveries`, `sales_delivery_items`, `pos_sales`, `pos_sale_items`, `sales_returns`, `sales_return_items`, `payments`, `invoices`）均帶 `created_by`, `updated_by`, `created_at`, `updated_at` + `touch_updated_at` trigger；log 類（`receivables`, `employee_meals`）為 append-only 僅帶 `created_by` + `created_at`。`pos_sales.operator_id` 語意等同 `created_by`。權威 DDL 請見 `docs/sql/sales_schema.sql` |
 
 ---
 

@@ -17,6 +17,8 @@ CREATE TABLE locations (
   type        TEXT NOT NULL CHECK (type IN ('central_warehouse','store')),
   address     TEXT,
   is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by  UUID,
+  updated_by  UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, code)
@@ -94,6 +96,8 @@ CREATE TABLE transfers (
   received_by       UUID,
   received_at       TIMESTAMPTZ,
   notes             TEXT,
+  created_by        UUID,
+  updated_by        UUID,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, transfer_no),
@@ -110,7 +114,11 @@ CREATE TABLE transfer_items (
   qty_variance     NUMERIC(18,3) GENERATED ALWAYS AS (qty_received - qty_shipped) STORED,
   out_movement_id  BIGINT REFERENCES stock_movements(id),
   in_movement_id   BIGINT REFERENCES stock_movements(id),
-  notes            TEXT
+  notes            TEXT,
+  created_by       UUID,
+  updated_by       UUID,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 5. 盤點單
@@ -127,8 +135,10 @@ CREATE TABLE stocktakes (
   started_at    TIMESTAMPTZ,
   completed_at  TIMESTAMPTZ,
   created_by    UUID NOT NULL,
+  updated_by    UUID,
   notes         TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, stocktake_no)
 );
 
@@ -142,7 +152,11 @@ CREATE TABLE stocktake_items (
   adjustment_movement_id  BIGINT REFERENCES stock_movements(id),
   counted_by              UUID,
   counted_at              TIMESTAMPTZ,
-  notes                   TEXT
+  notes                   TEXT,
+  created_by              UUID,
+  updated_by              UUID,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 6. 補貨規則
@@ -154,7 +168,9 @@ CREATE TABLE reorder_rules (
   reorder_point   NUMERIC(18,3) NOT NULL DEFAULT 0,
   max_stock       NUMERIC(18,3),
   lead_time_days  INTEGER,
+  created_by      UUID,
   updated_by      UUID,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_id, location_id, sku_id),
   CHECK (reorder_point >= safety_stock),
@@ -251,6 +267,28 @@ CREATE TRIGGER trg_no_update_mov BEFORE UPDATE ON stock_movements
   FOR EACH ROW EXECUTE FUNCTION forbid_movement_mutation();
 CREATE TRIGGER trg_no_delete_mov BEFORE DELETE ON stock_movements
   FOR EACH ROW EXECUTE FUNCTION forbid_movement_mutation();
+
+-- updated_at 自動更新
+CREATE OR REPLACE FUNCTION touch_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at := NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_touch_locations       BEFORE UPDATE ON locations
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_transfers       BEFORE UPDATE ON transfers
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_transfer_items  BEFORE UPDATE ON transfer_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_stocktakes      BEFORE UPDATE ON stocktakes
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_stocktake_items BEFORE UPDATE ON stocktake_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_reorder_rules   BEFORE UPDATE ON reorder_rules
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 -- ============================================================
 -- RPC FUNCTIONS (SECURITY DEFINER)

@@ -27,6 +27,8 @@ CREATE TABLE customers (
   employee_ref_id   BIGINT,
   is_active         BOOLEAN NOT NULL DEFAULT TRUE,
   notes             TEXT,
+  created_by        UUID,
+  updated_by        UUID,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, code)
@@ -34,12 +36,16 @@ CREATE TABLE customers (
 
 -- 2. 客戶階級價
 CREATE TABLE customer_tier_prices (
-  tenant_id   UUID NOT NULL,
-  tier        TEXT NOT NULL,
-  sku_id      BIGINT NOT NULL,
-  price       NUMERIC(18,4) NOT NULL,
+  tenant_id      UUID NOT NULL,
+  tier           TEXT NOT NULL,
+  sku_id         BIGINT NOT NULL,
+  price          NUMERIC(18,4) NOT NULL,
   effective_from DATE,
   effective_to   DATE,
+  created_by     UUID,
+  updated_by     UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_id, tier, sku_id, COALESCE(effective_from, DATE '1900-01-01'))
 );
 
@@ -61,6 +67,7 @@ CREATE TABLE sales_orders (
   total              NUMERIC(18,2) NOT NULL DEFAULT 0,
   payment_terms      TEXT,
   created_by         UUID NOT NULL,
+  updated_by         UUID,
   confirmed_at       TIMESTAMPTZ,
   notes              TEXT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -79,7 +86,11 @@ CREATE TABLE sales_order_items (
   discount_amt   NUMERIC(18,2) NOT NULL DEFAULT 0,
   tax_rate       NUMERIC(5,4) NOT NULL DEFAULT 0.05,
   line_subtotal  NUMERIC(18,2) GENERATED ALWAYS AS (qty_ordered * unit_price - discount_amt) STORED,
-  notes          TEXT
+  notes          TEXT,
+  created_by     UUID,
+  updated_by     UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 4. 出貨單
@@ -94,6 +105,8 @@ CREATE TABLE sales_deliveries (
   shipped_by          UUID,
   confirmed_at        TIMESTAMPTZ,
   notes               TEXT,
+  created_by          UUID,
+  updated_by          UUID,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, delivery_no)
@@ -107,7 +120,11 @@ CREATE TABLE sales_delivery_items (
   qty_shipped    NUMERIC(18,3) NOT NULL CHECK (qty_shipped > 0),
   unit_price     NUMERIC(18,4) NOT NULL,
   movement_id    BIGINT REFERENCES stock_movements(id),
-  notes          TEXT
+  notes          TEXT,
+  created_by     UUID,
+  updated_by     UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 5. POS 交易
@@ -134,11 +151,13 @@ CREATE TABLE pos_sales (
   invoice_id        BIGINT,
   completed_at      TIMESTAMPTZ,
   operator_id       UUID NOT NULL,
+  updated_by        UUID,
   notes             TEXT,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, sale_no)
 );
+COMMENT ON COLUMN pos_sales.operator_id IS '結帳店員（等同 created_by）';
 
 CREATE TABLE pos_sale_items (
   id             BIGSERIAL PRIMARY KEY,
@@ -150,7 +169,11 @@ CREATE TABLE pos_sale_items (
   tax_rate       NUMERIC(5,4) NOT NULL DEFAULT 0.05,
   line_subtotal  NUMERIC(18,2) GENERATED ALWAYS AS (qty * unit_price - discount_amt) STORED,
   movement_id    BIGINT REFERENCES stock_movements(id),
-  notes          TEXT
+  notes          TEXT,
+  created_by     UUID,
+  updated_by     UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 6. 退貨單
@@ -172,6 +195,7 @@ CREATE TABLE sales_returns (
   total           NUMERIC(18,2) NOT NULL DEFAULT 0,
   refund_amount   NUMERIC(18,2) NOT NULL DEFAULT 0,
   created_by      UUID NOT NULL,
+  updated_by      UUID,
   confirmed_at    TIMESTAMPTZ,
   notes           TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -188,7 +212,11 @@ CREATE TABLE sales_return_items (
   unit_price     NUMERIC(18,4) NOT NULL,
   line_subtotal  NUMERIC(18,2) GENERATED ALWAYS AS (qty * unit_price) STORED,
   movement_id    BIGINT REFERENCES stock_movements(id),
-  notes          TEXT
+  notes          TEXT,
+  created_by     UUID,
+  updated_by     UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 7. 付款
@@ -211,7 +239,10 @@ CREATE TABLE payments (
   status            TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending','completed','failed','refunded')),
   paid_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   operator_id       UUID,
+  updated_by        UUID,
   notes             TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, payment_no),
   CHECK (
     (sales_order_id IS NOT NULL)::int
@@ -242,6 +273,8 @@ CREATE TABLE invoices (
   issued_at       TIMESTAMPTZ,
   voided_at       TIMESTAMPTZ,
   notes           TEXT,
+  created_by      UUID,
+  updated_by      UUID,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, invoice_no)
@@ -264,8 +297,10 @@ CREATE TABLE receivables (
   settled_by_payment_id BIGINT REFERENCES payments(id),
   status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','partially_settled','settled','written_off')),
   notes           TEXT,
+  created_by      UUID,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+COMMENT ON TABLE receivables IS 'AR ledger 性質：append-only；沖帳靠新增 credit 列，不改原 row';
 
 ALTER TABLE payments
   ADD CONSTRAINT fk_payment_receivable FOREIGN KEY (receivable_id) REFERENCES receivables(id);
@@ -284,8 +319,10 @@ CREATE TABLE employee_meals (
   movement_id     BIGINT REFERENCES stock_movements(id),
   payroll_batch   TEXT,
   notes           TEXT,
+  created_by      UUID,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+COMMENT ON TABLE employee_meals IS 'Log 性質：append-only；不修改已產生紀錄';
 
 -- ============================================================
 -- INDEXES
@@ -312,6 +349,36 @@ CREATE INDEX idx_ar_customer_open  ON receivables (tenant_id, customer_id, statu
   WHERE status IN ('open','partially_settled');
 
 CREATE INDEX idx_meal_emp_month    ON employee_meals (tenant_id, employee_id, payroll_batch);
+
+-- ============================================================
+-- TRIGGERS (touch updated_at)
+-- ============================================================
+-- 註：touch_updated_at 函式由 inventory_schema.sql 定義
+
+CREATE TRIGGER trg_touch_customers             BEFORE UPDATE ON customers
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_customer_tier_prices  BEFORE UPDATE ON customer_tier_prices
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sales_orders          BEFORE UPDATE ON sales_orders
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sales_order_items     BEFORE UPDATE ON sales_order_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sales_deliveries      BEFORE UPDATE ON sales_deliveries
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sales_delivery_items  BEFORE UPDATE ON sales_delivery_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_pos_sales             BEFORE UPDATE ON pos_sales
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_pos_sale_items        BEFORE UPDATE ON pos_sale_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sales_returns         BEFORE UPDATE ON sales_returns
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sales_return_items    BEFORE UPDATE ON sales_return_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_payments              BEFORE UPDATE ON payments
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_invoices              BEFORE UPDATE ON invoices
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 -- ============================================================
 -- RPC FUNCTIONS

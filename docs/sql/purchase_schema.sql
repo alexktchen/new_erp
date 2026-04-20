@@ -24,6 +24,8 @@ CREATE TABLE suppliers (
   lead_time_days  INTEGER,
   is_active       BOOLEAN NOT NULL DEFAULT TRUE,
   notes           TEXT,
+  created_by      UUID,
+  updated_by      UUID,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, code)
@@ -41,6 +43,10 @@ CREATE TABLE supplier_skus (
   is_preferred       BOOLEAN NOT NULL DEFAULT FALSE,
   last_purchased_at  TIMESTAMPTZ,
   notes              TEXT,
+  created_by         UUID,
+  updated_by         UUID,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_id, supplier_id, sku_id)
 );
 
@@ -52,7 +58,9 @@ CREATE TABLE sku_aliases (
   alias       TEXT NOT NULL,
   source      TEXT NOT NULL CHECK (source IN ('line_parsing','manual','supplier_name','historical')),
   created_by  UUID,
+  updated_by  UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, alias)
 );
 COMMENT ON TABLE sku_aliases IS 'LINE 文字解析用：一個別名對應一個 SKU';
@@ -74,6 +82,7 @@ CREATE TABLE purchase_orders (
   total             NUMERIC(18,2) NOT NULL DEFAULT 0,
   payment_terms     TEXT,
   created_by        UUID NOT NULL,
+  updated_by        UUID,
   sent_at           TIMESTAMPTZ,
   sent_by           UUID,
   sent_channel      TEXT,
@@ -93,7 +102,11 @@ CREATE TABLE purchase_order_items (
   unit_cost      NUMERIC(18,4) NOT NULL,
   tax_rate       NUMERIC(5,4) NOT NULL DEFAULT 0.05,
   line_subtotal  NUMERIC(18,2) GENERATED ALWAYS AS (qty_ordered * unit_cost) STORED,
-  notes          TEXT
+  notes          TEXT,
+  created_by     UUID,
+  updated_by     UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 5. 請購單（LINE 叫貨）
@@ -107,6 +120,7 @@ CREATE TABLE purchase_requests (
                          'draft','submitted','partially_ordered','fully_ordered','cancelled'
                        )),
   created_by           UUID NOT NULL,
+  updated_by           UUID,
   submitted_at         TIMESTAMPTZ,
   notes                TEXT,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -123,7 +137,11 @@ CREATE TABLE purchase_request_items (
   raw_line               TEXT,
   parse_confidence       NUMERIC(4,3),
   po_item_id             BIGINT REFERENCES purchase_order_items(id),
-  notes                  TEXT
+  notes                  TEXT,
+  created_by             UUID,
+  updated_by             UUID,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 6. 收貨單
@@ -141,6 +159,8 @@ CREATE TABLE goods_receipts (
   confirmed_at          TIMESTAMPTZ,
   confirmed_by          UUID,
   notes                 TEXT,
+  created_by            UUID,
+  updated_by            UUID,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, gr_no)
@@ -159,7 +179,11 @@ CREATE TABLE goods_receipt_items (
   expiry_date       DATE,
   variance_reason   TEXT,
   movement_id       BIGINT REFERENCES stock_movements(id),
-  notes             TEXT
+  notes             TEXT,
+  created_by        UUID,
+  updated_by        UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 7. 退供單
@@ -176,6 +200,7 @@ CREATE TABLE purchase_returns (
   return_date          DATE NOT NULL DEFAULT CURRENT_DATE,
   reason               TEXT NOT NULL,
   created_by           UUID NOT NULL,
+  updated_by           UUID,
   confirmed_at         TIMESTAMPTZ,
   confirmed_by         UUID,
   notes                TEXT,
@@ -193,7 +218,11 @@ CREATE TABLE purchase_return_items (
   unit_cost     NUMERIC(18,4) NOT NULL,
   reason        TEXT,
   movement_id   BIGINT REFERENCES stock_movements(id),
-  notes         TEXT
+  notes         TEXT,
+  created_by    UUID,
+  updated_by    UUID,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================
@@ -209,6 +238,34 @@ CREATE INDEX idx_gr_recent         ON goods_receipts (tenant_id, receive_date DE
 CREATE INDEX idx_supplier_skus_sku ON supplier_skus (tenant_id, sku_id) WHERE is_preferred = TRUE;
 CREATE INDEX idx_alias_lookup      ON sku_aliases (tenant_id, alias);
 CREATE INDEX idx_return_supplier   ON purchase_returns (tenant_id, supplier_id, return_date DESC);
+
+-- ============================================================
+-- TRIGGERS (touch updated_at)
+-- ============================================================
+-- 註：touch_updated_at 函式由 inventory_schema.sql 定義；此處僅建 TRIGGER
+
+CREATE TRIGGER trg_touch_suppliers              BEFORE UPDATE ON suppliers
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_supplier_skus          BEFORE UPDATE ON supplier_skus
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_sku_aliases            BEFORE UPDATE ON sku_aliases
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_purchase_orders        BEFORE UPDATE ON purchase_orders
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_purchase_order_items   BEFORE UPDATE ON purchase_order_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_purchase_requests      BEFORE UPDATE ON purchase_requests
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_purchase_request_items BEFORE UPDATE ON purchase_request_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_goods_receipts         BEFORE UPDATE ON goods_receipts
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_goods_receipt_items    BEFORE UPDATE ON goods_receipt_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_purchase_returns       BEFORE UPDATE ON purchase_returns
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+CREATE TRIGGER trg_touch_purchase_return_items  BEFORE UPDATE ON purchase_return_items
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 -- ============================================================
 -- RPC FUNCTIONS

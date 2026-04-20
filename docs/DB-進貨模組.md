@@ -42,6 +42,7 @@ related: [[PRD-採購模組]], [[DB-庫存模組]]
 | **LINE 解析回饋** | `sku_aliases` 表紀錄小幫手修正過的別名 → 下次自動識別 |
 | **單價一致性** | GR item 的 `unit_cost` 優先取自 GR 實填，若無則 fallback 到 PO item |
 | **稅金** | 5% 台灣營業稅於 line-level 計算，header 聚合 |
+| **稽核四欄位** | 所有單頭 / 明細類表（`suppliers`, `supplier_skus`, `sku_aliases`, `purchase_orders`, `purchase_order_items`, `purchase_requests`, `purchase_request_items`, `goods_receipts`, `goods_receipt_items`, `purchase_returns`, `purchase_return_items`）均帶 `created_by`, `updated_by`, `created_at`, `updated_at` + `touch_updated_at` trigger。權威 DDL 請見 `docs/sql/purchase_schema.sql` |
 
 ---
 

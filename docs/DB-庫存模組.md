@@ -28,6 +28,7 @@ related: [[PRD-庫存模組]]
 | **來源可追溯** | movement 必記 `source_doc_type` + `source_doc_id` |
 | **精度** | 數量 `NUMERIC(18,3)`（支援小數 3 位，適合散裝 / 重量）；成本 `NUMERIC(18,4)` |
 | **時區** | 一律 `TIMESTAMPTZ`，前端顯示轉台北時區 |
+| **稽核四欄位** | 主檔類 / 可編輯表必帶 `created_by`, `updated_by`, `created_at`, `updated_at`；append-only 表（`stock_movements`）僅 `operator_id` + `created_at`；物化餘額（`stock_balances`）由 trigger 維護，僅 `version` + `updated_at`。權威 DDL 請見 `docs/sql/inventory_schema.sql` |
 
 ---
 
