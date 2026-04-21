@@ -312,26 +312,121 @@ Layout：
 ## 13. Open Questions
 
 ### LIFF 技術
-- [ ] **Q1 LIFF 申請方**：總部一次申請、全加盟店共用？還是每加盟店自己申請？（推薦總部申請共用）
-- [ ] **Q2 手機 OTP 驗證**：綁定時是否需簡訊驗證？成本 vs 安全 tradeoff
-- [ ] **Q3 Session 存放**：sessionStorage vs Supabase Auth cookie？
-- [ ] **Q4 LIFF size**：full / tall / compact 哪個？（影響 UI layout）
+- [x] **Q1 LIFF 申請方**：→ **總部一次申請、全加盟店共用**。（2026-04-21）
+
+  - 總部建 1 個 LIFF channel（LIFF ID 通用）
+  - URL 模板：`https://liff.line.me/{LIFF_ID}?store={store_id}`
+  - 各加盟店 OA 自動生成帶自己 `store_id` 的 URL 給顧客
+  - 加盟店不需接觸 LINE Dev 後台
+  - 總部統一管理升級 / 改版 / 權限
+- [x] **Q2 手機 OTP 驗證**：→ **v1 不做、P1 再加**。（2026-04-21）
+
+  - 輸入手機 → 直接查 / 綁會員，不發 SMS
+  - 信任 LIFF 已在顧客 LINE 內 = 帳號主人（`line_user_id` 天然唯一）
+  - 省 SMS 成本（預估省下 NT$ 50k+）+ 體驗順暢
+  - **風險接受**：冒名機率低（團購店熟客為主）
+  - **P1 觸發條件**：若發生冒名案例 / 詐騙糾紛 → 升級加 OTP
+  - 若真需要、可串 SMS 供應商（**通知模組 Non-Goals 已排除 SMS、此處為例外**）
+- [x] **Q3 Session 機制**：→ **Supabase Auth cookie + JWT**。（2026-04-21）
+
+  **流程**：
+  1. LIFF 取 `liff.getIDToken()` → POST `/functions/v1/liff-session { id_token, store_id }`
+  2. Edge Function 驗 LINE JWK → 發 Supabase session（含 access + refresh token、HttpOnly cookie）
+  3. Supabase client 自動管理 refresh
+  4. RLS policy 直接 `auth.jwt() ->> 'member_id'` 取用
+  5. LIFF session 過期 → 重新 `liff.getIDToken()` 觸發 refresh
+
+  **好處**：
+  - 跟 Supabase RLS 原生整合（不用手動 parse JWT）
+  - HttpOnly cookie 防 XSS 竊取
+  - Refresh 自動、不用自寫 token 管理
+- [x] **Q4 LIFF size**：→ **full**（全螢幕）。（2026-04-21）
+
+  - 空間最充裕、會員中心功能（QR + 餘額 + 訂單 + 設定）全容得下
+  - LINE 內開啟仍可滑動關閉
+  - LINE Dev 後台 LIFF channel 設定 `size = full`
 
 ### 流程 / UX
-- [ ] **Q5 新會員申辦欄位**：手機 + 姓氏 + 生日 夠嗎？要加 Email？
-- [ ] **Q6 忘記手機**：顧客換號碼 → 可以自助改嗎？還是必須到門市？
-- [ ] **Q7 主畫面訂單顯示筆數**：3 筆 / 5 筆 / 無限捲動？
-- [ ] **Q8 歷史訂單保留期限**：3 個月 / 6 個月 / 永久？（與會員模組 7 年對齊？）
+- [x] **Q5 新會員申辦欄位**：→ **手機 + 姓氏 + 生日**（3 欄最小必要）。（2026-04-21）
+
+  - 與會員模組 Q1「新會員申辦預設走最小資料」一致
+  - **手機**：primary key、必填
+  - **姓氏**：店員呼叫用、必填（「王先生」）
+  - **生日**：生日祝賀 + 法定年齡判斷、必填
+  - **不收 Email**：通知模組 v1 不發 Email、Email 暫無用處（P1 需要時在個資頁補填）
+  - **不收性別**：減少填寫負擔、未來行銷需要再加
+  - UI：3 欄單頁、30 秒填完、一鍵送出
+- [x] **Q6 忘記手機 / 換號碼**：→ **不可自助、需到門市**。（2026-04-21）
+
+  - 手機是會員 primary key、自助改易被詐騙劫持（特別 Q2 不做 OTP 的情況下）
+  - 顧客到門市 → 店員核對身份（對比姓名 / 生日 / 近期訂單）→ 後台改
+  - 店員後台有「修改會員手機」功能（已在會員模組 PRD §8 權限）、改動留 audit
+  - LIFF 個資頁：手機欄顯示為唯讀 + 提示「如需更換，請洽門市店員」
+  - **例外**：顧客同手機號碼換 SIM 卡（號碼不變）→ 系統不察覺、不需處理
+- [x] **Q7 主畫面訂單顯示筆數**：→ **3 筆 + 「看更多 (X)」連結**。（2026-04-21）
+
+  - 主畫面「進行中訂單」區塊顯示最近 3 筆（依 `pickup_deadline_at ASC` 排）
+  - 超過 3 筆 → 底部顯示「看更多 (12)」連結 → 進完整訂單清單頁
+  - 完整清單頁支援 filter（進行中 / 歷史 / 逾期）+ 分頁載入
+- [x] **Q8 歷史訂單保留期限（LIFF UI）**：→ **6 個月**。（2026-04-21）
+
+  - LIFF 顧客端 UI 只顯示近 **6 個月** 的訂單（查詢條件 `WHERE created_at > NOW() - INTERVAL '6 months'`）
+  - 底層 `customer_orders` 保留 **7 年**（同會員模組 Q14 法遵）
+  - 超過 6 個月的訂單 → 顧客需洽客服 / 總部查
+  - `tenant_settings.liff_order_history_months DEFAULT 6` 可調
 
 ### 整合
-- [ ] **Q9 LIFF URL 欄位**：`locations.liff_url` 還是 `tenant_settings.liff_url`？加盟店是否可自訂？
-- [ ] **Q10 HMAC secret 儲存**：Supabase Vault 還是 env var？
-- [ ] **Q11 社群 channel 對應**：`locations.line_community_channel_id`（需新增）— 一店多社群怎處理？
+- [x] **Q9 LIFF URL 欄位位置**：→ **`tenant_settings.liff_url` 單一值，加盟店不可自訂**。（2026-04-21）
+
+  - 對應 Q1 決定（總部共用 LIFF）→ 全店共用同一 LIFF URL base
+  - `tenant_settings.liff_url TEXT`（例：`https://liff.line.me/1234567890-abcdef`）
+  - 每店 OA 生成「加會員」推播連結時、系統自動拼接 `{liff_url}?store={store_id}`
+  - 總部可統一換 LIFF channel（故障切換 / 升級）而不用改各店設定
+- [x] **Q10 HMAC secret 儲存**：→ **Supabase Vault（v1 直接上、不退化 env var）**。（2026-04-21）
+
+  - Secret 存在 Supabase Vault（內建 KMS 加密）
+  - Edge Function 以 service_role 讀取、產 QR payload 簽章
+  - 支援 key rotation（P1 可週期性輪替）
+  - 存取留 audit log
+  - 與會員 Q11 決定（PII 加密 P1 改 Vault）方向一致、**LIFF 直接 P1 水準**（更敏感、不需再等）
+
+  **note**：也會用於其他加密 secret（例：LINE Channel Access Token、OAuth secret），Vault 是 v1 必要基礎建設 → 催生 infra issue
+- [x] **Q11 社群 channel 對應**：→ **一店一主社群（新增 `locations.line_community_channel_id` 單值）**。（2026-04-21）
+
+  **schema 變動**：
+  ```sql
+  ALTER TABLE locations
+    ADD COLUMN line_community_channel_id TEXT,   -- LINE 社群 ID（20 個頻道之一）
+    ADD COLUMN line_community_name TEXT;         -- 顯示名稱（例：「A 店團購群」）
+  ```
+
+  **邏輯**：
+  - LIFF 社群暱稱綁定頁：依 `store_id` 取該店的 `line_community_channel_id` → 顯示「請輸入您在 {line_community_name} 的暱稱」
+  - 一店多社群（極罕見）→ P1 擴充為 `location_communities` 多對多表（schema 變動小）
 
 ### 未來擴充
-- [ ] **Q12 LIFF 下單功能**：P2+ 是否開放在 LIFF 下單（取代社群 `+N`）？預留設計點
-- [ ] **Q13 多語系**：v1 中文、P1 是否要英文？
-- [ ] **Q14 P2+ 整合原生 APP**：APP 推出後，LIFF 還保留嗎？還是停用？
+- [x] **Q12 LIFF 下單（P2+）**：→ **架構預留、v1 不做**。（2026-04-21）
+
+  - v1 LIFF 功能只**查詢**訂單、不**建立**訂單
+  - P2+ 放開（跟原生 APP 推出同時 — 通知模組 APP P2+ 一致哲學）
+  - 預留設計點：
+    - `customer_orders` schema 已能同時接受「小幫手代登打」與「顧客自助」兩種來源（`source_type` 欄位）
+    - LIFF 下單功能只要新增 UI + RPC 呼叫（核心邏輯共用）
+    - campaign_cap 即時扣除機制（訂單 Q13）已支援 real-time、無論來源
+  - **預計推出條件**：原生 APP 同時推出時、或顧客明確要求
+- [x] **Q13 多語系**：→ **v1 中文、P1 再評估**。（2026-04-21）
+
+  - 目標客群婆婆媽媽、台灣本地、**v1 純中文**足矣
+  - 不建 i18n 框架、省工
+  - P1 觸發條件：外籍配偶 / 觀光客需求 / 東南亞市場拓展
+  - P1 擴充成本：主要是文案翻譯（i18next / next-intl 之類框架可後期加）
+- [x] **Q14 APP 推出後 LIFF 去留**：→ **雙軌保留**。（2026-04-21）
+
+  - 原生 APP 推出（P2+）後、LIFF **繼續維護**
+  - 兩邊共用同一套 Supabase API / RLS / RPC
+  - 顧客可選擇：裝 APP 或用 LIFF（沒裝 APP 的不被排除）
+  - 維護成本低（LIFF 是 Next.js web app、改一次 = 兩邊得益）
+  - 若未來使用量降到極低（例 < 5%）再考慮停用、不急於決定
 
 ---
 
