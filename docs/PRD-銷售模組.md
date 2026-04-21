@@ -208,20 +208,216 @@ tags: [PRD, ERP, 銷售, Sales, POS]
 ## 11. Open Questions
 
 ### 業務規則
-- [ ] **Q1 B2B 信用額度**：超額是否阻擋下單？要不要老闆線上核准流程？
-- [ ] **Q2 價格策略**：客戶階級幾層？跟 SKU 怎麼對應（全品一階或逐品設定）？
-- [ ] **Q3 員工餐價格**：固定員工價？按職等？按成本 × %？
-- [ ] **Q4 POS 折扣**：最大允許折扣？需要店長密碼的門檻？
-- [ ] **Q5 退貨政策**：POS 幾天內可退？需不需要原發票強制？
-- [ ] **Q6 混合付款上限**：一筆交易最多幾種付款方式混合？
+- [x] **Q1 B2B 信用額度**：→ **不阻擋、但必留紀錄**。（2026-04-21）
+
+  **業態事實**：B2B（企業 / 餐廳 / 大戶月結）與 C2C（團購預訂）並存。
+
+  **實作**：
+  - `customers.credit_limit` 欄位已存在
+  - SO 建立時 RPC 計算：`current_outstanding_ar + new_so_total`
+  - 若超過 `credit_limit`：
+    - ✅ **下單通過**（不阻擋）
+    - ✅ 寫一筆 `credit_limit_exceeded_events`（v0.2 新增表）
+    - ✅ 透過通知模組推播財務 / 老闆（情報性、非阻擋）
+  - **月報**：列出本月所有超額事件，供老闆 review、決定是否調整額度 / 列黑名單
+  - 寬鬆哲學延續（跟店長權限一致），但涉及現金流，log 必填
+
+  **v0.2 schema 變動**：
+  ```sql
+  CREATE TABLE credit_limit_exceeded_events (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    customer_id BIGINT NOT NULL REFERENCES customers(id),
+    source_so_id BIGINT REFERENCES sales_orders(id),
+    credit_limit NUMERIC(18,2),
+    outstanding_before NUMERIC(18,2),
+    new_amount NUMERIC(18,2),
+    exceeded_by NUMERIC(18,2) GENERATED ALWAYS AS (outstanding_before + new_amount - credit_limit) STORED,
+    created_by UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  ```
+- [x] **Q2 B2B 價格策略**：→ **C + B 組合：逐品覆寫為主、未覆寫用等級折扣率**。（2026-04-21）
+
+  **實作（三層優先序）**：
+  - `customers.tier` 欄位已有（TEXT 可自訂值，如 `vip` / `regular` / `new`）
+  - `customer_tier_prices (tier, sku_id, price, effective_from/to)` 已有 schema（C）
+  - B2B 客戶層級 `customer_tiers.benefits.discount_rate`（仿會員模組 tier 設計，v0.2 schema 新增）（B）
+
+  **B2B 價格 lookup 優先序**（`rpc_b2b_price_lookup`）：
+  1. **C 逐品覆寫**：查 `customer_tier_prices` where tier + sku + 有效期間 → 有就用
+  2. **B 等級折扣**：`retail_price × customer_tiers.benefits.discount_rate` → 用這結果
+  3. **Fallback**：商品模組 `rpc_current_price`（retail / store / member_tier / promo 取最低）
+
+  **等級數量**：2~4 級起步（例 vip / regular / new），待 v0.2 具體確認。
+
+  **v0.2 schema 變動**：
+  ```sql
+  CREATE TABLE customer_tiers (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    benefits JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- benefits example: {"discount_rate": 0.90, "credit_days_default": 30}
+    created_by UUID, updated_by UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, code)
+  );
+  ALTER TABLE customers
+    ALTER COLUMN tier TYPE BIGINT USING NULL,
+    ADD CONSTRAINT fk_customer_tier FOREIGN KEY (tier) REFERENCES customer_tiers(id);
+  ```
+  （現有 `customers.tier` TEXT 改為 FK 指向 `customer_tiers.id`；搬遷時建對應 tier 記錄）
+
+  **UI**：客戶主檔頁 → Tab「tier 特殊價」→ 可匯入 CSV（15k SKU × N tier 量大時必要）
+- [x] **Q3 員工餐 / 員工購物**：→ **員工價可設定、不分類別、結算方式可設定**。（2026-04-21）
+
+  **業態事實**：
+  - 員工需要折扣購物，價格系統可調整
+  - 不區分「員工餐」vs「員工購物」→ 全部走同一條路徑
+  - 月底結算方式彈性（扣薪 / 付現 / 記帳均可）
+
+  **v0.2 schema 變動**：
+  ```sql
+  -- 員工價設定（兩層：預設折扣率 + SKU 覆寫）
+  ALTER TABLE tenant_settings    -- 若無 tenant_settings 表先建
+    ADD COLUMN employee_default_discount NUMERIC(5,4) DEFAULT 0.7000;  -- 預設 7 折
+
+  CREATE TABLE employee_sku_prices (
+    tenant_id UUID NOT NULL,
+    sku_id BIGINT NOT NULL REFERENCES skus(id),
+    price NUMERIC(18,4),               -- 固定價
+    discount_rate NUMERIC(5,4),        -- OR 折扣率（二擇一，price 優先）
+    effective_from TIMESTAMPTZ DEFAULT NOW(),
+    effective_to TIMESTAMPTZ,
+    created_by UUID, updated_by UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, sku_id, COALESCE(effective_from, DATE '1900-01-01'))
+  );
+
+  -- employee_meals 擴充結算欄位
+  ALTER TABLE employee_meals
+    ADD COLUMN settlement_method TEXT DEFAULT 'payroll_deduct'
+      CHECK (settlement_method IN ('payroll_deduct','cash_paid','credit_on_account','waived')),
+    ADD COLUMN settled_at TIMESTAMPTZ,
+    ADD COLUMN settled_by UUID;
+  ```
+
+  **員工價 lookup 優先序**（RPC `rpc_employee_price`）：
+  1. `employee_sku_prices` 有當前有效價 → 用
+  2. `employee_sku_prices.discount_rate` 有 → `retail × discount_rate`
+  3. Fallback：`retail × tenant_settings.employee_default_discount`
+
+  **結算流程**：
+  - 每筆員工取貨記錄 `employee_meals`，預設 `settlement_method='payroll_deduct'`、`settled_at=NULL`
+  - 月底批次：老闆選結算方式 → UPDATE `settled_at / settled_by / settlement_method`
+  - 扣薪走外部薪資系統（本模組不處理）
+  - 付現：產生 `payments` 紀錄
+  - 記帳：產生 `receivables` 紀錄
+- [x] **Q4 POS 折扣**：→ **完全自由（A）+ 留稽核**。（2026-04-21）
+
+  **做法**：
+  - POS 打任何折扣無門檻限制（店員、店長、老闆皆同）
+  - **必填** `discount_reason`（一句話原因即可）
+  - 每筆 audit 可追：誰 / 何時 / 打多少折 / 原因
+  - 月報：列出異常折扣（例：> 3 折或折扣金額 > X 元）供老闆 review
+
+  **v0.2 schema**：
+  ```sql
+  ALTER TABLE pos_sales
+    ADD COLUMN discount_reason TEXT;
+  ALTER TABLE pos_sale_items
+    ADD COLUMN discount_reason TEXT;
+  -- 搭配既有 operator_id（結帳者）= created_by 已足夠稽核
+  ```
+
+  **延續寬鬆哲學**（跟 Q8 商品模組店長自由改價、Q1 信用額度不擋一致）：信任員工、事後稽核把關。
+- [x] **Q5 退貨政策**：→ **14 天內、需原銷售單號、現金原路退、店員可處理**。（2026-04-21）
+
+  | 項目 | 決定 |
+  |---|---|
+  | 可退期限 | **14 天**（從取貨日起算，可在 `tenant_settings.pos_return_window_days` 調整）|
+  | 憑證要求 | 需**原銷售單號** / POS 小票號（店員可在系統查訂單調出）|
+  | 退款方式 | **現金原路退**（v1 無儲值金 / 點數退款機制）|
+  | 權限 | 店員可直接處理，每筆進 `sales_returns` 留稽核 |
+  | 原因 | `sales_returns.reason` 必填 |
+
+  **流程**：
+  1. 顧客給銷售單號（或店員輸入手機查訂單）
+  2. 店員選退貨品項 + 數量
+  3. 系統呼叫 `rpc_confirm_sales_return` → `rpc_inbound` 補庫存
+  4. 產生 `payments` 紀錄（direction=out）退現金
+  5. 若 14 天已過 → 需店長 override（事後稽核）
+
+  **v0.2 schema**：既有 schema 已足，僅 `tenant_settings.pos_return_window_days` 新增
+- [x] **Q6 混合付款上限**：→ **v1 不適用（只收現金）、P1 再議**。（2026-04-21）
+
+  **依附 Q3 POS 決定**：v1 POS 只收現金，不會有混合付款情境。
+
+  **schema 現況**：`payments` 表已是**一對多**（一筆 `pos_sale` / `sales_order` 可對應多筆 `payments`），未來 P1 擴充信用卡 / LINE Pay / 儲值金 / 點數折抵時，schema 已經能支援多種付款組合，不用改。
+
+  **P1 需要再決定**：
+  - 一筆最多幾種付款方式（建議 ≤ 3 種避免 UI 複雜）
+  - 付款順序（現金優先 / 點數優先 / 儲值金優先）
+  - 找零 vs 多付（儲值金不能多付，現金找零）
 
 ### 整合 / 技術
-- [ ] **Q7 電子發票舊系統 API**：文件在哪？錯誤時重試機制？
-- [ ] **Q8 信用卡刷卡機整合**：哪家金流？EDC 終端機型號？要不要軟體整合刷卡（推薦）還是獨立操作？
-- [ ] **Q9 LinePay / 街口 整合**：已有商店帳號？沙盒測試？
-- [ ] **Q10 POS 硬體**：錢櫃、小票機、客顯、電子秤（散裝要秤重）？
-- [ ] **Q11 日結差異容忍**：現金短溢要不要通報老闆？多少以上報警？
-- [ ] **Q12 舊單資料遷移**：未結 SO / 未收應收 要不要帶過來？
+- [x] **Q7 電子發票 API**：→ **v1 不適用**（v1 不開發票）、P1 再決定（綠界 ezPay / 藍新 / 財政部大平台）。（2026-04-21）
+
+- [x] **Q8 信用卡刷卡機整合**：→ **v1 不適用**（v1 只收現金）、P1 再決定金流供應商 + EDC 型號 + 軟體整合 vs 獨立操作。（2026-04-21）
+
+- [x] **Q9 LinePay / 街口 / 行動支付整合**：→ **v1 不適用**（v1 只收現金）、P1 再申請商店帳號與沙盒測試。（2026-04-21）
+
+- [x] **Q10 POS 硬體**：→ **v1 不需電子秤**（無散裝秤重商品）。（2026-04-21）
+
+  **v1 必要硬體**：
+  - ✅ USB 掃描槍（鍵盤模擬即可，任一款可用）
+  - ✅ 熱感小票機（ESC-POS 協定，USB 連線）
+  - ⭕ 錢櫃（選配，RJ-11 接小票機觸發）
+  - ❌ 客顯（可選、v1 先省）
+  - ❌ 電子秤（無散裝商品不需）
+
+  **採購清單**相關 issue：[#43 Pilot 期間硬體採購](https://github.com/www161616/new_erp/issues/43)
+- [x] **Q11 日結差異容忍**：→ **雙規門檻：絕對值 ≥ 100 元 或 比例 ≥ 1%**。（2026-04-21）
+
+  **做法**：
+  - 每日收班店員輸入實際現金盤點數
+  - 系統計算 `|system_cash - counted_cash|`
+  - 觸發條件：`diff >= 100` **OR** `diff >= 0.01 × system_cash`
+  - 任一條件滿足 → 推播老闆（通知模組）+ 在 dashboard 標紅
+  - 店員必填原因（`daily_reconciliation.note`）
+
+  **v0.2 schema**：
+  ```sql
+  CREATE TABLE daily_reconciliations (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    location_id BIGINT NOT NULL REFERENCES locations(id),
+    business_date DATE NOT NULL,
+    system_cash NUMERIC(18,2) NOT NULL,
+    counted_cash NUMERIC(18,2) NOT NULL,
+    diff NUMERIC(18,2) GENERATED ALWAYS AS (counted_cash - system_cash) STORED,
+    flagged BOOLEAN NOT NULL DEFAULT FALSE,   -- 超過門檻
+    note TEXT,                                 -- 超過時必填
+    closed_by UUID NOT NULL,
+    closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by UUID, updated_by UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, location_id, business_date)
+  );
+
+  -- tenant_settings 新增
+  -- reconcile_threshold_absolute NUMERIC(18,2) DEFAULT 100
+  -- reconcile_threshold_ratio NUMERIC(5,4) DEFAULT 0.0100
+  ```
+- [x] **Q12 舊單資料遷移**：→ **直接切換、不搬**。（2026-04-21）
+
+  **策略**：與庫存 Q8、採購 Q10 一致：
+  - 舊未結 SO / 未收應收 → 繼續在舊系統追到結清
+  - 新系統從 cut-over 後的新訂單開始
+  - 舊系統唯讀保留 1~3 個月自然清空
+  - 免掉雙系統對帳、資料清洗、漏單 / 重複風險
 
 ---
 
