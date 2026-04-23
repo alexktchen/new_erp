@@ -4,8 +4,8 @@ module: Notification
 status: draft-v0.2
 owner: www161616
 created: 2026-04-21
-updated: 2026-04-21
-tags: [PRD, ERP, 通知, Notification, LINE, OA, Franchise]
+updated: 2026-04-23
+tags: [PRD, ERP, 通知, Notification, LINE, OA, Franchise, c混合型]
 ---
 
 # PRD — 通知模組（Notification Module）
@@ -14,6 +14,7 @@ tags: [PRD, ERP, 通知, Notification, LINE, OA, Franchise]
 > 本模組負責「何時、對誰、透過什麼管道、發什麼訊息」，以及「送達 / 失敗 / 重試」的稽核。
 > **核心設計：每加盟店獨立申請並維護自己的 LINE OA，自行決定通知啟用範圍與成本。**
 > v0.2 checklist 版（Q1~Q12 全數決策）。
+> **決策基準**：[[decisions/2026-04-23-系統立場-混合型]] C 混合型 — 本模組 Q12 per-store OA 模式（full/simple/none）是此立場的首個落地範例。
 
 ---
 
