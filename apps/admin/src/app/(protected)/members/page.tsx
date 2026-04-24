@@ -1,10 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { Modal } from "@/components/Modal";
 import { MemberForm, type MemberFormValues } from "@/components/MemberForm";
+import { MemberDetail } from "@/components/MemberDetail";
 
 type Status = "active" | "inactive" | "blocked" | "merged" | "deleted";
 type SortKey = "updated_at" | "member_no" | "name";
@@ -60,7 +60,12 @@ export default function MembersListPage() {
   const [stores, setStores] = useState<Store[]>([]);
   const [balances, setBalances] = useState<Map<number, { points: number; wallet: number }>>(new Map());
   const [reloadTick, setReloadTick] = useState(0);
-  const [modal, setModal] = useState<{ mode: "new" } | { mode: "edit"; values: MemberFormValues } | null>(null);
+  const [modal, setModal] = useState<
+    | { mode: "new" }
+    | { mode: "edit"; values: MemberFormValues }
+    | { mode: "detail"; memberId: number; memberNo: string }
+    | null
+  >(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -267,9 +272,12 @@ export default function MembersListPage() {
                 return (
                   <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
                     <Td className="font-mono">
-                      <Link href={`/members/detail?id=${r.id}`} className="hover:underline">
+                      <button
+                        onClick={() => setModal({ mode: "detail", memberId: r.id, memberNo: r.member_no })}
+                        className="hover:underline"
+                      >
                         {r.member_no}
-                      </Link>
+                      </button>
                     </Td>
                     <Td>
                       <div className="flex items-center gap-2">
@@ -328,15 +336,22 @@ export default function MembersListPage() {
       <Modal
         open={!!modal}
         onClose={() => setModal(null)}
-        title={modal?.mode === "edit" ? `編輯會員 #${modal.values.member_no}` : "新增會員"}
+        title={
+          modal?.mode === "edit"   ? `編輯會員 #${modal.values.member_no}` :
+          modal?.mode === "detail" ? `會員明細 #${modal.memberNo}` :
+          "新增會員"
+        }
+        maxWidth={modal?.mode === "detail" ? "max-w-4xl" : "max-w-3xl"}
       >
-        {modal && (
+        {modal?.mode === "detail" ? (
+          <MemberDetail memberId={modal.memberId} />
+        ) : modal ? (
           <MemberForm
             initial={modal.mode === "edit" ? modal.values : undefined}
             onSaved={() => { setModal(null); setReloadTick((t) => t + 1); }}
             onCancel={() => setModal(null)}
           />
-        )}
+        ) : null}
       </Modal>
 
       {totalPages > 1 && (

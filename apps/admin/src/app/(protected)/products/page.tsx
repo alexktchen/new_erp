@@ -77,7 +77,7 @@ export default function ProductListPage() {
       setError(err?.message ?? "找不到此商品");
       return;
     }
-    const d = data as {
+    const d = data as unknown as {
       id: number; product_code: string; name: string; short_name: string | null;
       brand_id: number | null; category_id: number | null; description: string | null;
       status: ProductFormValues["status"]; images: string[] | null;
