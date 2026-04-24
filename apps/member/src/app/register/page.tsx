@@ -17,18 +17,18 @@ export default function RegisterPage() {
   const [submitting, setSubmitting] = useState(false);
 
   const [phone, setPhone] = useState("");
-  const [lastName, setLastName] = useState("");
+  const [name, setName] = useState("");
   const [birthday, setBirthday] = useState("");
 
   const [lineName, setLineName] = useState<string | null>(null);
   const [linePicture, setLinePicture] = useState<string | null>(null);
+  const [lineUserId, setLineUserId] = useState<string | null>(null);
+  const [storeId, setStoreId] = useState<string | null>(null);
 
   // 已是會員的確認狀態
   const [lookup, setLookup] = useState<LookupRow | null>(null);
-  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
-    // 從 fragment 取 token + LINE 個資（由 Edge Function redirect 帶回）
     consumeFragmentToSession();
     const s = getSession();
     if (!s) {
@@ -36,19 +36,18 @@ export default function RegisterPage() {
       return;
     }
     if (s.bound) {
-      // 已綁定，應不在此頁；導回 /me
       window.location.href = "/me";
       return;
     }
-    // 預填 LINE 顯示名稱到姓氏欄（使用者可改）
-    if (s.lineName) setLastName(s.lineName);
+    if (s.lineName) setName(s.lineName);
     setLineName(s.lineName);
     setLinePicture(s.linePicture);
+    setLineUserId(s.lineUserId);
+    setStoreId(s.storeId);
     setReady(true);
   }, []);
 
   async function onCheckPhone() {
-    // 空白時靜默 skip（不顯錯）—— 使用者可能只是 tab 過去
     if (!phone.trim()) return;
     setError(null);
     const s = getSession();
@@ -59,14 +58,7 @@ export default function RegisterPage() {
     if (e) return setError(e.message);
 
     const row = (data as LookupRow[])?.[0] ?? null;
-    if (row) {
-      setLookup(row);
-      setConfirming(true);
-    } else {
-      // 不是既有會員，走新建流程（直接顯示姓名/生日欄位，維持現狀）
-      setLookup(null);
-      setConfirming(false);
-    }
+    setLookup(row);
   }
 
   async function onSubmit(e: React.FormEvent) {
@@ -75,10 +67,10 @@ export default function RegisterPage() {
     const s = getSession();
     if (!s) return setError("session 失效");
 
-    // 新建會員必填姓 + 生日；確認既有會員只要手機
+    if (!phone.trim()) return setError("請輸入手機號碼");
     if (!lookup) {
-      if (!lastName.trim()) return setError("請輸入姓氏");
-      if (!birthday) return setError("請輸入生日");
+      if (!name.trim()) return setError("請輸入姓名");
+      if (!birthday) return setError("請選擇生日");
     }
 
     setSubmitting(true);
@@ -86,14 +78,13 @@ export default function RegisterPage() {
       const sb = getSupabase(s.token);
       const { data, error: e } = await sb.rpc("rpc_liff_register_and_bind", {
         p_phone: phone.trim(),
-        p_last_name: lookup ? "" : lastName.trim(),
+        p_last_name: lookup ? "" : name.trim(),
         p_birthday: lookup ? null : birthday,
       });
       if (e) throw e;
       const row = (data as Array<{ member_id: number; is_new_member: boolean; was_bound: boolean }>)?.[0];
       if (!row) throw new Error("unexpected empty response");
 
-      // 綁定成功 → /me（重新跑 oauth 拿完整 member JWT；或直接用現有 pending jwt 到 me 頁再換）
       window.location.href = `/me?member_id=${row.member_id}`;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -110,20 +101,39 @@ export default function RegisterPage() {
     );
   }
 
+  const hasLineInfo = lineName || linePicture || lineUserId;
+
   return (
     <main className="mx-auto flex w-full max-w-md flex-col gap-5 p-6 pt-10">
       <h1 className="text-xl font-semibold">完成會員註冊</h1>
 
-      {lineName && (
-        <div className="flex items-center gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-700 dark:bg-zinc-900">
-          {linePicture && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={linePicture} alt="" className="h-10 w-10 rounded-full" />
-          )}
-          <div>
-            <div className="text-xs text-zinc-500">以 LINE 帳號</div>
-            <div className="font-medium">{lineName}</div>
+      {/* LINE 資訊預覽卡 */}
+      {hasLineInfo && (
+        <div className="rounded-md border border-[#06C755]/30 bg-[#06C755]/5 p-4 text-sm">
+          <div className="mb-3 flex items-center gap-3">
+            {linePicture && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={linePicture} alt="" className="h-12 w-12 rounded-full" />
+            )}
+            <div>
+              <div className="text-xs text-zinc-500">已透過 LINE 驗證</div>
+              <div className="text-base font-semibold">{lineName ?? "(未提供)"}</div>
+            </div>
           </div>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-zinc-600 dark:text-zinc-300">
+            {lineUserId && (
+              <>
+                <dt className="text-zinc-400">LINE ID</dt>
+                <dd className="font-mono break-all">{lineUserId}</dd>
+              </>
+            )}
+            {storeId && (
+              <>
+                <dt className="text-zinc-400">門市代號</dt>
+                <dd>{storeId}</dd>
+              </>
+            )}
+          </dl>
         </div>
       )}
 
@@ -133,12 +143,14 @@ export default function RegisterPage() {
 
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
         <label className="flex flex-col gap-1">
-          <span className="text-sm font-medium">手機號碼</span>
+          <span className="text-sm font-medium">
+            手機號碼 <span className="text-xs text-zinc-400">（LINE 無法提供，請手動輸入）</span>
+          </span>
           <input
             type="tel"
             inputMode="numeric"
             value={phone}
-            onChange={(e) => { setPhone(e.target.value); setConfirming(false); setLookup(null); }}
+            onChange={(e) => { setPhone(e.target.value); setLookup(null); }}
             onBlur={onCheckPhone}
             placeholder="0912345678"
             className="rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none"
@@ -146,7 +158,7 @@ export default function RegisterPage() {
           />
         </label>
 
-        {confirming && lookup && (
+        {lookup && (
           <div className="rounded-md border border-green-300 bg-green-50 p-3 text-sm text-green-900">
             <p className="font-medium">偵測到您已是會員</p>
             <p className="mt-1">姓名：{lookup.name_masked ?? "—"}</p>
@@ -158,12 +170,15 @@ export default function RegisterPage() {
         {!lookup && (
           <>
             <label className="flex flex-col gap-1">
-              <span className="text-sm font-medium">姓氏</span>
+              <span className="text-sm font-medium">
+                姓名
+                {lineName && <span className="ml-2 text-xs text-[#06C755]">✓ 已由 LINE 帶入，可修改</span>}
+              </span>
               <input
                 type="text"
-                value={lastName}
-                onChange={(e) => setLastName(e.target.value)}
-                placeholder="王"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="王小明"
                 className="rounded-md border border-zinc-300 px-3 py-2 text-sm"
                 required
               />
@@ -186,8 +201,12 @@ export default function RegisterPage() {
           disabled={submitting}
           className="mt-2 rounded-md bg-[#06C755] px-4 py-3 text-sm font-medium text-white shadow hover:bg-[#05b04c] disabled:opacity-50"
         >
-          {submitting ? "處理中…" : lookup ? "確認綁定" : "建立會員"}
+          {submitting ? "處理中…" : lookup ? "確認綁定此 LINE" : "建立會員並綁定 LINE"}
         </button>
+
+        <p className="text-center text-xs text-zinc-400">
+          送出後將在 ERP 系統建立會員資料、並與您的 LINE 帳號永久綁定。
+        </p>
       </form>
     </main>
   );
