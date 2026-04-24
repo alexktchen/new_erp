@@ -411,3 +411,7 @@ verify_jwt = false
 
 [functions.line-oauth-callback]
 verify_jwt = false
+
+# liff-api 收我們自己簽的 HS256 token、在函式內自行驗，Supabase 預設驗會擋
+[functions.liff-api]
+verify_jwt = false

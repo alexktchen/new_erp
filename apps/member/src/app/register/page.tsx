@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
-import { getSupabase } from "@/lib/supabase";
+import { callLiffApi } from "@/lib/supabase";
 
 type LookupRow = {
   member_id: number;
@@ -53,12 +53,15 @@ export default function RegisterPage() {
     const s = getSession();
     if (!s) return setError("session 失效");
 
-    const sb = getSupabase(s.token);
-    const { data, error: e } = await sb.rpc("rpc_liff_lookup_by_phone", { p_phone: phone.trim() });
-    if (e) return setError(e.message);
-
-    const row = (data as LookupRow[])?.[0] ?? null;
-    setLookup(row);
+    try {
+      const resp = await callLiffApi<{ match: LookupRow | null }>(s.token, {
+        action: "lookup_by_phone",
+        phone: phone.trim(),
+      });
+      setLookup(resp.match);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function onSubmit(e: React.FormEvent) {
@@ -75,17 +78,17 @@ export default function RegisterPage() {
 
     setSubmitting(true);
     try {
-      const sb = getSupabase(s.token);
-      const { data, error: e } = await sb.rpc("rpc_liff_register_and_bind", {
-        p_phone: phone.trim(),
-        p_last_name: lookup ? "" : name.trim(),
-        p_birthday: lookup ? null : birthday,
+      const resp = await callLiffApi<{
+        member_id: number;
+        is_new_member: boolean;
+        was_bound: boolean;
+      }>(s.token, {
+        action: "register_and_bind",
+        phone: phone.trim(),
+        name: lookup ? "" : name.trim(),
+        birthday: lookup ? "" : birthday,
       });
-      if (e) throw e;
-      const row = (data as Array<{ member_id: number; is_new_member: boolean; was_bound: boolean }>)?.[0];
-      if (!row) throw new Error("unexpected empty response");
-
-      window.location.href = `/me?member_id=${row.member_id}`;
+      window.location.href = `/me?member_id=${resp.member_id}`;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
