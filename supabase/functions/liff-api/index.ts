@@ -52,6 +52,8 @@ Deno.serve(async (req) => {
       { auth: { persistSession: false, autoRefreshToken: false } },
     );
 
+    const memberId = claims.member_id ? Number(claims.member_id) : null;
+
     // ── dispatch ──
     switch (action) {
       case "lookup_by_phone":
@@ -64,6 +66,17 @@ Deno.serve(async (req) => {
           phone:    String(body.phone ?? ""),
           name:     String(body.name  ?? ""),
           birthday: String(body.birthday ?? ""),
+        });
+      case "get_me":
+        if (!memberId) return json({ error: "no member_id in token" }, 401);
+        return await getMe(sb, tenantId, memberId);
+      case "update_me":
+        if (!memberId) return json({ error: "no member_id in token" }, 401);
+        return await updateMe(sb, tenantId, memberId, {
+          phone:    body.phone    as string | undefined,
+          name:     body.name     as string | undefined,
+          birthday: body.birthday as string | undefined,
+          email:    body.email    as string | undefined,
         });
       default:
         return json({ error: `unknown action: ${action}` }, 400);
@@ -223,6 +236,133 @@ async function registerAndBind(
     is_new_member:  isNewMember,
     was_bound:      wasBound,
   });
+}
+
+async function getMe(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+  memberId: number,
+) {
+  const { data, error } = await sb
+    .from("members")
+    .select("id, member_no, name, phone, email, birthday, gender, home_store_id, avatar_url, status")
+    .eq("tenant_id", tenantId)
+    .eq("id", memberId)
+    .single();
+
+  if (error) return json({ error: error.message }, 500);
+
+  const row = data as {
+    id: number;
+    member_no: string;
+    name: string | null;
+    phone: string | null;
+    email: string | null;
+    birthday: string | null;
+    gender: string | null;
+    home_store_id: number | null;
+    avatar_url: string | null;
+    status: string;
+  };
+
+  return json({
+    member_id:     row.id,
+    member_no:     row.member_no,
+    name:          row.name,
+    phone:         row.phone?.startsWith("line:") ? null : row.phone,  // 隱藏 placeholder
+    email:         row.email,
+    birthday:      row.birthday,
+    gender:        row.gender,
+    home_store_id: row.home_store_id,
+    avatar_url:    row.avatar_url,
+    status:        row.status,
+  });
+}
+
+async function updateMe(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+  memberId: number,
+  p: {
+    phone?:    string;
+    name?:     string;
+    birthday?: string;
+    email?:    string;
+  },
+) {
+  // 組更新內容、空值不動
+  const patch: Record<string, unknown> = {};
+
+  if (p.name !== undefined) {
+    const n = p.name.trim();
+    if (!n) return json({ error: "name cannot be empty" }, 400);
+    patch.name = n;
+  }
+
+  if (p.phone !== undefined) {
+    const ph = p.phone.trim();
+    if (ph) {
+      // 檢查格式（台灣手機：09 開頭 10 位）
+      if (!/^09\d{8}$/.test(ph)) {
+        return json({ error: "phone format invalid，台灣手機請用 09xxxxxxxx" }, 400);
+      }
+      const newHash = await sha256Hex(ph);
+      // 檢查 phone_hash unique（同 tenant 除了自己以外）
+      const { data: conflict } = await sb
+        .from("members")
+        .select("id")
+        .eq("tenant_id", tenantId)
+        .eq("phone_hash", newHash)
+        .neq("id", memberId)
+        .limit(1);
+      if (conflict && conflict.length > 0) {
+        return json({ error: "此手機號已被其他會員使用" }, 409);
+      }
+      patch.phone = ph;
+      patch.phone_hash = newHash;
+    }
+    // 空白 → 不改（避免誤清）
+  }
+
+  if (p.birthday !== undefined) {
+    const b = p.birthday.trim();
+    if (b) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(b)) {
+        return json({ error: "birthday format must be YYYY-MM-DD" }, 400);
+      }
+      patch.birthday = b;
+      patch.birth_md = b.slice(5, 10);
+    }
+  }
+
+  if (p.email !== undefined) {
+    const em = p.email.trim();
+    if (em) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) {
+        return json({ error: "email format invalid" }, 400);
+      }
+      patch.email = em;
+      patch.email_hash = await sha256Hex(em.toLowerCase());
+    } else {
+      patch.email = null;
+      patch.email_hash = null;
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return json({ error: "nothing to update" }, 400);
+  }
+
+  patch.updated_at = new Date().toISOString();
+
+  const { error } = await sb
+    .from("members")
+    .update(patch)
+    .eq("tenant_id", tenantId)
+    .eq("id", memberId);
+
+  if (error) return json({ error: error.message }, 500);
+  return json({ ok: true });
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
