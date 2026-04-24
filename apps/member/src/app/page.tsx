@@ -11,75 +11,57 @@ export default function LandingPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const sp = new URLSearchParams(window.location.search);
-    const s = sp.get("store");
-    const err = sp.get("error");
-    if (err) setError(err);
-    setStoreId(s);
-
-    if (!s) {
-      setStatus("idle");
-      return;
-    }
-
-    // 偵測 LIFF 環境；在 LINE 內 → 自動登入 + auto-register，完全跳過按鈕
-    const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
-    if (!liffId) {
-      setStatus("idle");
-      return;
-    }
-
     (async () => {
-      try {
-        const liffModule = await import("@line/liff");
-        const liff = liffModule.default;
-        await liff.init({ liffId });
+      const errInUrl = new URLSearchParams(window.location.search).get("error");
+      if (errInUrl) setError(errInUrl);
 
-        if (!liff.isInClient()) {
-          // 正常瀏覽器 → 走 OAuth 按鈕流程
+      const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
+
+      // 若有 LIFF ID → 先跑 liff.init()，它會把 liff.state 裡的 query 還原回 URL
+      if (liffId) {
+        try {
+          const liffModule = await import("@line/liff");
+          const liff = liffModule.default;
+          await liff.init({ liffId });
+
+          // init 完後才讀 URL（liff.state 已還原）
+          const s = readStore();
+          setStoreId(s);
+
+          if (!s) {
+            setStatus("idle");
+            return;
+          }
+
+          if (liff.isInClient()) {
+            // 在 LINE 內 → 自動完成登入 + 註冊
+            setStatus("liff_auth");
+
+            if (!liff.isLoggedIn()) {
+              liff.login();
+              return;
+            }
+
+            const idToken = liff.getIDToken();
+            if (!idToken) throw new Error("LIFF getIDToken returned null");
+
+            await runLiffSession(idToken, s);
+            return;
+          }
+
+          // 不在 LINE 內（直接打網址）→ 維持 OAuth 按鈕流程
           setStatus("idle");
           return;
+        } catch (e) {
+          console.warn("liff init failed, falling back:", e);
+          // fall-through 到一般流程
         }
-
-        setStatus("liff_auth");
-
-        if (!liff.isLoggedIn()) {
-          liff.login();  // 會重導；回來時會走進 if(isLoggedIn) 分支
-          return;
-        }
-
-        const idToken = liff.getIDToken();
-        if (!idToken) throw new Error("LIFF getIDToken returned null");
-
-        const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
-        if (!base) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
-
-        const resp = await fetch(`${base}/functions/v1/liff-session`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id_token: idToken, store: s }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          throw new Error((data as { error?: string; detail?: string }).detail
-            ?? (data as { error?: string }).error
-            ?? `liff-session ${resp.status}`);
-        }
-
-        const frag = new URLSearchParams({
-          token:    String(data.token),
-          store:    String(data.store),
-          bound:    "1",
-          member_id: String(data.member_id),
-          line_user_id: String(data.line_user_id ?? ""),
-        });
-        if (data.line_name)    frag.set("line_name",    String(data.line_name));
-        if (data.line_picture) frag.set("line_picture", String(data.line_picture));
-        window.location.href = `/me#${frag.toString()}`;
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        setStatus("error");
       }
+
+      // 無 LIFF ID 或 init 失敗 → 普通瀏覽器流程
+      const s = readStore();
+      setStoreId(s);
+      setStatus("idle");
     })();
   }, []);
 
@@ -128,4 +110,49 @@ export default function LandingPage() {
       </p>
     </main>
   );
+}
+
+function readStore(): string | null {
+  // liff.init 後 liff.state 已展開；直接讀 search
+  const sp = new URLSearchParams(window.location.search);
+  const s = sp.get("store");
+  if (s) return s;
+
+  // 備援：少數情境 liff.init 沒展開時、自己從 liff.state 解
+  const raw = sp.get("liff.state");
+  if (raw) {
+    const inner = new URLSearchParams(raw.startsWith("?") ? raw.slice(1) : raw);
+    return inner.get("store");
+  }
+  return null;
+}
+
+async function runLiffSession(idToken: string, storeId: string) {
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!base) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
+
+  const resp = await fetch(`${base}/functions/v1/liff-session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id_token: idToken, store: storeId }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(
+      (data as { error?: string; detail?: string }).detail
+      ?? (data as { error?: string }).error
+      ?? `liff-session ${resp.status}`,
+    );
+  }
+
+  const frag = new URLSearchParams({
+    token:        String(data.token),
+    store:        String(data.store),
+    bound:        "1",
+    member_id:    String(data.member_id),
+    line_user_id: String(data.line_user_id ?? ""),
+  });
+  if (data.line_name)    frag.set("line_name",    String(data.line_name));
+  if (data.line_picture) frag.set("line_picture", String(data.line_picture));
+  window.location.href = `/me#${frag.toString()}`;
 }
