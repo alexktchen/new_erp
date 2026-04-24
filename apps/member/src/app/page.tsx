@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { lineOauthStartUrl } from "@/lib/supabase";
+import { loadLiff } from "@/lib/liff";
 
 type Status = "loading" | "idle" | "liff_auth" | "error";
 
@@ -20,8 +21,7 @@ export default function LandingPage() {
       // 若有 LIFF ID → 先跑 liff.init()，它會把 liff.state 裡的 query 還原回 URL
       if (liffId) {
         try {
-          const liffModule = await import("@line/liff");
-          const liff = liffModule.default;
+          const liff = await loadLiff();
           await liff.init({ liffId });
 
           // init 完後才讀 URL（liff.state 已還原）
