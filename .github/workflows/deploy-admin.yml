@@ -30,7 +30,10 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - run: npm ci
+      # Use `npm install` instead of `npm ci` because the monorepo may contain
+      # workspaces (e.g. apps/member) that aren't yet in package-lock.json.
+      # For admin deploy we only need deterministic install of admin itself.
+      - run: npm install --no-audit --no-fund
 
       - name: Build admin (static export)
         working-directory: apps/admin
