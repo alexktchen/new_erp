@@ -1,14 +1,20 @@
-// Session helpers — 從 URL fragment 抓 token，存 sessionStorage
+// Session helpers — 從 URL fragment 抓 token + LINE 個資，存 sessionStorage
 
-const TOKEN_KEY = "member_jwt";
-const STORE_KEY = "member_store_id";
-const MEMBER_KEY = "member_id";
+const TOKEN_KEY    = "member_jwt";
+const STORE_KEY    = "member_store_id";
+const MEMBER_KEY   = "member_id";
+const LINE_UID_KEY = "line_user_id";
+const LINE_NAME_KEY    = "line_name";
+const LINE_PIC_KEY     = "line_picture";
 
 export type Session = {
   token: string;
   storeId: string;
   memberId: number | null;
   bound: boolean;
+  lineUserId: string | null;
+  lineName: string | null;
+  linePicture: string | null;
 };
 
 /** 從 URL fragment 解出 session，存入 sessionStorage，並清理 URL。 */
@@ -21,17 +27,31 @@ export function consumeFragmentToSession(): Session | null {
   const store = p.get("store");
   if (!token || !store) return null;
 
-  const memberId = p.get("member_id") ? Number(p.get("member_id")) : null;
-  const bound = p.get("bound") === "1";
+  const memberId    = p.get("member_id") ? Number(p.get("member_id")) : null;
+  const bound       = p.get("bound") === "1";
+  const lineUserId  = p.get("line_user_id");
+  const lineName    = p.get("line_name");
+  const linePicture = p.get("line_picture");
 
   sessionStorage.setItem(TOKEN_KEY, token);
   sessionStorage.setItem(STORE_KEY, store);
-  if (memberId) sessionStorage.setItem(MEMBER_KEY, String(memberId));
+  if (memberId)    sessionStorage.setItem(MEMBER_KEY, String(memberId));
+  if (lineUserId)  sessionStorage.setItem(LINE_UID_KEY, lineUserId);
+  if (lineName)    sessionStorage.setItem(LINE_NAME_KEY, lineName);
+  if (linePicture) sessionStorage.setItem(LINE_PIC_KEY, linePicture);
 
   // 清 fragment，避免 refresh / 分享外洩
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
 
-  return { token, storeId: store, memberId, bound };
+  return {
+    token,
+    storeId: store,
+    memberId,
+    bound,
+    lineUserId,
+    lineName,
+    linePicture,
+  };
 }
 
 export function getSession(): Session | null {
@@ -45,12 +65,14 @@ export function getSession(): Session | null {
     storeId,
     memberId: mid ? Number(mid) : null,
     bound: !!mid,
+    lineUserId:  sessionStorage.getItem(LINE_UID_KEY),
+    lineName:    sessionStorage.getItem(LINE_NAME_KEY),
+    linePicture: sessionStorage.getItem(LINE_PIC_KEY),
   };
 }
 
 export function clearSession() {
   if (typeof window === "undefined") return;
-  sessionStorage.removeItem(TOKEN_KEY);
-  sessionStorage.removeItem(STORE_KEY);
-  sessionStorage.removeItem(MEMBER_KEY);
+  [TOKEN_KEY, STORE_KEY, MEMBER_KEY, LINE_UID_KEY, LINE_NAME_KEY, LINE_PIC_KEY]
+    .forEach((k) => sessionStorage.removeItem(k));
 }

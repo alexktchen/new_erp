@@ -107,6 +107,9 @@ Deno.serve(async (req) => {
       store: storeId,
     });
     if (memberId) params.set("member_id", String(memberId));
+    if (payload.name) params.set("line_name", payload.name);
+    if (payload.picture) params.set("line_picture", payload.picture);
+    params.set("line_user_id", lineUserId);
     return redirectFrontWithFragment(
       bound ? "/me" : "/register",
       params.toString() + `&token=${encodeURIComponent(jwt)}`,

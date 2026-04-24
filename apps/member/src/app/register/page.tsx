@@ -20,12 +20,15 @@ export default function RegisterPage() {
   const [lastName, setLastName] = useState("");
   const [birthday, setBirthday] = useState("");
 
+  const [lineName, setLineName] = useState<string | null>(null);
+  const [linePicture, setLinePicture] = useState<string | null>(null);
+
   // 已是會員的確認狀態
   const [lookup, setLookup] = useState<LookupRow | null>(null);
   const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
-    // 從 fragment 取 token（由 Edge Function redirect 帶回）
+    // 從 fragment 取 token + LINE 個資（由 Edge Function redirect 帶回）
     consumeFragmentToSession();
     const s = getSession();
     if (!s) {
@@ -37,6 +40,10 @@ export default function RegisterPage() {
       window.location.href = "/me";
       return;
     }
+    // 預填 LINE 顯示名稱到姓氏欄（使用者可改）
+    if (s.lineName) setLastName(s.lineName);
+    setLineName(s.lineName);
+    setLinePicture(s.linePicture);
     setReady(true);
   }, []);
 
@@ -106,6 +113,19 @@ export default function RegisterPage() {
   return (
     <main className="mx-auto flex w-full max-w-md flex-col gap-5 p-6 pt-10">
       <h1 className="text-xl font-semibold">完成會員註冊</h1>
+
+      {lineName && (
+        <div className="flex items-center gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-700 dark:bg-zinc-900">
+          {linePicture && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={linePicture} alt="" className="h-10 w-10 rounded-full" />
+          )}
+          <div>
+            <div className="text-xs text-zinc-500">以 LINE 帳號</div>
+            <div className="font-medium">{lineName}</div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
