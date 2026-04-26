@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
+import { OrderTransferModal } from "@/components/OrderTransferModal";
 
 type OrderHead = {
   id: number;
@@ -37,6 +38,7 @@ type TimelineStep = {
   done: boolean;
   detail?: string;
   detailHref?: string;
+  detailOnClick?: () => void;
 };
 
 function staffLabel(uid: string | null, names: Map<string, string>): string {
@@ -48,12 +50,20 @@ function fmtDt(iso: string): string {
   return new Date(iso).toLocaleString("zh-TW", { hour12: false });
 }
 
-export function OrderDetail({ orderId }: { orderId: number }) {
+export function OrderDetail({
+  orderId,
+  onNavigate,
+}: {
+  orderId: number;
+  onNavigate?: (orderId: number, orderNo: string) => void;
+}) {
   const [head, setHead] = useState<OrderHead | null>(null);
   const [items, setItems] = useState<ItemRow[] | null>(null);
   const [timeline, setTimeline] = useState<TimelineStep[] | null>(null);
   const [staffNames, setStaffNames] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
+  const [transferOpen, setTransferOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,11 +105,11 @@ export function OrderDetail({ orderId }: { orderId: number }) {
 
       // ========== 載入 timeline ==========
       const skuIds = itemsData.map((it) => it.sku?.id).filter((x): x is number => !!x);
-      const tl = await buildTimeline(headData, skuIds);
+      const tl = await buildTimeline(headData, skuIds, onNavigate);
       if (!cancelled) setTimeline(tl);
     })();
     return () => { cancelled = true; };
-  }, [orderId]);
+  }, [orderId, reloadTick]);
 
   if (error) {
     return (
@@ -113,8 +123,31 @@ export function OrderDetail({ orderId }: { orderId: number }) {
   const totalQty = items.reduce((s, i) => s + Number(i.qty), 0);
   const totalAmount = items.reduce((s, i) => s + Number(i.qty) * Number(i.unit_price), 0);
 
+  const canTransfer = ["pending", "confirmed", "reserved"].includes(head.status);
+  const isTransferredOut = head.status === "transferred_out";
+  const memberLabel = head.member
+    ? `${head.member.name ?? "—"} (${head.member.member_no})`
+    : `(${head.nickname_snapshot ?? "—"})`;
+
   return (
     <div className="space-y-4 text-sm">
+      {(canTransfer || isTransferredOut) && (
+        <div className="flex items-center justify-end gap-2">
+          {canTransfer && (
+            <button
+              onClick={() => setTransferOpen(true)}
+              className="rounded-md border border-blue-300 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950"
+              title="客人棄單 / 轉到其他店店長 / 互助接手"
+            >
+              ↗ 轉出此訂單
+            </button>
+          )}
+          {isTransferredOut && (
+            <span className="text-xs text-zinc-500">⚠️ 此訂單已轉出</span>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Field label="訂單號" value={<span className="font-mono">{head.order_no}</span>} />
         <Field label="狀態" value={head.status} />
@@ -196,6 +229,20 @@ export function OrderDetail({ orderId }: { orderId: number }) {
           ※ 同顧客在同活動連 key 多次會合併到同一筆，舊 qty 被新值覆寫。如需「每次 +N 紀錄」請告知改完整版（加 append-only audit table）。
         </p>
       </div>
+
+      <OrderTransferModal
+        open={transferOpen}
+        onClose={() => setTransferOpen(false)}
+        orderId={head.id}
+        orderNo={head.order_no}
+        currentPickupStoreId={head.pickup_store_id}
+        currentMemberLabel={memberLabel}
+        onSubmitted={(newId) => {
+          setTransferOpen(false);
+          alert(`訂單已轉出 → 新訂單 #${newId}`);
+          setReloadTick((n) => n + 1);
+        }}
+      />
     </div>
   );
 }
@@ -203,8 +250,50 @@ export function OrderDetail({ orderId }: { orderId: number }) {
 async function buildTimeline(
   head: OrderHead,
   skuIds: number[],
+  onNavigate?: (orderId: number, orderNo: string) => void,
 ): Promise<TimelineStep[]> {
   const sb = getSupabase();
+
+  // transferred_out: 訂單已關閉、流程不再進行；只顯示一個結束 step
+  if (head.status === "transferred_out") {
+    // 找新訂單號做 detail link（從 customer_orders 用 transferred_to_order_id）
+    let newOrderInfo = "已轉出（流程關閉、不入金額統計）";
+    let newOrderHref: string | undefined;
+    let newOrderClick: (() => void) | undefined;
+    const { data: self } = await sb
+      .from("customer_orders")
+      .select("transferred_to_order_id")
+      .eq("id", head.id)
+      .maybeSingle();
+    const newId = (self as { transferred_to_order_id: number | null } | null)?.transferred_to_order_id;
+    if (newId) {
+      const { data: newOrd } = await sb
+        .from("customer_orders")
+        .select("order_no")
+        .eq("id", newId)
+        .maybeSingle();
+      const newNo = (newOrd as { order_no: string } | null)?.order_no;
+      if (newNo) {
+        newOrderInfo = `已轉出 → 新訂單 ${newNo}`;
+        if (onNavigate) {
+          newOrderClick = () => onNavigate(newId, newNo);
+        } else {
+          newOrderHref = `/orders?id=${newId}`;
+        }
+      }
+    }
+    return [
+      {
+        label: "訂單關閉（已轉出）",
+        ts: head.updated_at,
+        done: true,
+        detail: newOrderInfo,
+        detailHref: newOrderHref,
+        detailOnClick: newOrderClick,
+      },
+    ];
+  }
+
   const campaignId = head.campaign_id;
   const storeId = head.pickup_store_id;
   const status = head.status;
@@ -375,7 +464,15 @@ function Timeline({ steps }: { steps: TimelineStep[] | null }) {
                 {s.label}
               </div>
               {s.detail && (
-                s.detailHref ? (
+                s.detailOnClick ? (
+                  <button
+                    type="button"
+                    onClick={s.detailOnClick}
+                    className="text-[10px] font-mono text-blue-600 hover:underline dark:text-blue-400"
+                  >
+                    {s.detail}
+                  </button>
+                ) : s.detailHref ? (
                   <a
                     href={s.detailHref}
                     className="text-[10px] font-mono text-blue-600 hover:underline dark:text-blue-400"
