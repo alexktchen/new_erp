@@ -28,6 +28,12 @@ const NAV: NavGroup[] = [
     title: "進銷存",
     items: [
       { href: "/suppliers", label: "供應商", match: /^\/suppliers/ },
+      { href: "/purchase/requests", label: "採購單", match: /^\/purchase\/requests/ },
+      { href: "/purchase/orders", label: "採購訂單", match: /^\/purchase\/orders/ },
+      { href: "/picking/workstation", label: "撿貨工作站", match: /^\/picking\/workstation/ },
+      { href: "/picking/history", label: "撿貨歷史", match: /^\/picking\/history/ },
+      { href: "/transfers/inbox", label: "收貨待辦", match: /^\/transfers\/inbox/ },
+      { href: "/transfers", label: "調撥單列表", match: /^\/transfers$|^\/transfers\/?$/ },
     ],
   },
 ];

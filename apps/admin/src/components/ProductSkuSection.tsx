@@ -135,8 +135,15 @@ export function ProductSkuSection({
     [pending]
   );
 
-  function startNew() {
-    setDraft({ ...EMPTY_DRAFT });
+  async function startNew() {
+    let code = "";
+    if (productId !== null) {
+      const { data } = await getSupabase().rpc("rpc_next_sku_code", {
+        p_product_id: productId,
+      });
+      if (typeof data === "string") code = data;
+    }
+    setDraft({ ...EMPTY_DRAFT, sku_code: code });
     setEditingTempId(null);
   }
 
@@ -239,6 +246,24 @@ export function ProductSkuSection({
     }
   }
 
+  async function deleteSku(sku: Sku) {
+    if (
+      !confirm(
+        `確定刪除規格「${sku.sku_code}${sku.variant_name ? ` / ${sku.variant_name}` : ""}」？\n（軟刪除：狀態改為「停產」、保留歷史紀錄）`
+      )
+    )
+      return;
+    setError(null);
+    const { error: err } = await getSupabase().rpc("rpc_delete_sku", {
+      p_id: sku.id,
+    });
+    if (err) {
+      setError(err.message);
+      return;
+    }
+    await refresh();
+  }
+
   const isEditingExisting = draft?.id != null;
   const isEditingPending = editingTempId !== null;
   const isAddingNew = draft != null && !isEditingExisting && !isEditingPending;
@@ -247,8 +272,10 @@ export function ProductSkuSection({
     <section className="space-y-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
       <header className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-base font-semibold">規格</h2>
-          <p className="text-xs text-zinc-500">每個規格獨立計庫存與定價。</p>
+          <h2 className="text-base font-semibold">規格 / 品項</h2>
+          <p className="text-xs text-zinc-500">
+            一個商品可有多個規格（口味 / 容量 / 入數），各自獨立計庫存。
+          </p>
         </div>
         {!draft && (
           <button
@@ -288,6 +315,7 @@ export function ProductSkuSection({
               sku={s}
               price={prices[s.id]}
               onEdit={() => startEditExisting(s)}
+              onDelete={() => deleteSku(s)}
             />
           )
         )}
@@ -342,10 +370,12 @@ function SkuCard({
   sku,
   price,
   onEdit,
+  onDelete,
 }: {
   sku: Sku;
   price: number | undefined;
   onEdit: () => void;
+  onDelete: () => void;
 }) {
   return (
     <div className="flex items-center gap-3 rounded-md border border-zinc-200 px-3 py-2 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900">
@@ -369,6 +399,13 @@ function SkuCard({
         className="shrink-0 rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
       >
         編輯
+      </button>
+      <button
+        type="button"
+        onClick={onDelete}
+        className="shrink-0 rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+      >
+        刪除
       </button>
     </div>
   );

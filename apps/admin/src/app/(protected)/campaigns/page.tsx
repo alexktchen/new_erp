@@ -45,6 +45,42 @@ export default function CampaignsListPage() {
     | null
   >(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const [closingId, setClosingId] = useState<number | null>(null);
+  const [finalizingId, setFinalizingId] = useState<number | null>(null);
+
+  async function closeCampaign(id: number, name: string) {
+    if (!confirm(`確定結單「${name}」？結單後可從採購單頁面「帶入該日商品」產生 PR。`)) return;
+    setClosingId(id);
+    try {
+      const { error: rpcErr } = await getSupabase().rpc("rpc_close_campaign", {
+        p_campaign_id: id,
+        p_operator: (await getSupabase().auth.getUser()).data.user?.id,
+      });
+      if (rpcErr) throw new Error(rpcErr.message);
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setClosingId(null);
+    }
+  }
+
+  async function finalizeCampaign(id: number, name: string) {
+    if (!confirm(`整單結算「${name}」？結算後無法復原，請確認所有顧客訂單皆已完成 / 逾期 / 取消。`)) return;
+    setFinalizingId(id);
+    try {
+      const { error: rpcErr } = await getSupabase().rpc("rpc_finalize_campaign", {
+        p_campaign_id: id,
+        p_operator: (await getSupabase().auth.getUser()).data.user?.id,
+      });
+      if (rpcErr) throw new Error(rpcErr.message);
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFinalizingId(null);
+    }
+  }
 
   async function openEdit(id: number) {
     const { data, error: err } = await getSupabase()
@@ -185,12 +221,40 @@ export default function CampaignsListPage() {
                 <Td className="text-right font-mono">{itemCounts.get(r.id) ?? 0}</Td>
                 <Td className="text-right text-xs text-zinc-500">{new Date(r.updated_at).toLocaleString("zh-TW")}</Td>
                 <Td>
-                  <button
-                    onClick={() => openEdit(r.id)}
-                    className="text-xs text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    編輯
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => openEdit(r.id)}
+                      className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      編輯
+                    </button>
+                    {r.status === "open" && (
+                      <a
+                        href={`/campaigns/order-entry?id=${r.id}`}
+                        className="text-xs text-green-600 hover:underline dark:text-green-400"
+                      >
+                        加單
+                      </a>
+                    )}
+                    {r.status === "open" && (
+                      <button
+                        onClick={() => closeCampaign(r.id, r.name)}
+                        disabled={closingId === r.id}
+                        className="text-xs text-amber-600 hover:underline disabled:opacity-50 dark:text-amber-400"
+                      >
+                        {closingId === r.id ? "結單中…" : "結單"}
+                      </button>
+                    )}
+                    {(["closed", "ordered", "receiving", "ready"] as Status[]).includes(r.status) && (
+                      <button
+                        onClick={() => finalizeCampaign(r.id, r.name)}
+                        disabled={finalizingId === r.id}
+                        className="text-xs text-purple-600 hover:underline disabled:opacity-50 dark:text-purple-400"
+                      >
+                        {finalizingId === r.id ? "結算中…" : "結算"}
+                      </button>
+                    )}
+                  </div>
                 </Td>
               </tr>
             ))}
@@ -205,23 +269,29 @@ export default function CampaignsListPage() {
         maxWidth="max-w-4xl"
       >
         {modal?.mode === "new" && (
-          <CampaignForm
-            onSaved={async (id) => {
-              setReloadTick((t) => t + 1);
-              await openEdit(id);
-            }}
-            onCancel={() => setModal(null)}
-          />
+          <div className="space-y-4">
+            <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200">
+              先建立開團 → 自動進入編輯，加入商品明細
+            </div>
+            <CampaignForm
+              onSaved={async (id) => {
+                setReloadTick((t) => t + 1);
+                await openEdit(id);
+              }}
+              onCancel={() => setModal(null)}
+              submitLabel="建立並加商品"
+            />
+          </div>
         )}
         {modal?.mode === "edit" && (
           <div className="space-y-6">
-            <CampaignForm
-              initial={modal.values}
-              onSaved={() => { setModal(null); setReloadTick((t) => t + 1); }}
-              onCancel={() => setModal(null)}
-            />
+            <CampaignItemsTable campaignId={modal.values.id!} />
             <div className="border-t border-zinc-200 pt-4 dark:border-zinc-800">
-              <CampaignItemsTable campaignId={modal.values.id!} />
+              <CampaignForm
+                initial={modal.values}
+                onSaved={() => { setModal(null); setReloadTick((t) => t + 1); }}
+                onCancel={() => setModal(null)}
+              />
             </div>
           </div>
         )}
