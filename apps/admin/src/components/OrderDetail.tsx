@@ -14,6 +14,8 @@ type OrderHead = {
   updated_at: string;
   pickup_store_id: number | null;
   campaign_id: number | null;
+  transferred_from_order_id: number | null;
+  is_air_transfer: boolean | null;
   member: { id: number; name: string | null; phone: string | null; member_no: string } | null;
   campaign: { id: number; campaign_no: string; name: string } | null;
   store: { id: number; name: string } | null;
@@ -71,7 +73,7 @@ export function OrderDetail({
       const sb = getSupabase();
       const [hRes, iRes] = await Promise.all([
         sb.from("customer_orders")
-          .select("id, order_no, status, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
+          .select("id, order_no, status, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, transferred_from_order_id, is_air_transfer, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
           .eq("id", orderId).maybeSingle(),
         sb.from("customer_order_items")
           .select("id, qty, unit_price, status, source, created_at, updated_at, created_by, updated_by, sku:skus(id, sku_code, product_name, variant_name)")
@@ -291,6 +293,52 @@ async function buildTimeline(
         detailHref: newOrderHref,
         detailOnClick: newOrderClick,
       },
+    ];
+  }
+
+  // transferred-in: 從別張訂單轉進來（5b-1 整單轉 / 5c partial 拆單）
+  // 不走採購／撿貨／派貨流程，改顯示「轉出店 → 運送中 → 分店收貨 → 顧客取貨」
+  if (head.transferred_from_order_id) {
+    const { data: src } = await sb
+      .from("customer_orders")
+      .select("id, order_no, pickup_store_id, store:stores!customer_orders_pickup_store_id_fkey(name)")
+      .eq("id", head.transferred_from_order_id)
+      .maybeSingle();
+    type SrcRow = { id: number; order_no: string; pickup_store_id: number | null; store: { name: string } | { name: string }[] | null };
+    const s = src as unknown as SrcRow | null;
+    const srcStoreName = s?.store
+      ? (Array.isArray(s.store) ? s.store[0]?.name : s.store.name) ?? "—"
+      : "—";
+    const srcDetail = s ? `來源：${srcStoreName} 訂單 ${s.order_no}` : `來源訂單 #${head.transferred_from_order_id}`;
+    const srcHref = s ? `/orders?id=${s.id}` : undefined;
+    const srcClick = (s && onNavigate) ? () => onNavigate(s.id, s.order_no) : undefined;
+
+    const pickedUp = head.status === "completed" || head.status === "picked_up";
+    const sourceStep: TimelineStep = {
+      label: "轉出店",
+      ts: head.created_at,
+      done: true,
+      detail: srcDetail,
+      detailHref: onNavigate ? undefined : srcHref,
+      detailOnClick: srcClick,
+    };
+    const customerStep: TimelineStep = { label: "顧客取貨", ts: null, done: pickedUp, detail: head.status };
+
+    if (head.is_air_transfer) {
+      // 空中轉：店對店直送
+      return [
+        sourceStep,
+        { label: "分店收貨", ts: null, done: false, detail: "（空中轉、暫無系統紀錄）" },
+        customerStep,
+      ];
+    }
+    // 非空中轉：經總倉
+    return [
+      sourceStep,
+      { label: "總倉收到", ts: null, done: false, detail: "（暫無系統紀錄）" },
+      { label: "運送中", ts: null, done: false, detail: "（總倉出貨）" },
+      { label: "分店收貨", ts: null, done: false, detail: "（暫無系統紀錄）" },
+      customerStep,
     ];
   }
 
