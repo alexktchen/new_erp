@@ -115,7 +115,7 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
         <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
           <thead className="bg-zinc-50 dark:bg-zinc-900">
             <tr>
-              <Th>SKU</Th><Th>名稱</Th><Th className="text-right">單價</Th><Th className="text-right">量上限</Th><Th>{""}</Th>
+              <Th>規格</Th><Th>名稱</Th><Th className="text-right">單價</Th><Th className="text-right">量上限</Th><Th>{""}</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
@@ -150,18 +150,18 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
       <div className="rounded-md border border-dashed border-zinc-300 p-3 dark:border-zinc-700">
         <div className="flex flex-wrap items-end gap-2">
           <div className="flex-1">
-            <label className="text-xs text-zinc-500">搜尋 SKU</label>
+            <label className="text-xs text-zinc-500">搜尋規格</label>
             <input
               value={skuQuery}
               onChange={(e) => { setSkuQuery(e.target.value); setAdding(null); }}
-              placeholder="SKU 編號 / 名稱"
+              placeholder="規格編號 / 名稱"
               className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
             />
           </div>
         </div>
         {skuResults.length === 0 && !adding && (
           <div className="mt-2 rounded-md border border-dashed border-zinc-300 p-3 text-center text-xs text-zinc-500 dark:border-zinc-700">
-            尚無 SKU。先去 <a href="/products" className="underline">商品</a> 頁建 SKU
+            尚無規格。先去 <a href="/products" className="underline">商品</a> 頁建規格
           </div>
         )}
         {skuResults.length > 0 && !adding && (
@@ -186,7 +186,7 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
         {adding && (
           <div className="mt-2 flex flex-wrap items-end gap-2 border-t border-zinc-200 pt-2 dark:border-zinc-800">
             <div className="text-sm">
-              <div className="text-xs text-zinc-500">已選 SKU</div>
+              <div className="text-xs text-zinc-500">已選規格</div>
               <div className="font-mono">{adding.sku.sku_code}</div>
               <div className="text-xs text-zinc-600 dark:text-zinc-400">
                 {adding.sku.product_name ?? "—"}

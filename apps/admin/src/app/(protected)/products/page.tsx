@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { Modal } from "@/components/Modal";
 import { ProductForm, type ProductFormValues } from "@/components/ProductForm";
-import { ProductSkuSection } from "@/components/ProductSkuSection";
+import { ProductSkuSection, type ProductSkuSectionHandle } from "@/components/ProductSkuSection";
 
 type Status = "draft" | "active" | "inactive" | "discontinued";
 type SortKey = "updated_at" | "product_code" | "name" | "status";
@@ -61,13 +61,14 @@ export default function ProductListPage() {
     | null
   >(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const newSkuRef = useRef<ProductSkuSectionHandle | null>(null);
 
   async function openEdit(id: number) {
     const { data, error: err } = await getSupabase()
       .from("products")
       .select(
         "id, product_code, name, short_name, brand_id, category_id, description, status, images, " +
-          "storage_type, sale_mode, default_supplier_id, count_for_start_sale, limit_time, " +
+          "storage_type, default_supplier_id, " +
           "stop_shipping, is_for_shop, customized_id, customized_text, storage_location, " +
           "user_note, user_note_public, vip_level_min"
       )
@@ -81,18 +82,12 @@ export default function ProductListPage() {
       id: number; product_code: string; name: string; short_name: string | null;
       brand_id: number | null; category_id: number | null; description: string | null;
       status: ProductFormValues["status"]; images: string[] | null;
-      storage_type: ProductFormValues["storage_type"]; sale_mode: ProductFormValues["sale_mode"];
-      default_supplier_id: number | null; count_for_start_sale: number | null;
-      limit_time: string | null; stop_shipping: boolean | null; is_for_shop: boolean | null;
+      storage_type: ProductFormValues["storage_type"];
+      default_supplier_id: number | null;
+      stop_shipping: boolean | null; is_for_shop: boolean | null;
       customized_id: string | null; customized_text: string | null;
       storage_location: string | null; user_note: string | null;
       user_note_public: string | null; vip_level_min: number | null;
-    };
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const toDtLocal = (iso: string) => {
-      const dt = new Date(iso);
-      if (Number.isNaN(dt.getTime())) return "";
-      return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
     };
     setModal({
       mode: "edit",
@@ -107,10 +102,7 @@ export default function ProductListPage() {
         status: d.status,
         images: Array.isArray(d.images) ? d.images : [],
         storage_type: d.storage_type ?? null,
-        sale_mode: d.sale_mode ?? "preorder",
         default_supplier_id: d.default_supplier_id,
-        count_for_start_sale: d.count_for_start_sale,
-        limit_time: d.limit_time ? toDtLocal(d.limit_time) : "",
         stop_shipping: d.stop_shipping ?? false,
         is_for_shop: d.is_for_shop ?? true,
         customized_id: d.customized_id ?? "",
@@ -371,25 +363,29 @@ export default function ProductListPage() {
         {modal?.mode === "new" && (
           <ProductForm
             onSaved={async (id) => {
+              try {
+                await newSkuRef.current?.flush(id);
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+              }
               setReloadTick((t) => t + 1);
               await openEdit(id);
             }}
             onCancel={() => setModal(null)}
+            midSlot={<ProductSkuSection ref={newSkuRef} productId={null} />}
           />
         )}
         {modal?.mode === "edit" && (
-          <div className="space-y-6">
-            <ProductForm
-              initial={modal.values}
-              onSaved={() => { setModal(null); setReloadTick((t) => t + 1); }}
-              onCancel={() => setModal(null)}
-            />
-            {modal.values.id !== null && (
-              <div className="border-t border-zinc-200 pt-4 dark:border-zinc-800">
+          <ProductForm
+            initial={modal.values}
+            onSaved={() => { setModal(null); setReloadTick((t) => t + 1); }}
+            onCancel={() => setModal(null)}
+            midSlot={
+              modal.values.id !== null ? (
                 <ProductSkuSection productId={modal.values.id} />
-              </div>
-            )}
-          </div>
+              ) : null
+            }
+          />
         )}
       </Modal>
     </div>

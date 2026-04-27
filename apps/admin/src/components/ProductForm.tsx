@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { ProductImagesField } from "@/components/ProductImagesField";
+import { CategoryCombobox, type CategoryOption } from "@/components/CategoryCombobox";
 
 type Status = "draft" | "active" | "inactive" | "discontinued";
 type StorageType = "room_temp" | "refrigerated" | "frozen" | "meal_train";
-type SaleMode = "preorder" | "in_stock_only" | "limited";
 
 export type ProductFormValues = {
   id: number | null;
@@ -20,10 +20,7 @@ export type ProductFormValues = {
   status: Status;
   images: string[];
   storage_type: StorageType | null;
-  sale_mode: SaleMode;
   default_supplier_id: number | null;
-  count_for_start_sale: number | null;
-  limit_time: string; // datetime-local string, "" = null
   stop_shipping: boolean;
   is_for_shop: boolean;
   customized_id: string;
@@ -45,10 +42,7 @@ const EMPTY: ProductFormValues = {
   status: "draft",
   images: [],
   storage_type: null,
-  sale_mode: "preorder",
   default_supplier_id: null,
-  count_for_start_sale: null,
-  limit_time: "",
   stop_shipping: false,
   is_for_shop: true,
   customized_id: "",
@@ -66,27 +60,23 @@ const STORAGE_TYPE_LABEL: Record<StorageType, string> = {
   meal_train: "餐車",
 };
 
-const SALE_MODE_LABEL: Record<SaleMode, string> = {
-  preorder: "預購",
-  in_stock_only: "僅現貨",
-  limited: "限量",
-};
-
 type LookupRow = { id: number; name: string; code: string };
 
 export function ProductForm({
   initial,
   onSaved,
   onCancel,
+  midSlot,
 }: {
   initial?: ProductFormValues;
   onSaved?: (id: number) => void;
   onCancel?: () => void;
+  midSlot?: ReactNode;
 }) {
   const router = useRouter();
   const [values, setValues] = useState<ProductFormValues>(initial ?? EMPTY);
   const [brands, setBrands] = useState<LookupRow[]>([]);
-  const [categories, setCategories] = useState<LookupRow[]>([]);
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [suppliers, setSuppliers] = useState<LookupRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -101,7 +91,7 @@ export function ProductForm({
         sb.from("suppliers").select("id, name, code").eq("is_active", true).order("name"),
       ]);
       if (b.data) setBrands(b.data as LookupRow[]);
-      if (c.data) setCategories(c.data as LookupRow[]);
+      if (c.data) setCategories(c.data as CategoryOption[]);
       if (s.data) setSuppliers(s.data as LookupRow[]);
     })();
   }, []);
@@ -135,13 +125,10 @@ export function ProductForm({
       p_customized_text: values.customized_text || null,
       p_storage_location: values.storage_location || null,
       p_default_supplier_id: values.default_supplier_id,
-      p_count_for_start_sale: values.count_for_start_sale,
-      p_limit_time: values.limit_time ? new Date(values.limit_time).toISOString() : null,
       p_user_note: values.user_note || null,
       p_user_note_public: values.user_note_public || null,
       p_stop_shipping: values.stop_shipping,
       p_is_for_shop: values.is_for_shop,
-      p_sale_mode: values.sale_mode,
       p_vip_level_min: values.vip_level_min,
       p_reason: null,
     });
@@ -218,20 +205,16 @@ export function ProductForm({
           </select>
         </Field>
         <Field label="分類">
-          <select
-            value={values.category_id ?? ""}
-            onChange={(e) => set("category_id", e.target.value ? Number(e.target.value) : null)}
-            className={selectClass}
-          >
-            <option value="">—（不設定）</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name} ({c.code})
-              </option>
-            ))}
-          </select>
+          <CategoryCombobox
+            value={values.category_id}
+            options={categories}
+            onChange={(id) => set("category_id", id)}
+            onCreated={(cat) => setCategories((arr) => [...arr, cat])}
+          />
         </Field>
       </Grid>
+
+      {midSlot}
 
       <Grid>
         <Field label="儲存溫層">
@@ -250,22 +233,6 @@ export function ProductForm({
             ))}
           </select>
         </Field>
-        <Field label="銷售模式" required>
-          <select
-            value={values.sale_mode}
-            onChange={(e) => set("sale_mode", e.target.value as SaleMode)}
-            className={selectClass}
-          >
-            {(Object.keys(SALE_MODE_LABEL) as SaleMode[]).map((k) => (
-              <option key={k} value={k}>
-                {SALE_MODE_LABEL[k]}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </Grid>
-
-      <Grid>
         <Field label="預設供應商">
           <select
             value={values.default_supplier_id ?? ""}
@@ -282,32 +249,7 @@ export function ProductForm({
             ))}
           </select>
         </Field>
-        <Field label="成團數">
-          <input
-            type="number"
-            min={0}
-            step={1}
-            value={values.count_for_start_sale ?? ""}
-            onChange={(e) =>
-              set(
-                "count_for_start_sale",
-                e.target.value === "" ? null : Math.max(0, Number(e.target.value))
-              )
-            }
-            placeholder="無門檻則留空"
-            className={inputClass}
-          />
-        </Field>
       </Grid>
-
-      <Field label="收單時間">
-        <input
-          type="datetime-local"
-          value={values.limit_time}
-          onChange={(e) => set("limit_time", e.target.value)}
-          className={inputClass}
-        />
-      </Field>
 
       <div className="flex flex-wrap gap-4">
         <Checkbox
