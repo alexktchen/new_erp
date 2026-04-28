@@ -19,6 +19,7 @@ const NAV: NavGroup[] = [
     title: "核心業務",
     items: [
       { href: "/orders", label: "訂單", match: /^\/orders/ },
+      { href: "/pickup", label: "取貨", match: /^\/pickup/ },
       { href: "/campaigns", label: "開團", match: /^\/campaigns/ },
       { href: "/products", label: "商品", match: /^\/products/ },
       { href: "/members", label: "會員", match: /^\/members/ },
@@ -34,6 +35,10 @@ const NAV: NavGroup[] = [
       { href: "/picking/history", label: "撿貨歷史", match: /^\/picking\/history/ },
       { href: "/transfers/inbox", label: "收貨待辦", match: /^\/transfers\/inbox/ },
       { href: "/transfers", label: "調撥單列表", match: /^\/transfers$|^\/transfers\/?$/ },
+      { href: "/inventory/mutual-aid", label: "互助交流板", match: /^\/inventory\/mutual-aid/ },
+      { href: "/transfers/aid", label: "互助轉移單", match: /^\/transfers\/aid/ },
+      // 店間月結 (transfer_settlement) 隱藏 — 實際 99% 走 AP 月結；頁面保留可直接 URL 訪問
+      // { href: "/transfers/settlement", label: "店間月結算", match: /^\/transfers\/settlement/ },
     ],
   },
 ];

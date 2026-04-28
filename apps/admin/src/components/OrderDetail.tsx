@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { OrderTransferModal } from "@/components/OrderTransferModal";
+import { PickupDialog } from "@/components/PickupDialog";
 
 type OrderHead = {
   id: number;
@@ -14,6 +15,8 @@ type OrderHead = {
   updated_at: string;
   pickup_store_id: number | null;
   campaign_id: number | null;
+  transferred_from_order_id: number | null;
+  is_air_transfer: boolean | null;
   member: { id: number; name: string | null; phone: string | null; member_no: string } | null;
   campaign: { id: number; campaign_no: string; name: string } | null;
   store: { id: number; name: string } | null;
@@ -64,6 +67,7 @@ export function OrderDetail({
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [transferOpen, setTransferOpen] = useState(false);
+  const [pickupOpen, setPickupOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +75,7 @@ export function OrderDetail({
       const sb = getSupabase();
       const [hRes, iRes] = await Promise.all([
         sb.from("customer_orders")
-          .select("id, order_no, status, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
+          .select("id, order_no, status, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, transferred_from_order_id, is_air_transfer, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
           .eq("id", orderId).maybeSingle(),
         sb.from("customer_order_items")
           .select("id, qty, unit_price, status, source, created_at, updated_at, created_by, updated_by, sku:skus(id, sku_code, product_name, variant_name)")
@@ -125,14 +129,25 @@ export function OrderDetail({
 
   const canTransfer = ["pending", "confirmed", "reserved"].includes(head.status);
   const isTransferredOut = head.status === "transferred_out";
+  const pickableItems = items.filter((it) => ["pending", "reserved", "ready"].includes(it.status));
+  const canPickup = pickableItems.length > 0 && !["completed","expired","cancelled","transferred_out"].includes(head.status);
   const memberLabel = head.member
     ? `${head.member.name ?? "—"} (${head.member.member_no})`
     : `(${head.nickname_snapshot ?? "—"})`;
 
   return (
     <div className="space-y-4 text-sm">
-      {(canTransfer || isTransferredOut) && (
+      {(canTransfer || canPickup || isTransferredOut) && (
         <div className="flex items-center justify-end gap-2">
+          {canPickup && (
+            <button
+              onClick={() => setPickupOpen(true)}
+              className="rounded-md border border-emerald-300 px-3 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"
+              title="顧客取貨 — 可選哪些 item"
+            >
+              ✅ 確認取貨
+            </button>
+          )}
           {canTransfer && (
             <button
               onClick={() => setTransferOpen(true)}
@@ -243,6 +258,17 @@ export function OrderDetail({
           setReloadTick((n) => n + 1);
         }}
       />
+      <PickupDialog
+        open={pickupOpen}
+        onClose={() => setPickupOpen(false)}
+        orderId={head.id}
+        orderNo={head.order_no}
+        onPickedUp={(r) => {
+          setPickupOpen(false);
+          alert(`取貨完成 (${r.picked_count} 項)\n訂單狀態：${r.new_order_status}`);
+          setReloadTick((n) => n + 1);
+        }}
+      />
     </div>
   );
 }
@@ -291,6 +317,85 @@ async function buildTimeline(
         detailHref: newOrderHref,
         detailOnClick: newOrderClick,
       },
+    ];
+  }
+
+  // transferred-in: 從別張訂單轉進來（5b-1 整單轉 / 5c partial 拆單）
+  // 不走採購／撿貨／派貨流程，改顯示「轉出店 → 運送中 → 分店收貨 → 顧客取貨」
+  if (head.transferred_from_order_id) {
+    const { data: src } = await sb
+      .from("customer_orders")
+      .select("id, order_no, pickup_store_id, store:stores!customer_orders_pickup_store_id_fkey(name)")
+      .eq("id", head.transferred_from_order_id)
+      .maybeSingle();
+    type SrcRow = { id: number; order_no: string; pickup_store_id: number | null; store: { name: string } | { name: string }[] | null };
+    const s = src as unknown as SrcRow | null;
+    const srcStoreName = s?.store
+      ? (Array.isArray(s.store) ? s.store[0]?.name : s.store.name) ?? "—"
+      : "—";
+    const srcDetail = s ? `來源：${srcStoreName} 訂單 ${s.order_no}` : `來源訂單 #${head.transferred_from_order_id}`;
+    const srcHref = s ? `/orders?id=${s.id}` : undefined;
+    const srcClick = (s && onNavigate) ? () => onNavigate(s.id, s.order_no) : undefined;
+
+    // Status → step done 的 rank：每步驟有「需 status >= X 才 done」的閾值
+    const TRANSFER_RANK: Record<string, number> = {
+      pending: 0, confirmed: 1, reserved: 2, shipping: 3,
+      ready: 4, partially_ready: 4,
+      partially_completed: 5, completed: 5,
+      expired: -1, cancelled: -1, transferred_out: -1,
+    };
+    const rank = TRANSFER_RANK[head.status] ?? 0;
+
+    const sourceStep: TimelineStep = {
+      label: "轉出店",
+      ts: head.created_at,
+      done: true,
+      detail: srcDetail,
+      detailHref: onNavigate ? undefined : srcHref,
+      detailOnClick: srcClick,
+    };
+    const customerStep: TimelineStep = {
+      label: "顧客取貨",
+      ts: null,
+      done: rank >= 5,
+      detail: rank >= 5 ? "已完成" : `當前：${head.status}`,
+    };
+
+    if (head.is_air_transfer) {
+      // 空中轉：店對店直送
+      return [
+        sourceStep,
+        {
+          label: "分店收貨",
+          ts: null,
+          done: rank >= 4,
+          detail: rank >= 4 ? "（分店已可取貨）" : "（空中轉、暫無系統紀錄）",
+        },
+        customerStep,
+      ];
+    }
+    // 非空中轉：經總倉
+    return [
+      sourceStep,
+      {
+        label: "總倉收到",
+        ts: null,
+        done: rank >= 1,
+        detail: rank >= 1 ? "（訂單已確認）" : "（待確認→已確認後標記）",
+      },
+      {
+        label: "運送中",
+        ts: null,
+        done: rank >= 3,
+        detail: rank >= 3 ? "（總倉已出貨）" : "（總倉出貨）",
+      },
+      {
+        label: "分店收貨",
+        ts: null,
+        done: rank >= 4,
+        detail: rank >= 4 ? "（分店已可取貨）" : "（暫無系統紀錄）",
+      },
+      customerStep,
     ];
   }
 
