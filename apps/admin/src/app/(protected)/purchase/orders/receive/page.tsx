@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
+import { translateRpcError } from "@/lib/rpcError";
 
 type POItem = {
   id: number;
@@ -297,7 +298,7 @@ export default function ReceivePOPage() {
         p_invoice_no: invoiceNo || null,
         p_notes: notes || null,
       });
-      if (rpcErr) throw new Error(rpcErr.message);
+      if (rpcErr) throw new Error(translateRpcError(rpcErr));
 
       const result = data as { gr_no: string; wave_code: string | null };
       alert(
@@ -306,7 +307,7 @@ export default function ReceivePOPage() {
       );
       router.push("/purchase/orders");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(translateRpcError(e));
     } finally {
       setSubmitting(false);
     }

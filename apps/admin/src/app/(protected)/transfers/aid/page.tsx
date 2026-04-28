@@ -576,10 +576,11 @@ function Chip({ onClick, children, active }: { onClick: () => void; children: Re
 }
 
 // 經總倉的下一步狀態映射
+// 註：shipping → ready 不再由總倉手推，改由店家在「收貨」代辦頁
+// 點收貨時，rpc_receive_transfer 內部自動推進。
 const NEXT_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
   pending: "confirmed",
   confirmed: "shipping",
-  shipping: "ready",
   ready: "completed",
 };
 
@@ -597,7 +598,20 @@ function StatusButton({
       {STATUS_LABEL[order.status]}
     </span>
   );
-  if (!next) return badge;
+  if (!next) {
+    if (order.status === "shipping") {
+      return (
+        <span
+          title="此狀態由店家在「收貨」代辦頁點收貨後自動推進到「可取貨」"
+          className="inline-flex items-center gap-1"
+        >
+          {badge}
+          <span className="text-[10px] text-zinc-400">（待店家收貨）</span>
+        </span>
+      );
+    }
+    return badge;
+  }
 
   async function advance() {
     if (!next) return;
