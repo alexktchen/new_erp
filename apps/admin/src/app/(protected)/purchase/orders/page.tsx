@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { PrPipelineStepper } from "@/components/PrPipelineStepper";
 import { SendPOModal } from "@/components/SendPOModal";
@@ -513,12 +514,12 @@ export default function PurchaseOrdersListPage() {
                               </button>
                             )}
                             {(p.status === "sent" || p.status === "partially_received") && (
-                              <a
+                              <Link
                                 href={`/purchase/orders/receive?po=${p.id}`}
                                 className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700"
                               >
                                 進貨
-                              </a>
+                              </Link>
                             )}
                           </Td>
                         </tr>
