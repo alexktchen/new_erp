@@ -3,6 +3,31 @@
 import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { PrPipelineStepper } from "@/components/PrPipelineStepper";
+import { SendPOModal } from "@/components/SendPOModal";
+
+type Supplier = {
+  id: number;
+  name: string;
+  code: string | null;
+  preferred_po_channel: string | null;
+  line_contact: string | null;
+  email: string | null;
+  phone: string | null;
+};
+
+type SendCtx = {
+  poId: number;
+  poNo: string;
+  supplier: Supplier | null;
+  items: {
+    sku_code: string;
+    product_name: string;
+    qty_ordered: number;
+    unit_cost: number;
+    unit_uom: string | null;
+  }[];
+  total: number;
+};
 
 type POStatus =
   | "draft"
@@ -67,6 +92,9 @@ export default function PurchaseOrdersListPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [openPRs, setOpenPRs] = useState<Set<string>>(new Set()); // 'null' or pr_id 字串
   const [progressById, setProgressById] = useState<Map<number, PRProgress>>(new Map());
+  const [reloadKey, setReloadKey] = useState(0);
+  const [sendBusyId, setSendBusyId] = useState<number | null>(null);
+  const [sendCtx, setSendCtx] = useState<SendCtx | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -231,7 +259,71 @@ export default function PurchaseOrdersListPage() {
     return () => {
       cancelled = true;
     };
-  }, [statusFilter]);
+  }, [statusFilter, reloadKey]);
+
+  async function openSendModal(po: PO) {
+    setSendBusyId(po.id);
+    try {
+      const supabase = getSupabase();
+      const [{ data: supRow }, { data: itemRows }] = await Promise.all([
+        supabase
+          .from("suppliers")
+          .select("id, name, code, preferred_po_channel, line_contact, email, phone")
+          .eq("id", po.supplier_id)
+          .maybeSingle(),
+        supabase
+          .from("purchase_order_items")
+          .select("sku_id, qty_ordered, unit_cost")
+          .eq("po_id", po.id)
+          .order("id"),
+      ]);
+      const skuIds = (itemRows ?? []).map((r) => r.sku_id);
+      const { data: skuRows } = skuIds.length
+        ? await supabase
+            .from("skus")
+            .select("id, sku_code, variant_name, base_unit, products!inner(name)")
+            .in("id", skuIds)
+        : { data: [] as unknown[] };
+      type SkuLite = {
+        id: number;
+        sku_code: string;
+        variant_name: string | null;
+        base_unit: string | null;
+        products: { name: string } | { name: string }[];
+      };
+      const skuMap = new Map<number, { sku_code: string; product_name: string; unit_uom: string | null }>();
+      for (const s of (skuRows as SkuLite[] | null) ?? []) {
+        const prod = Array.isArray(s.products) ? s.products[0] : s.products;
+        skuMap.set(s.id, {
+          sku_code: s.sku_code,
+          product_name: (prod?.name ?? "?") + (s.variant_name ? `-${s.variant_name}` : ""),
+          unit_uom: s.base_unit ?? null,
+        });
+      }
+      const items = (itemRows ?? []).map((r) => {
+        const m = skuMap.get(r.sku_id);
+        return {
+          sku_code: m?.sku_code ?? "?",
+          product_name: m?.product_name ?? "?",
+          qty_ordered: Number(r.qty_ordered),
+          unit_cost: Number(r.unit_cost),
+          unit_uom: m?.unit_uom ?? null,
+        };
+      });
+      const subtotal = items.reduce((s, it) => s + it.qty_ordered * it.unit_cost, 0);
+      setSendCtx({
+        poId: po.id,
+        poNo: po.po_no,
+        supplier: (supRow as Supplier | null) ?? null,
+        items,
+        total: subtotal,
+      });
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSendBusyId(null);
+    }
+  }
 
   function togglePR(key: string) {
     setOpenPRs((cur) => {
@@ -410,6 +502,16 @@ export default function PurchaseOrdersListPage() {
                             {new Date(p.updated_at).toLocaleString("zh-TW")}
                           </Td>
                           <Td className="text-right">
+                            {p.status === "draft" && (
+                              <button
+                                type="button"
+                                disabled={sendBusyId === p.id}
+                                onClick={() => openSendModal(p)}
+                                className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                              >
+                                {sendBusyId === p.id ? "載入中…" : "📤 發送"}
+                              </button>
+                            )}
                             {(p.status === "sent" || p.status === "partially_received") && (
                               <a
                                 href={`/purchase/orders/receive?po=${p.id}`}
@@ -429,6 +531,22 @@ export default function PurchaseOrdersListPage() {
           );
         })}
       </div>
+
+      {sendCtx && (
+        <SendPOModal
+          open
+          onClose={() => setSendCtx(null)}
+          poId={sendCtx.poId}
+          poNo={sendCtx.poNo}
+          supplier={sendCtx.supplier}
+          items={sendCtx.items}
+          total={sendCtx.total}
+          onSent={() => {
+            setSendCtx(null);
+            setReloadKey((k) => k + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
