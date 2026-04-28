@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 type StepState = "done" | "current" | "pending" | "rejected" | "skipped";
 
 type StepEvent = {
@@ -202,9 +204,9 @@ function StepInner({
     : "";
   if (href) {
     return (
-      <a href={href} title={tooltip} className={`${baseCls} ${interactiveCls}`}>
+      <Link href={href} title={tooltip} className={`${baseCls} ${interactiveCls}`}>
         {children}
-      </a>
+      </Link>
     );
   }
   return (
