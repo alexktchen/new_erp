@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { Modal } from "@/components/Modal";
 
@@ -537,12 +538,12 @@ export default function HqDispatchPage() {
                         登記損壞
                       </button>
                     )}
-                    <a
+                    <Link
                       href={`/transfers?id=${t.id}`}
                       className="ml-2 text-xs text-blue-600 hover:underline dark:text-blue-400"
                     >
                       看明細
-                    </a>
+                    </Link>
                   </td>
                 </tr>
               );

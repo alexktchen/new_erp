@@ -416,13 +416,13 @@ export default function PurchaseOrdersListPage() {
                   </div>
                 </div>
                 {g.pr_id !== null && (
-                  <a
+                  <Link
                     href={`/purchase/requests/edit?id=${g.pr_id}`}
                     onClick={(e) => e.stopPropagation()}
                     className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-white dark:border-zinc-700 dark:hover:bg-zinc-700"
                   >
                     查看採購單 →
-                  </a>
+                  </Link>
                 )}
               </button>
               {g.pr_id !== null && g.pr_status && (
@@ -474,12 +474,12 @@ export default function PurchaseOrdersListPage() {
                       {g.pos.map((p) => (
                         <tr key={p.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
                           <Td className="font-mono">
-                            <a
+                            <Link
                               href={`/purchase/orders/edit?id=${p.id}`}
                               className="hover:underline"
                             >
                               {p.po_no}
-                            </a>
+                            </Link>
                           </Td>
                           <Td>{p.supplier_name ?? "—"}</Td>
                           <Td>

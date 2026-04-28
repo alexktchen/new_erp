@@ -311,13 +311,13 @@ export default function TransfersListPage() {
                   </td>
                   <td className="whitespace-nowrap px-3 py-2 text-xs">
                     {wave ? (
-                      <a
+                      <Link
                         href={`/picking/history?wave=${wave.id}`}
                         className="font-mono text-blue-600 hover:underline dark:text-blue-400"
                         title={`配送日 ${wave.wave_date}`}
                       >
                         {wave.wave_code}
-                      </a>
+                      </Link>
                     ) : (
                       <span className="text-zinc-400">—</span>
                     )}

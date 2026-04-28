@@ -601,14 +601,14 @@ function PageContent() {
           <section className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">動作</h3>
             <div className="flex flex-col gap-2">
-              <a
+              <Link
                 href={`/purchase/requests/print?id=${id}`}
                 target="_blank"
                 rel="noopener"
                 className="rounded-md border border-zinc-300 px-3 py-2 text-center text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
               >
                 🖨 列印
-              </a>
+              </Link>
               {editable && (
                 <>
                   <button

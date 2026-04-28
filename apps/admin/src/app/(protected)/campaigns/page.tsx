@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { Modal } from "@/components/Modal";
 import { CampaignForm, type CampaignFormValues } from "@/components/CampaignForm";
@@ -229,12 +230,12 @@ export default function CampaignsListPage() {
                       編輯
                     </button>
                     {r.status === "open" && (
-                      <a
+                      <Link
                         href={`/campaigns/order-entry?id=${r.id}`}
                         className="text-xs text-green-600 hover:underline dark:text-green-400"
                       >
                         加單
-                      </a>
+                      </Link>
                     )}
                     {r.status === "open" && (
                       <button

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { PrPipelineStepper } from "@/components/PrPipelineStepper";
@@ -525,12 +526,12 @@ export default function PurchaseRequestsListPage() {
               rows.map((r) => (
                 <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
                   <Td className="font-mono">
-                    <a
+                    <Link
                       href={`/purchase/requests/edit?id=${r.id}`}
                       className="hover:underline"
                     >
                       {r.pr_no}
-                    </a>
+                    </Link>
                   </Td>
                   <Td className="text-xs text-zinc-500">
                     {SOURCE_LABEL[r.source_type] ?? r.source_type}
@@ -663,12 +664,12 @@ export default function PurchaseRequestsListPage() {
                           <div className="mt-0.5 text-xs text-zinc-500">
                             結單日 {c.close_date}
                             {c.existing_pr_id !== null && (
-                              <a
+                              <Link
                                 href={`/purchase/requests/edit?id=${c.existing_pr_id}`}
                                 className="ml-2 text-amber-600 hover:underline dark:text-amber-400"
                               >
                                 · 已有採購單 #{c.existing_pr_id}
-                              </a>
+                              </Link>
                             )}
                             {c.existing_pr_id === null && c.same_close_date_has_pr && (
                               <span className="ml-2 text-zinc-400">· 同日已有結單日 PR（共存）</span>
