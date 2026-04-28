@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
+import { translateRpcError } from "@/lib/rpcError";
 
 export type Transfer = {
   id: number;
@@ -165,7 +166,7 @@ export function TransferReceiveModal({
         p_operator: operator,
         p_notes: note.trim() === "" ? null : note.trim(),
       });
-      if (e) throw new Error(e.message);
+      if (e) throw new Error(translateRpcError(e));
 
       const r = data as
         | {
@@ -184,7 +185,38 @@ export function TransferReceiveModal({
       );
       onSubmitted();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(translateRpcError(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function reject() {
+    const reason = prompt("拒收原因（會把貨退回 source 端）：");
+    if (reason === null) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      const sb = getSupabase();
+      const { data: userRes } = await sb.auth.getUser();
+      const operator = userRes?.user?.id;
+      if (!operator) throw new Error("未登入");
+
+      const { data, error: e } = await sb.rpc("rpc_reject_transfer", {
+        p_transfer_id: transfer.id,
+        p_reason: reason,
+        p_operator: operator,
+      });
+      if (e) throw new Error(translateRpcError(e));
+
+      const r = data as { leg3_transfer_id: number | null } | null;
+      const leg3Note = r?.leg3_transfer_id
+        ? `\n已自動建立退回單 #${r.leg3_transfer_id}（HQ → 原 source 店）`
+        : "";
+      alert(`拒收完成。${leg3Note}`);
+      onSubmitted();
+    } catch (e) {
+      setError(translateRpcError(e));
     } finally {
       setSubmitting(false);
     }
@@ -215,13 +247,22 @@ export function TransferReceiveModal({
                 ✓ 已收貨
               </span>
             ) : (
-              <button
-                onClick={submit}
-                disabled={submitting || !items}
-                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-              >
-                {submitting ? "送出中…" : "確認收貨"}
-              </button>
+              <>
+                <button
+                  onClick={submit}
+                  disabled={submitting || !items}
+                  className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {submitting ? "送出中…" : "確認收貨"}
+                </button>
+                <button
+                  onClick={reject}
+                  disabled={submitting || !items}
+                  className="rounded-md border border-red-500 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  ✗ 拒收
+                </button>
+              </>
             )}
             <button
               onClick={onClose}

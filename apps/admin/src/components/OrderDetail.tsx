@@ -4,6 +4,7 @@ import { Fragment, useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { OrderTransferModal } from "@/components/OrderTransferModal";
 import { PickupDialog } from "@/components/PickupDialog";
+import { AidOrderTimeline } from "@/components/AidOrderTimeline";
 
 type OrderHead = {
   id: number;
@@ -190,6 +191,11 @@ export function OrderDetail({
 
       {/* 進度 timeline（採購到貨 → 撿貨 → 派貨 → 分店收貨） */}
       <Timeline steps={timeline} />
+
+      {/* Aid order 專屬：互助轉移進度 */}
+      {head.transferred_from_order_id != null && (
+        <AidOrderTimeline orderId={head.id} />
+      )}
 
       <div className="rounded-md border border-zinc-200 dark:border-zinc-800">
         <div className="flex items-center justify-between border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-900">

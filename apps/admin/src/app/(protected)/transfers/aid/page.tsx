@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
+import { translateRpcError } from "@/lib/rpcError";
 import { Modal } from "@/components/Modal";
 import { OrderDetail } from "@/components/OrderDetail";
 
@@ -575,12 +576,13 @@ function Chip({ onClick, children, active }: { onClick: () => void; children: Re
   );
 }
 
-// 經總倉的下一步狀態映射
-// 註：shipping → ready 不再由總倉手推，改由店家在「收貨」代辦頁
-// 點收貨時，rpc_receive_transfer 內部自動推進。
-const NEXT_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
+// 狀態流程：
+//   pending → confirmed   （rpc_advance_order_status）
+//   confirmed → shipping  （rpc_ship_aid_order — 派貨 + outbound 庫存 + 建 transfer chain）
+//   shipping → ready      （由店家在「收貨」代辦頁觸發，rpc_receive_transfer 內部自動推進）
+//   ready → completed     （rpc_advance_order_status）
+const ADVANCE_NEXT: Partial<Record<OrderStatus, OrderStatus>> = {
   pending: "confirmed",
-  confirmed: "shipping",
   ready: "completed",
 };
 
@@ -592,42 +594,74 @@ function StatusButton({
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const next = NEXT_STATUS[order.status];
+  const advanceNext = ADVANCE_NEXT[order.status];
+  const isShipAction = order.status === "confirmed";
+  const isCancellable = ["pending", "confirmed", "shipping"].includes(order.status);
   const badge = (
     <span className={`inline-block rounded px-2 py-0.5 text-xs ${STATUS_COLOR[order.status]}`}>
       {STATUS_LABEL[order.status]}
     </span>
   );
-  if (!next) {
-    if (order.status === "shipping") {
-      return (
-        <span
-          title="此狀態由店家在「收貨」代辦頁點收貨後自動推進到「可取貨」"
-          className="inline-flex items-center gap-1"
-        >
-          {badge}
-          <span className="text-[10px] text-zinc-400">（待店家收貨）</span>
-        </span>
-      );
-    }
-    return badge;
+
+  async function getOperator(): Promise<string | null> {
+    const sb = getSupabase();
+    const { data: sess } = await sb.auth.getSession();
+    return sess.session?.user?.id ?? null;
   }
 
   async function advance() {
-    if (!next) return;
-    if (!confirm(`將狀態 ${STATUS_LABEL[order.status]} → ${STATUS_LABEL[next]}？`)) return;
+    if (!advanceNext) return;
+    if (!confirm(`將狀態 ${STATUS_LABEL[order.status]} → ${STATUS_LABEL[advanceNext]}？`)) return;
     setBusy(true);
     try {
-      const sb = getSupabase();
-      const { data: sess } = await sb.auth.getSession();
-      const operator = sess.session?.user?.id;
+      const operator = await getOperator();
       if (!operator) { alert("尚未登入"); return; }
-      const { error } = await sb.rpc("rpc_advance_order_status", {
+      const { error } = await getSupabase().rpc("rpc_advance_order_status", {
         p_order_id: order.id,
-        p_new_status: next,
+        p_new_status: advanceNext,
         p_operator: operator,
       });
-      if (error) { alert(`狀態更新失敗：${error.message}`); return; }
+      if (error) { alert(`狀態更新失敗：${translateRpcError(error)}`); return; }
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function ship() {
+    if (!confirm("確定派貨？將從來源店出貨並建立轉移單。")) return;
+    setBusy(true);
+    try {
+      const operator = await getOperator();
+      if (!operator) { alert("尚未登入"); return; }
+      const { error } = await getSupabase().rpc("rpc_ship_aid_order", {
+        p_order_id: order.id,
+        p_operator: operator,
+      });
+      if (error) { alert(`派貨失敗：${translateRpcError(error)}`); return; }
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancel() {
+    const reason = prompt(
+      order.status === "shipping"
+        ? "撤回派貨原因（會反向回收已出庫存）："
+        : "取消原因："
+    );
+    if (reason === null) return;
+    setBusy(true);
+    try {
+      const operator = await getOperator();
+      if (!operator) { alert("尚未登入"); return; }
+      const { error } = await getSupabase().rpc("rpc_cancel_aid_order", {
+        p_order_id: order.id,
+        p_reason: reason,
+        p_operator: operator,
+      });
+      if (error) { alert(`取消失敗：${translateRpcError(error)}`); return; }
       onChanged();
     } finally {
       setBusy(false);
@@ -635,14 +669,41 @@ function StatusButton({
   }
 
   return (
-    <button
-      onClick={advance}
-      disabled={busy}
-      title={`點擊 → ${STATUS_LABEL[next]}`}
-      className="group inline-flex items-center gap-1 disabled:opacity-50"
-    >
+    <div className="flex items-center gap-1">
       {badge}
-      <span className="text-[10px] text-zinc-400 group-hover:text-zinc-700 dark:group-hover:text-zinc-200">→ {STATUS_LABEL[next]}</span>
-    </button>
+      {advanceNext && (
+        <button
+          onClick={advance}
+          disabled={busy}
+          title={`點擊 → ${STATUS_LABEL[advanceNext]}`}
+          className="rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+        >
+          → {STATUS_LABEL[advanceNext]}
+        </button>
+      )}
+      {isShipAction && (
+        <button
+          onClick={ship}
+          disabled={busy}
+          className="rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+        >
+          🚚 派貨
+        </button>
+      )}
+      {order.status === "shipping" && (
+        <span className="text-[10px] text-zinc-400" title="此狀態由店家在「收貨」代辦頁點收貨後自動推進到「可取貨」">
+          （待店家收貨）
+        </span>
+      )}
+      {isCancellable && (
+        <button
+          onClick={cancel}
+          disabled={busy}
+          className="rounded border border-red-300 px-1.5 py-0.5 text-[10px] text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+        >
+          {order.status === "shipping" ? "撤回" : "取消"}
+        </button>
+      )}
+    </div>
   );
 }
