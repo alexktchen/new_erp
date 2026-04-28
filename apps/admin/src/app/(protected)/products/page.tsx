@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { Modal } from "@/components/Modal";
 import { ProductForm, type ProductFormValues } from "@/components/ProductForm";
@@ -23,6 +25,8 @@ type ProductRow = {
 
 type LookupRow = { id: number; name: string; code: string };
 
+type StorageType = "room_temp" | "refrigerated" | "frozen" | "meal_train" | null;
+
 const STATUS_LABEL: Record<Status, string> = {
   draft: "草稿",
   active: "上架",
@@ -32,7 +36,213 @@ const STATUS_LABEL: Record<Status, string> = {
 
 const PAGE_SIZE = 50;
 
+// 取貨天數 by 溫層（收單時間 + N 天 = 取貨截止）
+const PICKUP_DAYS_BY_STORAGE: Record<string, number> = {
+  frozen: 14,
+  refrigerated: 14,
+  room_temp: 30,
+  meal_train: 7,
+};
+const DEFAULT_PICKUP_DAYS = 21;
+
+function pickupDaysForStorageTypes(types: (StorageType | null)[]): number {
+  const all = types.filter(Boolean) as string[];
+  if (all.includes("frozen") || all.includes("refrigerated")) {
+    return Math.min(...all.map((t) => PICKUP_DAYS_BY_STORAGE[t] ?? DEFAULT_PICKUP_DAYS));
+  }
+  if (all.length === 0) return DEFAULT_PICKUP_DAYS;
+  return Math.max(...all.map((t) => PICKUP_DAYS_BY_STORAGE[t] ?? DEFAULT_PICKUP_DAYS));
+}
+
+function addDays(date: Date, n: number): string {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d.toISOString().split("T")[0];
+}
+
+function toDatetimeLocal(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ============================================================
+// CreateCampaignModal
+// ============================================================
+type SelectedProduct = {
+  id: number;
+  name: string;
+  storage_type: StorageType;
+};
+
+function CreateCampaignModal({
+  products,
+  onClose,
+  onCreated,
+}: {
+  products: SelectedProduct[];
+  onClose: () => void;
+  onCreated: (campaignId: number) => void;
+}) {
+  const today = new Date();
+  const defaultEndAt = new Date(today);
+  defaultEndAt.setDate(today.getDate() + 3);
+  defaultEndAt.setHours(23, 59, 0, 0);
+
+  const storageTypes = products.map((p) => p.storage_type);
+  const pickupDays = pickupDaysForStorageTypes(storageTypes);
+
+  const defaultName = products.length <= 3
+    ? products.map((p) => p.name).join(" / ")
+    : `${products[0].name} 等 ${products.length} 項商品`;
+
+  const [name, setName] = useState(defaultName);
+  const [endAt, setEndAt] = useState(toDatetimeLocal(defaultEndAt.toISOString()));
+  const [pickupDeadline, setPickupDeadline] = useState(() => {
+    const d = new Date(defaultEndAt);
+    d.setDate(d.getDate() + pickupDays);
+    return d.toISOString().split("T")[0];
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [campaignNo, setCampaignNo] = useState<string>("（產生中…）");
+
+  // fetch preview campaign_no
+  useEffect(() => {
+    getSupabase().rpc("rpc_next_campaign_no").then(({ data }) => {
+      if (data) setCampaignNo(data as string);
+    });
+  }, []);
+
+  // auto-update pickup_deadline when end_at changes
+  function handleEndAtChange(val: string) {
+    setEndAt(val);
+    if (!val) return;
+    const d = new Date(val);
+    if (Number.isNaN(d.getTime())) return;
+    d.setDate(d.getDate() + pickupDays);
+    setPickupDeadline(d.toISOString().split("T")[0]);
+  }
+
+  async function handleSave() {
+    if (!name.trim()) { setError("請輸入團名稱"); return; }
+    if (!endAt) { setError("請設定收單時間"); return; }
+    setSaving(true); setError(null);
+    try {
+      const { data, error: err } = await getSupabase().rpc("rpc_create_campaign_from_products", {
+        p_name: name.trim(),
+        p_end_at: new Date(endAt).toISOString(),
+        p_pickup_deadline: pickupDeadline || null,
+        p_product_ids: products.map((p) => p.id),
+      });
+      if (err) throw err;
+      onCreated(Number(data));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const inputCls = "rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800";
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200">
+        已選 {products.length} 項商品 · {products.map((p) => p.name).join("、")}
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-zinc-600 dark:text-zinc-400">團號</span>
+          <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 select-all">
+            {campaignNo}
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-zinc-600 dark:text-zinc-400">收單時間 <span className="text-red-500">*</span></span>
+          <input
+            type="datetime-local"
+            value={endAt}
+            onChange={(e) => handleEndAtChange(e.target.value)}
+            className={inputCls}
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+          <span className="text-zinc-600 dark:text-zinc-400">團名稱 <span className="text-red-500">*</span></span>
+          <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-zinc-600 dark:text-zinc-400">
+            取貨截止日
+            <span className="ml-1 text-xs text-zinc-400">（依溫層自動計算，可調整）</span>
+          </span>
+          <input
+            type="date"
+            value={pickupDeadline}
+            onChange={(e) => setPickupDeadline(e.target.value)}
+            className={inputCls}
+          />
+        </label>
+
+        <div className="flex flex-col gap-1 text-sm">
+          <span className="text-zinc-500">溫層 → 取貨天數</span>
+          <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900">
+            {products.map((p) => (
+              <div key={p.id}>{p.name}：{p.storage_type ?? "未設定"} (+{PICKUP_DAYS_BY_STORAGE[p.storage_type ?? ""] ?? DEFAULT_PICKUP_DAYS}天)</div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving}
+          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
+        >
+          {saving ? "建立中…" : "建立開團"}
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-md border border-zinc-300 px-4 py-2 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+        >
+          取消
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Main page (wrapped in Suspense for useSearchParams)
+// ============================================================
 export default function ProductListPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-zinc-500">載入中…</div>}>
+      <PageContent />
+    </Suspense>
+  );
+}
+
+function PageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const campaignMode = searchParams.get("mode") === "campaign";
+
   const [rows, setRows] = useState<ProductRow[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +264,11 @@ export default function ProductListPage() {
   const [brands, setBrands] = useState<LookupRow[]>([]);
   const [categories, setCategories] = useState<LookupRow[]>([]);
 
-  // modal
+  // multi-select for 開團
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [campaignModal, setCampaignModal] = useState<SelectedProduct[] | null>(null);
+
+  // product edit modal
   const [modal, setModal] = useState<
     | { mode: "new" }
     | { mode: "edit"; values: ProductFormValues }
@@ -115,19 +329,32 @@ export default function ProductListPage() {
     });
   }
 
+  // open 開團 modal: fetch storage_type for selected product ids
+  async function openCampaignModal() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const { data, error: err } = await getSupabase()
+      .from("products")
+      .select("id, name, storage_type")
+      .in("id", ids);
+    if (err || !data) { setError(err?.message ?? "載入商品失敗"); return; }
+    setCampaignModal(
+      (data as { id: number; name: string; storage_type: StorageType }[]).map((p) => ({
+        id: p.id,
+        name: p.name,
+        storage_type: p.storage_type,
+      }))
+    );
+  }
+
   // debounce search
   useEffect(() => {
-    const t = setTimeout(() => {
-      setQuery(queryDraft);
-      setPage(1);
-    }, 250);
+    const t = setTimeout(() => { setQuery(queryDraft); setPage(1); }, 250);
     return () => clearTimeout(t);
   }, [queryDraft]);
 
   // reset page when filter changes
-  useEffect(() => {
-    setPage(1);
-  }, [categoryId, brandId, status, sortBy, sortDir]);
+  useEffect(() => { setPage(1); }, [categoryId, brandId, status, sortBy, sortDir]);
 
   // fetch lookups once
   useEffect(() => {
@@ -158,9 +385,7 @@ export default function ProductListPage() {
 
         if (query.trim()) {
           const safe = query.replace(/[%,()]/g, " ").trim();
-          q = q.or(
-            `name.ilike.%${safe}%,product_code.ilike.%${safe}%,short_name.ilike.%${safe}%`
-          );
+          q = q.or(`name.ilike.%${safe}%,product_code.ilike.%${safe}%,short_name.ilike.%${safe}%`);
         }
         if (categoryId) q = q.eq("category_id", Number(categoryId));
         if (brandId) q = q.eq("brand_id", Number(brandId));
@@ -168,10 +393,7 @@ export default function ProductListPage() {
 
         const { data, count, error } = await q;
         if (cancelled) return;
-        if (error) {
-          setError(error.message);
-          return;
-        }
+        if (error) { setError(error.message); return; }
         setError(null);
         setRows((data ?? []) as ProductRow[]);
         setTotal(count ?? 0);
@@ -181,9 +403,7 @@ export default function ProductListPage() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [query, categoryId, brandId, status, sortBy, sortDir, page, reloadTick]);
 
   const brandMap = useMemo(() => new Map(brands.map((b) => [b.id, b])), [brands]);
@@ -201,6 +421,29 @@ export default function ProductListPage() {
       setSortDir(key === "updated_at" ? "desc" : "asc");
     }
   }
+
+  function toggleSelect(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    if (!rows) return;
+    const allOnPage = rows.map((r) => r.id);
+    const allSelected = allOnPage.every((id) => selectedIds.has(id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) { allOnPage.forEach((id) => next.delete(id)); }
+      else { allOnPage.forEach((id) => next.add(id)); }
+      return next;
+    });
+  }
+
+  const allOnPageSelected = !!rows && rows.length > 0 && rows.every((r) => selectedIds.has(r.id));
+  const someOnPageSelected = !!rows && rows.some((r) => selectedIds.has(r.id));
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-6">
@@ -223,6 +466,32 @@ export default function ProductListPage() {
         </button>
       </header>
 
+      {/* 開團模式提示 */}
+      {campaignMode && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          勾選商品後按「開團」即可建立團購活動
+        </div>
+      )}
+
+      {/* 多選工具列 */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900">
+          <span className="text-zinc-600 dark:text-zinc-400">已選 <span className="font-semibold">{selectedIds.size}</span> 項商品</span>
+          <button
+            onClick={openCampaignModal}
+            className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-600"
+          >
+            開團
+          </button>
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="ml-auto text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+          >
+            清除選取
+          </button>
+        </div>
+      )}
+
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <input
           type="search"
@@ -238,9 +507,7 @@ export default function ProductListPage() {
         >
           <option value="">全部分類</option>
           {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name} ({c.code})
-            </option>
+            <option key={c.id} value={c.id}>{c.name} ({c.code})</option>
           ))}
         </select>
         <select
@@ -250,9 +517,7 @@ export default function ProductListPage() {
         >
           <option value="">全部品牌</option>
           {brands.map((b) => (
-            <option key={b.id} value={b.id}>
-              {b.name} ({b.code})
-            </option>
+            <option key={b.id} value={b.id}>{b.name} ({b.code})</option>
           ))}
         </select>
         <select
@@ -279,18 +544,20 @@ export default function ProductListPage() {
         <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
           <thead className="bg-zinc-50 dark:bg-zinc-900">
             <tr>
+              <th className="w-10 px-3 py-2">
+                <input
+                  type="checkbox"
+                  checked={allOnPageSelected}
+                  ref={(el) => { if (el) el.indeterminate = !allOnPageSelected && someOnPageSelected; }}
+                  onChange={toggleAll}
+                  className="cursor-pointer"
+                />
+              </th>
               <ThSort label="商品編號" col="product_code" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
               <ThSort label="名稱" col="name" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
               <Th>品牌 / 分類</Th>
               <ThSort label="狀態" col="status" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
-              <ThSort
-                label="更新時間"
-                col="updated_at"
-                sortBy={sortBy}
-                sortDir={sortDir}
-                onToggle={toggleSort}
-                align="right"
-              />
+              <ThSort label="更新時間" col="updated_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
               <Th>{""}</Th>
             </tr>
           </thead>
@@ -299,7 +566,7 @@ export default function ProductListPage() {
               <SkeletonRows />
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="p-6 text-center text-sm text-zinc-500">
+                <td colSpan={7} className="p-6 text-center text-sm text-zinc-500">
                   {total === 0 && !query && !categoryId && !brandId && !status
                     ? "還沒有商品，按「新增商品」開始建立。"
                     : "沒有符合條件的商品。"}
@@ -307,7 +574,18 @@ export default function ProductListPage() {
               </tr>
             ) : (
               rows.map((r) => (
-                <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
+                <tr
+                  key={r.id}
+                  className={`hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selectedIds.has(r.id) ? "bg-blue-50 dark:bg-blue-950/30" : ""}`}
+                >
+                  <td className="w-10 px-3 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(r.id)}
+                      onChange={() => toggleSelect(r.id)}
+                      className="cursor-pointer"
+                    />
+                  </td>
                   <Td className="font-mono">
                     <button onClick={() => openEdit(r.id)} className="hover:underline">
                       {r.product_code}
@@ -346,14 +624,13 @@ export default function ProductListPage() {
         <div className="flex items-center justify-end gap-2 text-sm">
           <PagerBtn onClick={() => setPage(1)} disabled={page === 1}>« 第一頁</PagerBtn>
           <PagerBtn onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>‹ 上頁</PagerBtn>
-          <span className="px-2 text-zinc-500">
-            {page} / {totalPages}
-          </span>
+          <span className="px-2 text-zinc-500">{page} / {totalPages}</span>
           <PagerBtn onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}>下頁 ›</PagerBtn>
           <PagerBtn onClick={() => setPage(totalPages)} disabled={page === totalPages}>最末頁 »</PagerBtn>
         </div>
       )}
 
+      {/* Product Edit Modal */}
       <Modal
         open={!!modal}
         onClose={() => setModal(null)}
@@ -388,6 +665,26 @@ export default function ProductListPage() {
           />
         )}
       </Modal>
+
+      {/* 開團 Modal */}
+      <Modal
+        open={!!campaignModal}
+        onClose={() => setCampaignModal(null)}
+        title="建立開團"
+        maxWidth="max-w-2xl"
+      >
+        {campaignModal && (
+          <CreateCampaignModal
+            products={campaignModal}
+            onClose={() => setCampaignModal(null)}
+            onCreated={(campaignId) => {
+              setCampaignModal(null);
+              setSelectedIds(new Set());
+              router.push(`/campaigns`);
+            }}
+          />
+        )}
+      </Modal>
     </div>
   );
 }
@@ -413,19 +710,10 @@ function Th({ children, className = "" }: { children: React.ReactNode; className
 }
 
 function ThSort({
-  label,
-  col,
-  sortBy,
-  sortDir,
-  onToggle,
-  align = "left",
+  label, col, sortBy, sortDir, onToggle, align = "left",
 }: {
-  label: string;
-  col: SortKey;
-  sortBy: SortKey;
-  sortDir: SortDir;
-  onToggle: (c: SortKey) => void;
-  align?: "left" | "right";
+  label: string; col: SortKey; sortBy: SortKey; sortDir: SortDir;
+  onToggle: (c: SortKey) => void; align?: "left" | "right";
 }) {
   const active = sortBy === col;
   const arrow = active ? (sortDir === "asc" ? "↑" : "↓") : "";
@@ -462,7 +750,7 @@ function SkeletonRows() {
     <>
       {Array.from({ length: 5 }).map((_, i) => (
         <tr key={i}>
-          <td colSpan={6} className="p-3">
+          <td colSpan={7} className="p-3">
             <div className="h-4 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           </td>
         </tr>

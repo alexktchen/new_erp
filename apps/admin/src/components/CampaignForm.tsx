@@ -71,7 +71,7 @@ export function CampaignForm({
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!v.campaign_no || !v.name) { setError("團號與名稱必填"); return; }
+    if (!v.name) { setError("名稱必填"); return; }
     setSaving(true); setError(null);
     try {
       const { data, error: err } = await getSupabase().rpc("rpc_upsert_campaign", {
@@ -102,8 +102,8 @@ export function CampaignForm({
   return (
     <form onSubmit={onSubmit} className="space-y-4" noValidate>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="團號 *">
-          <input value={v.campaign_no} onChange={(e) => update("campaign_no", e.target.value)} className={inputCls} required />
+        <Field label="團號">
+          <div className={`${inputCls} bg-zinc-50 text-zinc-500 dark:bg-zinc-900 select-all`}>{v.campaign_no || "（自動產生）"}</div>
         </Field>
         <Field label="狀態">
           <select value={v.status} onChange={(e) => update("status", e.target.value as CampaignStatus)} className={inputCls}>

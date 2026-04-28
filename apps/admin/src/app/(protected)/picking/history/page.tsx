@@ -428,13 +428,25 @@ function PickModal({
 
   async function ship() {
     if (!hqLocId) {
-      setError("找不到總倉 location");
+      setError("找不到總倉 location，請確認倉庫設定");
       return;
     }
     if (effectiveStatus !== "picked") {
-      setError(`撿貨單狀態為 ${effectiveStatus}，需是 picked 才能派貨。請先確認修正完成。`);
+      setError(`撿貨單狀態為「${effectiveStatus}」，需先確認撿貨完成才能派貨`);
       return;
     }
+
+    // 檢查是否所有品項 picked_qty = 0
+    const allZero = items != null && items.length > 0 && items.every((it) => {
+      const e = edits.get(it.id);
+      const v = e !== undefined ? Number(e) : Number(it.picked_qty ?? it.qty);
+      return !Number.isNaN(v) && v === 0;
+    });
+    if (allZero) {
+      setError("所有品項撿貨數量均為 0，請先在上方輸入實際撿貨量再派貨");
+      return;
+    }
+
     const shortMsg = shortageCount > 0
       ? `\n\n⚠ 有 ${shortageCount} 行短缺（撿到的數量少於應撿量），派貨後該店家會拿不到應有量。是否仍要繼續？`
       : "";

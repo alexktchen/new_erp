@@ -34,6 +34,14 @@ type OpenOrder = {
 };
 
 const ACTIVE_STATUSES = ["pending", "confirmed", "reserved", "ready", "partially_ready", "partially_completed", "shipping"];
+const INACTIVE_ITEM_STATUSES = new Set(["cancelled", "picked_up", "expired"]);
+
+function isPickable(order: OpenOrder): boolean {
+  return order.status === "ready" || order.status === "partially_completed";
+}
+function activeItems(order: OpenOrder) {
+  return order.items.filter((it) => !INACTIVE_ITEM_STATUSES.has(it.status));
+}
 
 export default function PickupPage() {
   const [suffix, setSuffix] = useState("");
@@ -107,9 +115,9 @@ export default function PickupPage() {
   async function bulkPickAllConfirmed(member: Member) {
     const memberId = member.id;
     const allMemberOrders = (orders.get(memberId) ?? []).filter((o) =>
-      o.items.some((it) => ["pending", "reserved", "ready"].includes(it.status)),
+      isPickable(o) && activeItems(o).length > 0,
     );
-    // 若有勾選 → 只取勾選的；無勾選 → 全取
+    // 若有勾選 → 只取勾選的（且可取貨）；無勾選 → 全取
     const memberSelected = allMemberOrders.filter((o) => selected.has(o.id));
     const memberOrders = memberSelected.length > 0 ? memberSelected : allMemberOrders;
     if (memberOrders.length === 0) return;
@@ -125,9 +133,7 @@ export default function PickupPage() {
       const errors: string[] = [];
       const eventIds: number[] = [];
       for (const o of memberOrders) {
-        const itemIds = o.items
-          .filter((it) => ["pending", "reserved", "ready"].includes(it.status))
-          .map((it) => it.id);
+        const itemIds = activeItems(o).map((it) => it.id);
         const { data, error: e } = await sb.rpc("rpc_record_pickup", {
           p_order_id: o.id,
           p_item_ids: itemIds,
@@ -222,9 +228,11 @@ export default function PickupPage() {
                     <span className="font-mono text-xs text-zinc-500">{m.member_no}</span>
                     <span className="font-mono text-sm text-zinc-700 dark:text-zinc-300">{m.phone ?? "—"}</span>
                     {memberOrders.length > 0 && (() => {
-                      const selectedHere = memberOrders.filter((o) => selected.has(o.id));
+                      const pickableOrders = memberOrders.filter((o) => isPickable(o) && activeItems(o).length > 0);
+                      const selectedHere = pickableOrders.filter((o) => selected.has(o.id));
                       const useSel = selectedHere.length > 0;
-                      const count = useSel ? selectedHere.length : memberOrders.length;
+                      const count = useSel ? selectedHere.length : pickableOrders.length;
+                      if (pickableOrders.length === 0) return null;
                       return (
                         <button
                           onClick={() => setBulkConfirm(m)}
@@ -241,22 +249,33 @@ export default function PickupPage() {
                   ) : (
                     <ul className="space-y-2">
                       {memberOrders.map((o) => {
-                        const pickableCount = o.items.filter((it) => ["pending","reserved","ready"].includes(it.status)).length;
+                        const canPickup = isPickable(o);
+                        const active = activeItems(o);
+                        const pickableCount = canPickup ? active.length : 0;
+                        const totalAmt = active.reduce((s, it) => s + Number(it.qty) * Number(it.unit_price), 0);
                         return (
                           <li key={o.id} className={`flex items-center gap-3 rounded-md border p-3 ${selected.has(o.id) ? "border-emerald-400 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-950" : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950"}`}>
                             <input
                               type="checkbox"
                               checked={selected.has(o.id)}
                               onChange={() => toggleSelect(o.id)}
-                              disabled={pickableCount === 0}
+                              disabled={!canPickup || pickableCount === 0}
                               className="h-4 w-4"
                             />
                             <OrderThumb order={o} />
                             <div className="flex-1 text-sm">
                               <div className="flex items-baseline gap-2">
                                 <span className="font-mono font-medium">{o.order_no}</span>
-                                <span className={`rounded px-2 py-0.5 text-[10px] ${o.status === "ready" ? "bg-emerald-100 text-emerald-800" : "bg-zinc-200 text-zinc-700"}`}>
-                                  {o.status}
+                                <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                                  o.status === "ready" ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" :
+                                  o.status === "partially_completed" ? "bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300" :
+                                  o.status === "shipping" ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" :
+                                  "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                                }`}>
+                                  {o.status === "shipping" ? "運送中" :
+                                   o.status === "ready" ? "可取貨" :
+                                   o.status === "partially_completed" ? "部分已取" :
+                                   o.status}
                                 </span>
                               </div>
                               {o.campaign && (
@@ -267,15 +286,19 @@ export default function PickupPage() {
                               <div className="mt-1 text-xs text-zinc-500">
                                 取貨店：{o.store?.name ?? "—"}
                                 {o.pickup_deadline && <span className="ml-2">截止：{o.pickup_deadline}</span>}
-                                <span className="ml-2">{pickableCount} 項可取</span>
-                                <span className="ml-2 font-mono text-zinc-700 dark:text-zinc-200">
-                                  ${o.items.filter((it) => ["pending","reserved","ready"].includes(it.status)).reduce((s, it) => s + Number(it.qty) * Number(it.unit_price), 0)}
-                                </span>
+                                {canPickup ? (
+                                  <>
+                                    <span className="ml-2">{pickableCount} 項可取</span>
+                                    <span className="ml-2 font-mono text-zinc-700 dark:text-zinc-200">${totalAmt}</span>
+                                  </>
+                                ) : (
+                                  <span className="ml-2 text-amber-600 dark:text-amber-400">⏳ 分店尚未收貨，無法取貨</span>
+                                )}
                               </div>
                             </div>
                             <button
                               onClick={() => setPickup({ orderId: o.id, orderNo: o.order_no })}
-                              disabled={pickableCount === 0}
+                              disabled={!canPickup || pickableCount === 0}
                               className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:opacity-50"
                             >
                               ✅ 取貨
@@ -314,16 +337,13 @@ export default function PickupPage() {
       >
         {bulkConfirm && (() => {
           const allMemberOrders = (orders.get(bulkConfirm.id) ?? []).filter((o) =>
-            o.items.some((it) => ["pending", "reserved", "ready"].includes(it.status)),
+            isPickable(o) && activeItems(o).length > 0,
           );
           const selectedHere = allMemberOrders.filter((o) => selected.has(o.id));
           const memberOrders = selectedHere.length > 0 ? selectedHere : allMemberOrders;
-          const totalItems = memberOrders.reduce(
-            (s, o) => s + o.items.filter((it) => ["pending","reserved","ready"].includes(it.status)).length,
-            0,
-          );
+          const totalItems = memberOrders.reduce((s, o) => s + activeItems(o).length, 0);
           const totalAmount = memberOrders.reduce(
-            (s, o) => s + o.items.filter((it) => ["pending","reserved","ready"].includes(it.status)).reduce((ss, it) => ss + Number(it.qty) * Number(it.unit_price), 0),
+            (s, o) => s + activeItems(o).reduce((ss, it) => ss + Number(it.qty) * Number(it.unit_price), 0),
             0,
           );
           return (
@@ -333,7 +353,7 @@ export default function PickupPage() {
               </p>
               <div className="max-h-80 space-y-3 overflow-y-auto rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
                 {memberOrders.map((o) => {
-                  const pickItems = o.items.filter((it) => ["pending","reserved","ready"].includes(it.status));
+                  const pickItems = activeItems(o);
                   return (
                     <div key={o.id} className="text-sm">
                       <div className="mb-1">

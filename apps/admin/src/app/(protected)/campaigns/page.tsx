@@ -40,11 +40,7 @@ export default function CampaignsListPage() {
   const [page, setPage] = useState(1);
 
   const [itemCounts, setItemCounts] = useState<Map<number, number>>(new Map());
-  const [modal, setModal] = useState<
-    | { mode: "new" }
-    | { mode: "edit"; values: CampaignFormValues }
-    | null
-  >(null);
+  const [modal, setModal] = useState<{ mode: "edit"; values: CampaignFormValues } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [closingId, setClosingId] = useState<number | null>(null);
   const [finalizingId, setFinalizingId] = useState<number | null>(null);
@@ -170,9 +166,9 @@ export default function CampaignsListPage() {
             {loading ? "載入中…" : total === 0 ? "共 0 筆" : `共 ${total} 筆（${fromIdx}-${toIdx}）`}
           </p>
         </div>
-        <button onClick={() => setModal({ mode: "new" })} className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200">
-          新增開團
-        </button>
+        <Link href="/products?mode=campaign" className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200">
+          + 從商品開團
+        </Link>
       </header>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -266,25 +262,10 @@ export default function CampaignsListPage() {
       <Modal
         open={!!modal}
         onClose={() => setModal(null)}
-        title={modal?.mode === "edit" ? `編輯開團 #${modal.values.campaign_no}` : "新增開團"}
+        title={modal ? `編輯開團 #${modal.values.campaign_no}` : ""}
         maxWidth="max-w-4xl"
       >
-        {modal?.mode === "new" && (
-          <div className="space-y-4">
-            <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200">
-              先建立開團 → 自動進入編輯，加入商品明細
-            </div>
-            <CampaignForm
-              onSaved={async (id) => {
-                setReloadTick((t) => t + 1);
-                await openEdit(id);
-              }}
-              onCancel={() => setModal(null)}
-              submitLabel="建立並加商品"
-            />
-          </div>
-        )}
-        {modal?.mode === "edit" && (
+        {modal && (
           <div className="space-y-6">
             <CampaignItemsTable campaignId={modal.values.id!} />
             <div className="border-t border-zinc-200 pt-4 dark:border-zinc-800">

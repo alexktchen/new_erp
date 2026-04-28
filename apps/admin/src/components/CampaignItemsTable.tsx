@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 
 type Row = {
@@ -16,13 +15,8 @@ type Row = {
   notes: string | null;
 };
 
-type SkuOption = { id: number; sku_code: string; product_name: string | null; variant_name: string | null };
-
 export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
   const [rows, setRows] = useState<Row[] | null>(null);
-  const [skuQuery, setSkuQuery] = useState("");
-  const [skuResults, setSkuResults] = useState<SkuOption[]>([]);
-  const [adding, setAdding] = useState<{ sku: SkuOption; price: string; cap: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const reload = async () => {
@@ -48,59 +42,6 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
 
   useEffect(() => { reload(); }, [campaignId]);
 
-  useEffect(() => {
-    const t = setTimeout(async () => {
-      let q = getSupabase()
-        .from("skus").select("id, sku_code, product_name, variant_name")
-        .eq("status", "active")
-        .order("updated_at", { ascending: false })
-        .limit(20);
-      const s = skuQuery.trim();
-      if (s) {
-        const safe = s.replace(/[%,()]/g, " ").trim();
-        q = q.or(`sku_code.ilike.%${safe}%,product_name.ilike.%${safe}%,variant_name.ilike.%${safe}%`);
-      }
-      const { data } = await q;
-      setSkuResults((data as SkuOption[]) ?? []);
-    }, skuQuery ? 250 : 0);
-    return () => clearTimeout(t);
-  }, [skuQuery]);
-
-  async function addItem() {
-    if (!adding) return;
-    const price = Number(adding.price);
-    if (!(price >= 0)) { setError("單價需 ≥ 0"); return; }
-    try {
-      const { error: err } = await getSupabase().rpc("rpc_upsert_campaign_item", {
-        p_id: null,
-        p_campaign_id: campaignId,
-        p_sku_id: adding.sku.id,
-        p_unit_price: price,
-        p_cap_qty: adding.cap ? Number(adding.cap) : null,
-        p_sort_order: (rows?.length ?? 0) + 1,
-        p_notes: null,
-      });
-      if (err) throw err;
-      setAdding(null); setSkuQuery(""); setSkuResults([]); setError(null);
-      await reload();
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-  }
-
-  async function updatePrice(id: number, price: number) {
-    const r = rows?.find((x) => x.id === id); if (!r) return;
-    const { error: err } = await getSupabase().rpc("rpc_upsert_campaign_item", {
-      p_id: id, p_campaign_id: campaignId, p_sku_id: r.sku_id, p_unit_price: price,
-      p_cap_qty: r.cap_qty, p_sort_order: r.sort_order, p_notes: r.notes,
-    });
-    if (err) setError(err.message); else await reload();
-  }
-
-  async function deleteItem(id: number) {
-    if (!confirm("確定刪除這項商品？")) return;
-    const { error: err } = await getSupabase().rpc("rpc_delete_campaign_item", { p_id: id });
-    if (err) setError(err.message); else await reload();
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -116,14 +57,14 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
         <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
           <thead className="bg-zinc-50 dark:bg-zinc-900">
             <tr>
-              <Th>規格</Th><Th>名稱</Th><Th className="text-right">單價</Th><Th className="text-right">量上限</Th><Th>{""}</Th>
+              <Th>規格</Th><Th>名稱</Th><Th className="text-right">單價</Th><Th className="text-right">量上限</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
             {rows === null ? (
-              <tr><td colSpan={5} className="p-3 text-center text-zinc-500">載入中…</td></tr>
+              <tr><td colSpan={4} className="p-3 text-center text-zinc-500">載入中…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={5} className="p-6 text-center text-zinc-500">尚無商品，加一個吧</td></tr>
+              <tr><td colSpan={4} className="p-6 text-center text-zinc-500">尚無商品</td></tr>
             ) : rows.map((r) => (
               <tr key={r.id}>
                 <Td className="font-mono">{r.sku_code}</Td>
@@ -131,95 +72,12 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
                   <div>{r.product_name ?? "—"}</div>
                   {r.variant_name && <div className="text-xs text-zinc-500">{r.variant_name}</div>}
                 </Td>
-                <Td className="text-right">
-                  <input
-                    type="number" step="0.0001" defaultValue={r.unit_price}
-                    onBlur={(e) => { const n = Number(e.target.value); if (n !== r.unit_price) updatePrice(r.id, n); }}
-                    className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-right text-sm dark:border-zinc-700 dark:bg-zinc-800"
-                  />
-                </Td>
+                <Td className="text-right font-mono">${r.unit_price}</Td>
                 <Td className="text-right text-xs text-zinc-500">{r.cap_qty ?? "—"}</Td>
-                <Td>
-                  <button onClick={() => deleteItem(r.id)} className="text-xs text-red-600 hover:underline dark:text-red-400">刪除</button>
-                </Td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
-
-      <div className="rounded-md border border-dashed border-zinc-300 p-3 dark:border-zinc-700">
-        <div className="flex flex-wrap items-end gap-2">
-          <div className="flex-1">
-            <label className="text-xs text-zinc-500">搜尋規格</label>
-            <input
-              value={skuQuery}
-              onChange={(e) => { setSkuQuery(e.target.value); setAdding(null); }}
-              placeholder="規格編號 / 名稱"
-              className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-            />
-          </div>
-        </div>
-        {skuResults.length === 0 && !adding && (
-          <div className="mt-2 rounded-md border border-dashed border-zinc-300 p-3 text-center text-xs text-zinc-500 dark:border-zinc-700">
-            尚無規格。先去 <Link href="/products" className="underline">商品</Link> 頁建規格
-          </div>
-        )}
-        {skuResults.length > 0 && !adding && (
-          <ul className="mt-2 max-h-72 divide-y divide-zinc-200 overflow-y-auto rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
-            {skuResults.map((s) => (
-              <li key={s.id}>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    // 從 prices 抓最新 retail 價當預設
-                    const { data: pData } = await getSupabase()
-                      .from("prices")
-                      .select("price")
-                      .eq("sku_id", s.id)
-                      .eq("scope", "retail")
-                      .order("effective_from", { ascending: false })
-                      .limit(1);
-                    const defaultPrice = pData?.[0]?.price != null ? String(Number(pData[0].price)) : "";
-                    setAdding({ sku: s, price: defaultPrice, cap: "" });
-                  }}
-                  className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-800"
-                >
-                  <span className="font-mono">{s.sku_code}</span>
-                  <span className="text-zinc-600 dark:text-zinc-400">
-                    {s.product_name ?? "—"}
-                    {s.variant_name ? ` · ${s.variant_name}` : ""}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        {adding && (
-          <div className="mt-2 flex flex-wrap items-end gap-2 border-t border-zinc-200 pt-2 dark:border-zinc-800">
-            <div className="text-sm">
-              <div className="text-xs text-zinc-500">已選規格</div>
-              <div className="font-mono">{adding.sku.sku_code}</div>
-              <div className="text-xs text-zinc-600 dark:text-zinc-400">
-                {adding.sku.product_name ?? "—"}
-                {adding.sku.variant_name ? ` · ${adding.sku.variant_name}` : ""}
-              </div>
-            </div>
-            <label className="text-sm">
-              <div className="text-xs text-zinc-500">單價</div>
-              <input type="number" step="0.0001" value={adding.price} onChange={(e) => setAdding({ ...adding, price: e.target.value })}
-                className="w-28 rounded-md border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800" />
-            </label>
-            <label className="text-sm">
-              <div className="text-xs text-zinc-500">量上限<span className="ml-1 text-zinc-400">（空=無上限）</span></div>
-              <input type="number" step="0.001" value={adding.cap} onChange={(e) => setAdding({ ...adding, cap: e.target.value })}
-                placeholder="無上限"
-                className="w-28 rounded-md border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800" />
-            </label>
-            <button type="button" onClick={addItem} className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200">加入</button>
-            <button type="button" onClick={() => setAdding(null)} className="rounded-md border border-zinc-300 px-3 py-2 text-sm transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">取消</button>
-          </div>
-        )}
       </div>
     </div>
   );
