@@ -8,7 +8,6 @@
 \set ON_ERROR_STOP on
 
 BEGIN;
-\set t :'tenant_id'
 
 WITH any_user AS (SELECT id FROM auth.users LIMIT 1)
 INSERT INTO transfers (
@@ -16,10 +15,10 @@ INSERT INTO transfers (
   status, transfer_type, requested_by, shipped_at, shipped_by,
   received_at, received_by, created_by
 )
-SELECT :'t'::uuid,
+SELECT :'tenant_id'::uuid,
        x.no,
-       (SELECT id FROM locations WHERE tenant_id = :'t'::uuid AND code = x.src),
-       (SELECT id FROM locations WHERE tenant_id = :'t'::uuid AND code = x.dst),
+       (SELECT id FROM locations WHERE tenant_id = :'tenant_id'::uuid AND code = x.src),
+       (SELECT id FROM locations WHERE tenant_id = :'tenant_id'::uuid AND code = x.dst),
        x.status,
        x.tf_type,
        (SELECT id FROM any_user),
@@ -36,7 +35,7 @@ FROM (VALUES
 
 INSERT INTO transfer_items (transfer_id, sku_id, qty_requested, qty_shipped, qty_received)
 SELECT t.id,
-       (SELECT id FROM skus WHERE tenant_id = :'t'::uuid AND sku_code = x.sku_code),
+       (SELECT id FROM skus WHERE tenant_id = :'tenant_id'::uuid AND sku_code = x.sku_code),
        x.qty_req,
        (CASE WHEN t.status IN ('shipped','received') THEN x.qty_req ELSE 0 END),
        (CASE WHEN t.status = 'received' THEN x.qty_req ELSE 0 END)
@@ -47,7 +46,7 @@ JOIN (VALUES
   ('TF-0002', 'SKU-001', 10),
   ('TF-0003', 'SKU-005', 4)
 ) AS x(no, sku_code, qty_req) ON t.transfer_no = x.no
-WHERE t.tenant_id = :'t'::uuid;
+WHERE t.tenant_id = :'tenant_id'::uuid;
 
 COMMIT;
 

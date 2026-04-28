@@ -59,18 +59,26 @@ fi
 # shellcheck disable=SC1090
 set -a; source "$ENV_FILE"; set +a
 
-: "${E2E_DB_URL:?E2E_DB_URL 未設}"
+: "${E2E_DB_HOST:?E2E_DB_HOST 未設}"
+: "${E2E_DB_PORT:?E2E_DB_PORT 未設}"
+: "${E2E_DB_USER:?E2E_DB_USER 未設}"
+: "${E2E_DB_NAME:?E2E_DB_NAME 未設}"
+: "${E2E_DB_PASSWORD:?E2E_DB_PASSWORD 未設}"
 : "${E2E_EXPECTED_HOST:?E2E_EXPECTED_HOST 未設（host substring 防呆）}"
 
-# 防呆：URL 必須包含預期 host
-if [[ "$E2E_DB_URL" != *"$E2E_EXPECTED_HOST"* ]]; then
-  echo "❌ E2E_DB_URL 不含預期 host '$E2E_EXPECTED_HOST'，拒絕執行"
+# 防呆：host / user 至少一邊必須包含預期字串
+if [[ "$E2E_DB_HOST" != *"$E2E_EXPECTED_HOST"* && "$E2E_DB_USER" != *"$E2E_EXPECTED_HOST"* ]]; then
+  echo "❌ DB host/user 都不含 '$E2E_EXPECTED_HOST'，拒絕執行"
   exit 1
 fi
 
+# 把密碼放到 PGPASSWORD env，URL 只放其他欄位 → 不必 URL-encode
+export PGPASSWORD="$E2E_DB_PASSWORD"
+PSQL_CONN=( -h "$E2E_DB_HOST" -p "$E2E_DB_PORT" -U "$E2E_DB_USER" -d "$E2E_DB_NAME" )
+
 # 互動確認
 if [[ "$ASSUME_YES" != "true" ]]; then
-  echo "⚠️  即將清空 host 含 [$E2E_EXPECTED_HOST] 的 DB 並重灌 fixture [$FIXTURE]"
+  echo "⚠️  即將清空 [$E2E_DB_HOST / $E2E_DB_USER] 並重灌 fixture [$FIXTURE]"
   read -r -p "輸入 RESET 繼續：" CONFIRM
   [[ "$CONFIRM" == "RESET" ]] || { echo "abort."; exit 1; }
 fi
@@ -78,7 +86,7 @@ fi
 # 取 tenant_id（從 auth.users.app_metadata）
 echo "→ resolving tenant_id from auth.users..."
 TENANT_ID="$(
-  psql "$E2E_DB_URL" -tAX -c \
+  psql "${PSQL_CONN[@]}" -tAX -c \
     "SELECT raw_app_meta_data->>'tenant_id' FROM auth.users WHERE raw_app_meta_data ? 'tenant_id' LIMIT 1;"
 )"
 TENANT_ID="${TENANT_ID//[$'\t\r\n ']/}"
@@ -90,7 +98,7 @@ run_sql() {
   local t0; t0=$(date +%s)
   printf "→ %-22s" "$label"
   PGOPTIONS="--client-min-messages=warning" \
-    psql "$E2E_DB_URL" -v ON_ERROR_STOP=1 -v "tenant_id=$TENANT_ID" -X -q -f "$file"
+    psql "${PSQL_CONN[@]}" -v ON_ERROR_STOP=1 -v "tenant_id=$TENANT_ID" -X -q -f "$file"
   printf "  done (%ss)\n" "$(( $(date +%s) - t0 ))"
 }
 
@@ -102,7 +110,7 @@ run_sql "fixture: $FIXTURE"  "$FIXTURE_FILE"
 # 簡報：列幾張關鍵表筆數
 echo
 echo "── summary ─────────────────────────────"
-psql "$E2E_DB_URL" -X -A -F $'\t' -c "$(cat <<'SQL'
+psql "${PSQL_CONN[@]}" -X -A -F $'\t' -c "$(cat <<'SQL'
 SELECT 'locations'             AS table, COUNT(*) FROM locations            UNION ALL
 SELECT 'stores',                  COUNT(*) FROM stores                      UNION ALL
 SELECT 'products',                COUNT(*) FROM products                    UNION ALL

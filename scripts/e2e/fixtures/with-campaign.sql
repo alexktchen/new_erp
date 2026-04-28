@@ -6,17 +6,16 @@
 \set ON_ERROR_STOP on
 
 BEGIN;
-\set t :'tenant_id'
 
 WITH any_user AS (SELECT id FROM auth.users LIMIT 1),
-     channel AS (SELECT id FROM line_channels WHERE tenant_id = :'t'::uuid AND code = 'LC-MAIN'),
-     tmpl    AS (SELECT id FROM post_templates WHERE tenant_id = :'t'::uuid AND code = 'PT-DEFAULT')
+     channel AS (SELECT id FROM line_channels WHERE tenant_id = :'tenant_id'::uuid AND code = 'LC-MAIN'),
+     tmpl    AS (SELECT id FROM post_templates WHERE tenant_id = :'tenant_id'::uuid AND code = 'PT-DEFAULT')
 INSERT INTO group_buy_campaigns (
   tenant_id, campaign_no, name, description, status, close_type,
   start_at, end_at, pickup_deadline, pickup_days,
   post_template_id, created_by
 )
-SELECT :'t'::uuid,
+SELECT :'tenant_id'::uuid,
        x.campaign_no,
        x.name,
        x.descr,
@@ -43,7 +42,7 @@ FROM (VALUES
 
 -- campaign_items：每個團掛 2~3 個 SKU，主商品就用 campaign_no 對應的 SKU
 WITH camps AS (
-  SELECT id, campaign_no FROM group_buy_campaigns WHERE tenant_id = :'t'::uuid
+  SELECT id, campaign_no FROM group_buy_campaigns WHERE tenant_id = :'tenant_id'::uuid
 ),
 mapping AS (
   SELECT * FROM (VALUES
@@ -66,21 +65,21 @@ mapping AS (
   ) AS m(campaign_no, sku_code, price, sort_order)
 )
 INSERT INTO campaign_items (tenant_id, campaign_id, sku_id, unit_price, sort_order)
-SELECT :'t'::uuid,
+SELECT :'tenant_id'::uuid,
        (SELECT id FROM camps WHERE campaign_no = m.campaign_no),
-       (SELECT id FROM skus WHERE tenant_id = :'t'::uuid AND sku_code = m.sku_code),
+       (SELECT id FROM skus WHERE tenant_id = :'tenant_id'::uuid AND sku_code = m.sku_code),
        m.price,
        m.sort_order
 FROM mapping m;
 
 -- campaign_channels：每個團都掛 LC-MAIN
 INSERT INTO campaign_channels (tenant_id, campaign_id, channel_id, posted_at)
-SELECT :'t'::uuid,
+SELECT :'tenant_id'::uuid,
        c.id,
-       (SELECT id FROM line_channels WHERE tenant_id = :'t'::uuid AND code = 'LC-MAIN'),
+       (SELECT id FROM line_channels WHERE tenant_id = :'tenant_id'::uuid AND code = 'LC-MAIN'),
        c.created_at
 FROM group_buy_campaigns c
-WHERE c.tenant_id = :'t'::uuid;
+WHERE c.tenant_id = :'tenant_id'::uuid;
 
 COMMIT;
 

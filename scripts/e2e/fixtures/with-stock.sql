@@ -8,10 +8,9 @@
 \set ON_ERROR_STOP on
 
 BEGIN;
-\set t :'tenant_id'
 
 INSERT INTO stock_balances (tenant_id, location_id, sku_id, on_hand, avg_cost, last_movement_at)
-SELECT :'t'::uuid,
+SELECT :'tenant_id'::uuid,
        l.id,
        s.id,
        (CASE WHEN l.type = 'central_warehouse' THEN 100 ELSE 20 END)::numeric,
@@ -21,8 +20,8 @@ FROM locations l
 CROSS JOIN skus s
 LEFT JOIN supplier_skus ss
        ON ss.tenant_id = s.tenant_id AND ss.sku_id = s.id
-WHERE l.tenant_id = :'t'::uuid
-  AND s.tenant_id = :'t'::uuid;
+WHERE l.tenant_id = :'tenant_id'::uuid
+  AND s.tenant_id = :'tenant_id'::uuid;
 
 COMMIT;
 
