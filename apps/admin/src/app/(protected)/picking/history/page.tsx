@@ -580,18 +580,38 @@ function PickModal({
                     return s + (Number.isNaN(v) ? 0 : v);
                   }, 0);
                   const totalDiff = actualTotal - expectedTotal;
+                  let skuShortStores = 0;
+                  let skuShortQty = 0;
+                  if (row) {
+                    for (const st of stores) {
+                      const it = row.get(st.id);
+                      if (!it) continue;
+                      const e = edits.get(it.id);
+                      const v = Number(e !== undefined ? e : (it.picked_qty ?? it.qty));
+                      if (!Number.isNaN(v) && v < Number(it.qty)) {
+                        skuShortStores += 1;
+                        skuShortQty += Number(it.qty) - v;
+                      }
+                    }
+                  }
+                  const skuHasShortage = skuShortStores > 0;
                   return (
                     <Fragment key={sku.id}>
                       {/* 應發 */}
-                      <tr className="bg-zinc-50/50 dark:bg-zinc-900/50">
+                      <tr className={skuHasShortage ? "bg-red-50/60 dark:bg-red-950/20" : "bg-zinc-50/50 dark:bg-zinc-900/50"}>
                         <td
                           rowSpan={3}
-                          className="sticky left-0 bg-white px-3 py-2 align-top dark:bg-zinc-900"
+                          className={`sticky left-0 px-3 py-2 align-top ${skuHasShortage ? "bg-red-50 dark:bg-red-950/30" : "bg-white dark:bg-zinc-900"}`}
                         >
                           <div className="font-medium">{sku.product_name ?? "—"}</div>
                           <div className="text-xs text-zinc-500">
                             {sku.sku_code}{sku.variant_name ? ` / ${sku.variant_name}` : ""}
                           </div>
+                          {skuHasShortage && (
+                            <div className="mt-1 inline-block rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950 dark:text-red-300">
+                              ⚠ 短缺 {skuShortStores} 店 / {skuShortQty} 件
+                            </div>
+                          )}
                         </td>
                         <td className="px-2 py-1 text-xs text-zinc-500">應發</td>
                         {stores.map((st) => {
@@ -613,29 +633,47 @@ function PickModal({
                           if (!it) return <td key={st.id} className="px-2 py-1 text-right text-zinc-300">·</td>;
                           const edit = edits.get(it.id);
                           const cur = edit !== undefined ? edit : String(it.picked_qty ?? it.qty);
+                          const curNum = Number(cur);
+                          const expNum = Number(it.qty);
+                          const isShort = !Number.isNaN(curNum) && curNum < expNum;
+                          const isOver = !Number.isNaN(curNum) && curNum > expNum;
                           const isEdited = edit !== undefined;
                           const isShippedItem = it.generated_transfer_id !== null;
+                          const inputCls = isShort
+                            ? "border-red-400 bg-red-50 text-red-700 dark:border-red-700 dark:bg-red-950 dark:text-red-300"
+                            : isOver
+                            ? "border-purple-400 bg-purple-50 text-purple-700 dark:border-purple-700 dark:bg-purple-950 dark:text-purple-300"
+                            : isEdited
+                            ? "border-amber-400 bg-amber-50 dark:bg-amber-950"
+                            : "border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-800";
                           return (
-                            <td key={st.id} className="px-1 py-1 text-right">
+                            <td
+                              key={st.id}
+                              className={`px-1 py-1 text-right ${isShort ? "bg-red-50/50 dark:bg-red-950/20" : ""}`}
+                            >
                               <input
                                 inputMode="decimal"
                                 disabled={isShippedItem || effectiveStatus === "shipped"}
                                 value={cur}
                                 onChange={(e) => setEdit(it.id, e.target.value)}
-                                className={`w-14 rounded-md border px-1 py-0.5 text-right font-mono text-sm font-semibold ${
-                                  isEdited
-                                    ? "border-amber-400 bg-amber-50 dark:bg-amber-950"
-                                    : "border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-800"
-                                } disabled:bg-zinc-100 disabled:opacity-60 dark:disabled:bg-zinc-800`}
+                                className={`w-14 rounded-md border px-1 py-0.5 text-right font-mono text-sm font-semibold ${inputCls} disabled:opacity-60`}
                               />
                             </td>
                           );
                         })}
-                        <td className="px-3 py-1 text-right font-mono font-semibold">{actualTotal}</td>
+                        <td className={`px-3 py-1 text-right font-mono font-semibold ${
+                          totalDiff < 0
+                            ? "text-red-700 dark:text-red-300"
+                            : totalDiff > 0
+                            ? "text-purple-700 dark:text-purple-300"
+                            : ""
+                        }`}>
+                          {actualTotal}
+                        </td>
                       </tr>
 
                       {/* 狀態 */}
-                      <tr className="bg-zinc-50/50 dark:bg-zinc-900/50">
+                      <tr className={skuHasShortage ? "bg-red-50/60 dark:bg-red-950/20" : "bg-zinc-50/50 dark:bg-zinc-900/50"}>
                         <td className="px-2 py-1 text-xs text-zinc-500">狀態</td>
                         {stores.map((st) => {
                           const it = row?.get(st.id);
@@ -648,14 +686,18 @@ function PickModal({
                           }
                           if (diff > 0) {
                             return (
-                              <td key={st.id} className="px-2 py-1 text-right text-xs font-medium text-purple-600 dark:text-purple-400">
-                                +{diff} 超賣
+                              <td key={st.id} className="px-2 py-1 text-right">
+                                <span className="inline-block rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700 dark:bg-purple-950 dark:text-purple-300">
+                                  +{diff} 超賣
+                                </span>
                               </td>
                             );
                           }
                           return (
-                            <td key={st.id} className="px-2 py-1 text-right text-xs font-medium text-red-600 dark:text-red-400">
-                              {diff} 短缺
+                            <td key={st.id} className="bg-red-50/50 px-2 py-1 text-right dark:bg-red-950/20">
+                              <span className="inline-block rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-950 dark:text-red-300">
+                                {diff} 短缺
+                              </span>
                             </td>
                           );
                         })}
