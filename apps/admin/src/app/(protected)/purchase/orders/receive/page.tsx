@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { translateRpcError } from "@/lib/rpcError";
@@ -353,12 +354,12 @@ function PageContent() {
             {poInfo.status}
           </p>
         </div>
-        <a
+        <Link
           href="/purchase/orders"
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           ← 返回 PO 列表
-        </a>
+        </Link>
       </header>
 
       {error && (

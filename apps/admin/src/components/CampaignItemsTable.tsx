@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 
 type Row = {
@@ -161,7 +162,7 @@ export function CampaignItemsTable({ campaignId }: { campaignId: number }) {
         </div>
         {skuResults.length === 0 && !adding && (
           <div className="mt-2 rounded-md border border-dashed border-zinc-300 p-3 text-center text-xs text-zinc-500 dark:border-zinc-700">
-            尚無規格。先去 <a href="/products" className="underline">商品</a> 頁建規格
+            尚無規格。先去 <Link href="/products" className="underline">商品</Link> 頁建規格
           </div>
         )}
         {skuResults.length > 0 && !adding && (

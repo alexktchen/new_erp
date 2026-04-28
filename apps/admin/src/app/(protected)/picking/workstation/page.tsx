@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 
@@ -404,12 +405,12 @@ export default function PickingWorkstationPage() {
             選結單日 → 從左側商品卡加入到右側大表 → 建立撿貨單
           </p>
         </div>
-        <a
+        <Link
           href="/picking/history"
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           撿貨歷史 →
-        </a>
+        </Link>
       </header>
 
       {error && (

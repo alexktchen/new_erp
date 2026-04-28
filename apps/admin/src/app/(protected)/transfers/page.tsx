@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import {
   TransferReceiveModal,
@@ -199,12 +200,12 @@ export default function TransfersListPage() {
                   : "")}
           </p>
         </div>
-        <a
+        <Link
           href="/transfers/inbox"
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           → 收貨待辦
-        </a>
+        </Link>
       </header>
 
       {error && (

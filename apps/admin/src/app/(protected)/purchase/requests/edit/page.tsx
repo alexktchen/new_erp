@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { PrPipelineStepper, type PrStepEvents, type POSummary, type TransferSummary } from "@/components/PrPipelineStepper";
@@ -490,7 +491,7 @@ function PageContent() {
   if (!id) {
     return (
       <div className="p-6 text-sm text-zinc-500">
-        缺少 id 參數。請從 <a href="/purchase/requests" className="text-blue-600 underline">採購單列表</a> 進入。
+        缺少 id 參數。請從 <Link href="/purchase/requests" className="text-blue-600 underline">採購單列表</Link> 進入。
       </div>
     );
   }

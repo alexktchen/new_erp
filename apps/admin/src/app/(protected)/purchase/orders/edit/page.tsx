@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { SendPOModal } from "@/components/SendPOModal";
@@ -183,7 +184,7 @@ function PageContent() {
   if (!id) {
     return (
       <div className="p-6 text-sm text-zinc-500">
-        缺少 id 參數。請從 <a href="/purchase/orders" className="text-blue-600 underline">採購訂單列表</a> 進入。
+        缺少 id 參數。請從 <Link href="/purchase/orders" className="text-blue-600 underline">採購訂單列表</Link> 進入。
       </div>
     );
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { translateRpcError } from "@/lib/rpcError";
 
@@ -126,12 +127,12 @@ export default function PickingHistoryPage() {
             {waves === null ? "載入中…" : `共 ${waves.length} 張撿貨單`}
           </p>
         </div>
-        <a
+        <Link
           href="/picking/workstation"
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           + 至撿貨工作站
-        </a>
+        </Link>
       </header>
 
       {error && (
