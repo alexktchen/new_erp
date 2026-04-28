@@ -7,7 +7,15 @@
   "scripts": {
     "dev": "npm run dev --workspace apps/admin",
     "build": "npm run build --workspace apps/admin",
-    "lint": "npm run lint --workspace apps/admin"
+    "lint": "npm run lint --workspace apps/admin",
+    "db:reset:e2e":     "./scripts/e2e/reset.sh clean",
+    "db:reset:stock":   "./scripts/e2e/reset.sh with-stock",
+    "db:reset:orders":  "./scripts/e2e/reset.sh with-orders",
+    "db:reset:pr-po":   "./scripts/e2e/reset.sh with-pr-po",
+    "db:reset:tf":      "./scripts/e2e/reset.sh with-transfers",
+    "db:reset:camp":    "./scripts/e2e/reset.sh with-campaign",
+    "db:reset:aid":     "./scripts/e2e/reset.sh with-mutual-aid",
+    "db:reset:demo":    "./scripts/e2e/reset.sh full-demo"
   },
   "engines": {
     "node": ">=22"

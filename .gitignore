@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 !.env.example
+scripts/e2e/.env.e2e
 
 # Secrets
 *.pat
