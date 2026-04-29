@@ -301,16 +301,16 @@ e802150 docs(pilot): v3 5 家名單
 | Q | 香奈問 | Alex 回 |
 |---|---|---|
 | 4 | 3 個 spike issues #102/#103/#104 你寫還是找人？ | **香奈寫** — Alex 工程衝刺、spike 由香奈自己跑（已有 v0.6 BRIEF 的範例與 acceptance criteria 為基礎） |
-| 5 | ezPay 子商店 API 整合 | _待答_ |
-| 6 | Next.js 16 / Tailwind 4 / GitHub Pages deploy 排程 | _待答_ |
+| 5 | ezPay 子商店 API 整合 | **好、Alex 擔任、等 ezPay 報價回來啟動**：schema 已就位（migration `2f6f1f7` 加了 `stores.invoice_mode` / `ezpay_sub_merchant_id`）；`rpc_ezpay_provision_sub_merchant(store_id)` 等架構確認再開；工期 **1~2 週**（含測試），前提是 ezPay 給 sandbox + API doc |
+| 6 | Next.js 16 / Tailwind 4 / GitHub Pages deploy 排程 | **已 done** — `.github/workflows/deploy-admin.yml` 在 PR #101 已含、push main + paths 觸發、static export → GitHub Pages |
 
 ### 🟢 低優先
 
 | Q | 香奈問 | Alex 回 |
 |---|---|---|
-| 7 | PRD 大動有要反駁的嗎 | _待答_ |
-| 8 | 商品模組 mockup → Next.js 移植時程 | _待答_ |
-| 9 | LIFF PRD 對齊 §7.3 新版 | _待答_ |
+| 7 | PRD 大動有要反駁的嗎 | **方向都對、無反駁**。C 混合型 ADR / ezPay 老客戶擴容 / §7.3 LINE 記事本按讚 / 1688 拼多多手動 CSV 都對。1 點微調建議：候選池 BRIEF v0.8 已寫清楚社群商品流程、可併進 `PRD-商品模組.md` 當第 X 章 |
+| 8 | 商品模組 mockup → Next.js 移植時程 | **mockup 在哪？需要香奈 share 連結**（`PRD-商品模組.md` 沒列）。拿到後估時：簡單 list+form 1~2 天 / 含拖排互動 3~5 天。**排在 PR #101 merge 之後、ezPay 之前**（不卡 5/30 上線） |
+| 9 | LIFF PRD 對齊 §7.3 新版 | **要對齊、30 分鐘工** — `docs/PRD-LIFF前端.md` 還在 3 處（line 26 / 83 / 121）寫舊「LINE 社群 +N」假設；v1 LIFF 不做下單沒問題（既定方向），但用詞要改成「LINE 記事本按讚 + 留言補 qty」（純文字、不卡工程）|
 
 ### 時程含意（AA' 版）
 
@@ -329,6 +329,14 @@ e802150 docs(pilot): v3 5 家名單
 |---|---|
 | PR #144 撿貨工作站改進（8 migrations） | ✅ 已 merge 到 main |
 | Phase 5 撿貨流程 | ✅ 大致完成 |
+| Deploy workflow（GitHub Pages） | ✅ 在 PR #101 內 |
+| 候選池 BRIEF §7 4 題技術 | ✅ v0.8 已答完 |
+
+### Alex 需要香奈 unblock 的事
+
+1. **Q5 ezPay**：等 ezPay 報價回來（書面 + sandbox + API doc）
+2. **Q8 商品 mockup**：需要 share mockup 路徑 / 連結
+3. **Q9 LIFF PRD**：30 分鐘改 PRD 用詞（Alex 自己改、不需要 unblock，已記在 todo）
 
 ---
 
