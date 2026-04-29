@@ -522,7 +522,7 @@ function OfferModal({
         .select(`
           id, order_no, pickup_store_id, status,
           member:members(name),
-          items:customer_order_items(campaign_item_id, sku_id, qty, sku:skus(sku_code, product_name, variant_name))
+          items:customer_order_items(campaign_item_id, sku_id, qty, status, sku:skus(sku_code, product_name, variant_name))
         `)
         .eq("pickup_store_id", storeId)
         .in("status", ["pending", "confirmed", "reserved"])
@@ -531,7 +531,7 @@ function OfferModal({
       if (cancelled) return;
       if (e) { setErr(e.message); return; }
       type RawSku = { sku_code: string; product_name: string; variant_name: string | null };
-      type RawItem = { campaign_item_id: number | null; sku_id: number | null; qty: number; sku: RawSku | RawSku[] | null };
+      type RawItem = { campaign_item_id: number | null; sku_id: number | null; qty: number; status: string; sku: RawSku | RawSku[] | null };
       type RawOrder = {
         id: number; order_no: string; pickup_store_id: number; status: string;
         member: { name: string | null } | { name: string | null }[] | null;
@@ -545,17 +545,20 @@ function OfferModal({
           pickup_store_id: o.pickup_store_id,
           status: o.status,
           member_name: memberObj?.name ?? null,
-          items: (o.items ?? []).map((it) => {
-            const sku = Array.isArray(it.sku) ? it.sku[0] : it.sku;
-            return {
-              campaign_item_id: it.campaign_item_id,
-              sku_id: it.sku_id,
-              qty: Number(it.qty),
-              sku_label: sku
-                ? `${sku.product_name}${sku.variant_name ? ` / ${sku.variant_name}` : ""} (${sku.sku_code})`
-                : `SKU#${it.sku_id}`,
-            };
-          }),
+          items: (o.items ?? [])
+            // 排除已 cancelled / expired 的 item — 不該算進可釋出範圍
+            .filter((it) => it.status !== "cancelled" && it.status !== "expired" && it.status !== "picked_up")
+            .map((it) => {
+              const sku = Array.isArray(it.sku) ? it.sku[0] : it.sku;
+              return {
+                campaign_item_id: it.campaign_item_id,
+                sku_id: it.sku_id,
+                qty: Number(it.qty),
+                sku_label: sku
+                  ? `${sku.product_name}${sku.variant_name ? ` / ${sku.variant_name}` : ""} (${sku.sku_code})`
+                  : `SKU#${it.sku_id}`,
+              };
+            }),
         };
       }).filter((o) => o.items.length > 0);
       setOrders(enriched);
@@ -1113,17 +1116,18 @@ function FulfillRequestDialog({
         .select(`
           id, order_no, pickup_store_id, status,
           member:members(name),
-          items:customer_order_items!inner(sku_id, qty, sku:skus(sku_code, product_name, variant_name))
+          items:customer_order_items!inner(sku_id, qty, status, sku:skus(sku_code, product_name, variant_name))
         `)
         .eq("pickup_store_id", myStore)
         .in("status", ["pending", "confirmed", "reserved"])
         .eq("items.sku_id", post.sku_id)
+        .not("items.status", "in", "(cancelled,expired,picked_up)")
         .order("id", { ascending: false })
         .limit(50);
       if (cancelled) return;
       if (e) { setErr(e.message); return; }
       type RawSku = { sku_code: string; product_name: string; variant_name: string | null };
-      type RawItem = { sku_id: number | null; qty: number; sku: RawSku | RawSku[] | null };
+      type RawItem = { sku_id: number | null; qty: number; status: string; sku: RawSku | RawSku[] | null };
       type RawOrder = {
         id: number; order_no: string; pickup_store_id: number; status: string;
         member: { name: string | null } | { name: string | null }[] | null;
@@ -1134,7 +1138,9 @@ function FulfillRequestDialog({
         return {
           id: o.id, order_no: o.order_no, pickup_store_id: o.pickup_store_id, status: o.status,
           member_name: memberObj?.name ?? null,
-          items: (o.items ?? []).map((it) => {
+          items: (o.items ?? [])
+            .filter((it) => it.status !== "cancelled" && it.status !== "expired" && it.status !== "picked_up")
+            .map((it) => {
             const sku = Array.isArray(it.sku) ? it.sku[0] : it.sku;
             return {
               campaign_item_id: null, sku_id: it.sku_id, qty: Number(it.qty),
