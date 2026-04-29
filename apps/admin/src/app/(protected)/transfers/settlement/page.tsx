@@ -105,35 +105,19 @@ function monthToDate(m: string): string {
   return `${m}-01`;
 }
 
-type TabKey = "store_to_store" | "hq_to_store";
-
+// 註：「店間互調」tab (StoreToStoreTab) 隱藏中 — 目前所有調撥都走 HQ 中轉、
+// 直接店間互調 transfer 一直為 0。component 保留以備未來啟用、schema/RPC 不動。
 export default function SettlementPage() {
-  const [tab, setTab] = useState<TabKey>("hq_to_store"); // 預設新功能（總倉對店）
-
   return (
     <div className="flex flex-1 flex-col gap-4 p-6">
       <header>
         <h1 className="text-xl font-semibold">月結算</h1>
         <p className="text-sm text-zinc-500">
-          {tab === "hq_to_store"
-            ? "總倉對各分店：賣斷制、依 hq_to_store 已收貨 transfers 計算貨款。"
-            : "店間互調：彙總所有 store_to_store / return_to_hq 已收貨的調撥單，依 (store_a, store_b) 配對淨額。"}
+          總倉對各分店：賣斷制、依 hq_to_store 已收貨 transfers 計算貨款（含空中轉調整）。
         </p>
       </header>
 
-      {/* Tab 切換 */}
-      <div className="border-b border-zinc-200 dark:border-zinc-800">
-        <nav className="-mb-px flex gap-4" aria-label="Tabs">
-          <TabBtn active={tab === "hq_to_store"} onClick={() => setTab("hq_to_store")}>
-            🏢 總倉 → 各店
-          </TabBtn>
-          <TabBtn active={tab === "store_to_store"} onClick={() => setTab("store_to_store")}>
-            🔁 店間互調
-          </TabBtn>
-        </nav>
-      </div>
-
-      {tab === "hq_to_store" ? <HqToStoreTab /> : <StoreToStoreTab />}
+      <HqToStoreTab />
     </div>
   );
 }

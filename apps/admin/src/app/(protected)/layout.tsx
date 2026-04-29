@@ -76,7 +76,7 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-full flex-1">
-      <aside className="hidden w-52 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 md:flex dark:border-zinc-800 dark:bg-zinc-950">
+      <aside className="hidden w-52 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 md:flex print:hidden dark:border-zinc-800 dark:bg-zinc-950">
         <div className="border-b border-zinc-200 px-4 py-4 dark:border-zinc-800">
           <Link href="/" className="block">
             <div className="text-lg font-semibold tracking-tight">new_erp</div>
@@ -136,7 +136,7 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
       </aside>
 
       {/* Mobile bar */}
-      <div className="md:hidden">
+      <div className="md:hidden print:hidden">
         <header className="flex items-center justify-between border-b border-zinc-200 bg-white px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900">
           <Link href="/" className="font-semibold">new_erp</Link>
           <div className="flex items-center gap-2 text-sm">
