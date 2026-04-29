@@ -43,7 +43,7 @@ const NAV: NavGroup[] = [
   {
     title: "財務",
     items: [
-      { href: "/finance/payables", label: "應付帳款", match: /^\/finance\/payables(?!\/print)/ },
+      { href: "/finance/receivables", label: "HQ 應收", match: /^\/finance\/receivables(?!\/print)/ },
     ],
   },
 ];

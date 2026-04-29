@@ -33,7 +33,7 @@ type HqToStoreSettlement = {
   status: SettlementStatusExt;
   confirmed_at: string | null;
   settled_at: string | null;
-  generated_vendor_bill_id: number | null;
+  generated_receivable_id: number | null;
   notes: string | null;
   updated_at: string;
 };
@@ -150,7 +150,7 @@ function HqToStoreTab() {
         let q = sb
           .from("store_monthly_settlements")
           .select(
-            "id, settlement_month, store_id, payable_amount, transfer_count, item_count, status, confirmed_at, settled_at, generated_vendor_bill_id, notes, updated_at",
+            "id, settlement_month, store_id, payable_amount, transfer_count, item_count, status, confirmed_at, settled_at, generated_receivable_id, notes, updated_at",
           )
           .order("settlement_month", { ascending: false })
           .order("store_id", { ascending: true })
@@ -426,12 +426,12 @@ function HqToStoreDetail({
 
       <div className="flex items-center justify-between gap-2">
         <div className="text-xs text-zinc-500">
-          {settlement.generated_vendor_bill_id && (
-            <span>已產生應付帳款單 #{settlement.generated_vendor_bill_id}</span>
+          {settlement.generated_receivable_id && (
+            <span>已產生 HQ 應收單 #{settlement.generated_receivable_id}</span>
           )}
         </div>
         <a
-          href={`/finance/payables/print?settlement_id=${settlement.id}`}
+          href={`/finance/receivables/print?settlement_id=${settlement.id}`}
           target="_blank"
           rel="noopener noreferrer"
           className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"

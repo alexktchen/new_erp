@@ -125,12 +125,8 @@ export function PrPipelineStepper({
     steps.push({ key: "delivered", label: "部分簽收", state: "current" });
   else steps.push({ key: "delivered", label: "全部簽收", state: "done" });
 
-  // S10 結算
-  if (isCancelled)
-    steps.push({ key: "finalize", label: "結算", state: "skipped" });
-  else if (campaignFinalized)
-    steps.push({ key: "finalize", label: "已結算", state: "done" });
-  else steps.push({ key: "finalize", label: "結算", state: "pending" });
+  // S10 結算 — 已移除：採購單流程在「全部簽收」結束、結算屬於月結算模組（HQ ↔ 分店）
+  // 保留 campaignFinalized 參數以維持向下相容（呼叫端不需立即改）
 
   return (
     <ol className="flex items-start gap-1 sm:gap-2">

@@ -1,0 +1,987 @@
+---
+title: PRD - 訂單 / 取貨模組
+module: Order
+status: draft-v0.1.1
+owner: alex.chen
+created: 2026-04-21
+updated: 2026-04-23
+tags: [PRD, ERP, 訂單, 取貨, Order, Pickup, LINE社群, LIFF, 加盟店, c混合型, 記事本按讚式]
+---
+
+# PRD — 訂單 / 取貨模組（Order / Pickup Module）
+
+> **團購店業務核心模組**。從「總倉發布商品」→「顧客 LINE 社群下單」→「結單採購」→「到貨配送」→「推播取貨」→「門市結算」完整流程的中樞。
+>
+> 零售連鎖 ERP，總倉 1 + 門市 100 + SKU 15,000、20 個 LINE 社群頻道。
+> 本文件為 **v0.1 checklist 版**。
+>
+> **v0.2 增補**：見 [[PRD-訂單取貨模組-v0.2-addendum]]（開團總表 matrix / 揀貨波次 / cutoff_date / 未到貨積壓 / 樂樂 CSV）。
+> **決策基準**：[[decisions/2026-04-23-系統立場-混合型]] C 混合型 — 本模組 `stores.allowed_payment_methods` / `stores.employee_discount_rate` / §13 Q17 per-store 發票模式皆依此立場。
+
+---
+
+## 1. 模組定位
+- [ ] 是**團購流程的樞紐**：連結商品（本次團購清單）、會員（顧客身份）、庫存（reserve）、採購（結單需求）、銷售（取貨結算）、通知（推播）
+- [ ] 處理「顧客下訂 → 取貨」的完整生命週期
+- [ ] 顧客下訂**來源：LINE 社群（OpenChat）** — 無 API，靠人工 / 截圖 LLM 解析
+- [ ] **不處理**的事：
+  - LINE 社群自動發文（無 API、只能半自動：系統範本 + 複製貼上）
+  - 金流 / 發票（銷售模組 / 通知模組各自負責）
+  - 採購 PO 開立本身（採購模組負責、本模組僅產生需求數字）
+
+---
+
+## 2. 核心業務流程
+
+```
+┌───────────────────────────────────────────────────────┐
+│ Phase A: 發布團購                                      │
+├───────────────────────────────────────────────────────┤
+│ 1. 總倉小幫手建立 group_buy_campaign（團購活動）        │
+│    - 選定本次商品清單（多 SKU + 售價 + 收單上限）       │
+│    - 設結單日、預計到貨日、取貨期限                    │
+│    - 選要發布的 LINE 頻道（20 個 subset）              │
+│ 2. 系統產生 post 文案（依 post_template + 變數代入）   │
+│ 3. 小幫手「複製」→ 手動貼到各 LINE 頻道記事本           │
+│                                                        │
+├───────────────────────────────────────────────────────┤
+│ Phase B: 顧客下單（LINE 社群端）                       │
+├───────────────────────────────────────────────────────┤
+│ 4. 顧客在自己門市頻道留言 `+N`（可多品、改單、取消）    │
+│    - 「+3」= 主商品 3 份                               │
+│    - 「+3 另 A 品 2 個」= 多品                         │
+│    - 「取消 +2」/「改成 +5」                           │
+│                                                        │
+├───────────────────────────────────────────────────────┤
+│ Phase C: 訂單登打                                      │
+├───────────────────────────────────────────────────────┤
+│ 5. 小幫手進系統「訂單登打」介面                         │
+│    - v1: 看 LINE 手動逐筆 key                          │
+│    - P1: 上傳截圖 → Claude Haiku vision → 草稿表格     │
+│    - P2: OCR + 規則（法規敏感時備援）                  │
+│ 6. 登打時綁定社群暱稱 ↔ 會員（首次手動、之後 auto）    │
+│ 7. 每筆顧客訂單：建 customer_orders + items             │
+│    - 每 item 呼叫 rpc_reserve 鎖庫存（預購期可 negative）│
+│                                                        │
+├───────────────────────────────────────────────────────┤
+│ Phase D: 結單 + 採購                                   │
+├───────────────────────────────────────────────────────┤
+│ 8. 結單（到期 OR 達 campaign_cap）→ campaign status 轉  │
+│ 9. 系統彙總：each SKU 各門市總需求                     │
+│ 10. 推向採購模組建 PR / PO                             │
+│                                                        │
+├───────────────────────────────────────────────────────┤
+│ Phase E: 到貨 + 配送                                   │
+├───────────────────────────────────────────────────────┤
+│ 11. 供應商到貨總倉 → GR 入庫（採購模組）               │
+│ 12. 總倉依各門市需求建 transfer 配送（庫存模組）       │
+│ 13. 門市收到貨 → receive → in_transit → on_hand        │
+│                                                        │
+├───────────────────────────────────────────────────────┤
+│ Phase F: 通知 + 取貨                                   │
+├───────────────────────────────────────────────────────┤
+│ 14. 本模組觸發「到貨通知」事件                          │
+│ 15. 通知模組推播顧客 LINE OA（非社群、需雙加）         │
+│ 16. 顧客到門市取貨                                      │
+│ 17. POS 掃 QR / 輸手機 → 調出訂單 → 確認取貨           │
+│ 18. POS 結帳 → rpc_outbound 扣庫存 + rpc_release reserve│
+│ 19. order status → completed                            │
+│                                                        │
+└───────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. 名詞定義
+
+- [ ] **團購活動（Campaign）**：一次團購商品發布 = 一個 `group_buy_campaigns` 記錄，涵蓋商品清單 + 期間 + 頻道
+- [ ] **團購商品（Campaign Item）**：活動內某一品項（SKU + 此次售價 + 收單上限）
+- [ ] **收單上限（Campaign Cap）**：單品 / 整團的訂購總量上限；到上限自動關團或該品項轉為「候補」
+- [ ] **LINE 頻道（Channel）**：一個 LINE 社群（OpenChat），對應一個 home_location 門市或多門市共用
+- [ ] **社群暱稱（Nickname）**：顧客在 LINE 社群中的顯示名，**非唯一**可改
+- [ ] **顧客暱稱格式規則**（2026-04-21 新增）：建議標準格式 `{姓名}-{手機後6碼}-{取貨店}`
+  - **多對多社群**（一個 LINE 社群對應多家取貨店）：**必須含取貨店**，否則無法判斷去哪取
+  - **1:1 社群**（一個 LINE 社群只對應單一門市）：**取貨店可省略**，系統預設為該社群唯一對應門市
+  - 格式由小幫手登打時提醒顧客；非強制、但強烈建議以降低綁定錯誤率
+- [ ] **身份對應（Alias）**：`nickname ↔ member_id` 的人工綁定紀錄，之後自動帶入
+- [ ] **顧客訂單（Customer Order）**：一位顧客一次下訂 = 一筆 `customer_orders`，可含多品項
+- [ ] **結單（Campaign Close）**：停止收單，觸發後續採購 / 配送流程
+- [ ] **結團類型（Close Type）**（2026-04-21 新增）：依收單期間長短區分
+  - **常規團（regular）**：3 天收單（預設型態）
+  - **快速團（fast）**：1.5 天收單（急單 / 限時搶購）
+  - **限量團（limited）**：總量達 cap 即關團（配合 Q1 cap 邏輯、不限時長）
+  - 欄位：`group_buy_campaigns.close_type ENUM('regular','fast','limited') DEFAULT 'regular'`
+- [ ] **取貨（Pickup）**：顧客到門市領取已到貨商品，觸發 POS 結算
+
+---
+
+## 4. Goals
+- [ ] G1 — 小幫手登打速度：v1 每筆 < 30 秒、P1 Claude vision 輔助下 < 5 秒
+- [ ] G2 — 結單 → 採購 PR 自動產生 < 3 分鐘
+- [ ] G3 — 到貨 → 推播通知 < 10 分鐘
+- [ ] G4 — 取貨流程：顧客到門市 → 確認取貨 < 60 秒
+- [ ] G5 — 訂單追溯：每筆可找到 LINE 截圖 / LLM 解析原文（2 年保留）
+- [ ] G6 — 誤訂率 < 1%（v1 人工登打）、< 3%（P1 LLM 解析）
+- [ ] G7 — 取貨率 ≥ 95%（未取貨 → 逾期處理）
+
+---
+
+## 5. Non-Goals（v1 不做）
+- [ ] ❌ **LINE 社群自動發文**（API 不支援、半自動複製貼上）
+- [ ] ❌ **LINE 社群自動讀訊息**（API 不支援）
+- [ ] ❌ **金流串接**（v1 取貨時現金結清，銷售模組 POS 處理）
+- [ ] ❌ **宅配 / 物流**（P1，v1 只做「到店取貨」）
+- [ ] ❌ **顧客自助下單頁**（v1 純靠 LINE 社群 +N；P1 可考慮 LIFF 下單）
+- [ ] ❌ **訂單拆單 / 合單**（v1 一筆顧客訂單對應一筆取貨）
+- [ ] ❌ **預付定金**（v1 取貨才付款）
+- [ ] ❌ **LINE Pay 等行動支付**（銷售 Q9 已排除 v1；架構上 `stores.allowed_payment_methods` 已預留、但 v1 各店實際可選值只有 `cash`；P1 再開放各加盟店自主啟用 LINE Pay）
+- [ ] 🟡 **開立統一發票**（2026-04-23 部分解 — per-store 模式，見 §7.12；模式 `none` 店仍不開、需監控門檻；模式 `enabled` 店走 ezPay 電子發票；Q17 尚待 ezPay 業務與會計師雙軌確認）
+
+---
+
+## 6. User Stories
+
+### 總倉小幫手（發布 + 登打）
+- [ ] 作為小幫手，我要建立新團購活動：選 SKU 清單、填售價、設結單日、選頻道
+- [ ] 作為小幫手，我要一鍵產生 LINE 發文文字、複製貼到 20 個頻道
+- [ ] 作為小幫手，我要用系統介面**逐筆登打顧客 +N 留言**（v1 主要工作）
+- [ ] 作為小幫手，我 P1 要**上傳截圖**、系統自動解析訂單、我只審核修改
+- [ ] 作為小幫手，**首次遇到陌生暱稱**時，系統提示我綁定到會員；下次自動帶入
+- [ ] 作為小幫手，我要結單、看到該團各門市各 SKU 總量
+- [ ] 作為小幫手，我要把結單統計**一鍵餵給採購模組**（產生 PR）
+
+### 顧客
+- [ ] 作為顧客，我在 LINE 社群看到團購文、留言 `+3`、店家收單
+- [ ] 作為顧客，我要能**改單**（留言「改成 +5」）— 小幫手能識別
+- [ ] 作為顧客，我可以**取消**（留言「取消」）— 小幫手能識別
+- [ ] 作為顧客，我**加 LINE OA** 後可在 LIFF 查我所有團購訂單
+- [ ] 作為顧客，我收到到貨通知（LINE OA 推播）「您訂的 X 商品已到 A 店，請於 5/10 前取貨」
+- [ ] 作為顧客，我到門市報手機 / 掃 LIFF QR → 店員調出我的訂單 → 確認取貨
+
+### 店長 / 店員
+- [ ] 作為店員，顧客來取貨時我要能快速調出該顧客的訂單（可能多筆團購）
+- [ ] 作為店員，**部分取貨**（顧客只想拿部分、其他下次）系統要能支援
+- [ ] 作為店長，我要看本店的所有進行中團購、預計到貨日、顧客分佈
+- [ ] 作為店長，我要看**逾期未取**清單、聯絡顧客
+
+### 總部老闆
+- [ ] 作為老闆，我要看**團購營運儀表板**：本月團數、總下單數、取貨率、熱銷 SKU
+- [ ] 作為老闆，我要看**每團損益**：售價 × 取貨數 − 採購成本 = 毛利
+
+---
+
+## 7. Functional Requirements
+
+### 7.1 團購活動（Campaign）管理
+
+- [ ] 建立新活動：
+  - 名稱、描述、主圖
+  - 商品清單：多選 SKU，每 SKU 填「本次售價」+「收單上限」（可空表示無上限）
+  - 收單期間：start_at / end_at（自動或手動結單）
+  - 預計到貨日、取貨期限
+  - 套用 post 範本
+  - 發布頻道：選 20 個之中要發的 subset
+- [ ] 活動狀態流：
+  - `draft`（草稿）
+  - `open`（收單中）
+  - `closed`（結單停止收單）
+  - `ordered`（已開 PO 給供應商）
+  - `receiving`（到貨中）
+  - `ready`（可取貨）
+  - `completed`（取貨期限到）
+  - `cancelled`
+- [ ] 編輯限制：`open` 後只能改非關鍵欄位（描述、圖片）；售價 / SKU 清單 / 收單上限鎖定
+- [ ] 關聯：`campaign ← post_templates`（發文模板）、`campaign → campaign_items`（SKU）、`campaign → campaign_channels`（頻道）
+
+### 7.2 發文範本（Post Template）
+
+- [ ] CRUD：總部可管理多套範本
+- [ ] 變數佔位符：`{product_name}`, `{price}`, `{spec}`, `{close_date}`, `{delivery_date}`, `{shop_name}` 等
+- [ ] 套到活動後產生可複製文字（多 SKU 時自動迭代）
+- [ ] UI：活動頁有「產生發文」按鈕 → 彈出視窗顯示文字 + 「複製」按鈕
+- [ ] 複製後提示：「請自行貼到 LINE 社群 X / Y / Z 頻道」
+
+### 7.3 訂單登打（Order Entry）— v1 核心
+
+> **⚠️ 業務事實（2026-04-23 使用者確認，記憶 `project_new_erp_line_order_reality.md`）**：
+> - 顧客下單都在 **LINE 記事本**（Notes / 置頂貼文）、**不在一般聊天訊息**
+> - 下單方式 = **按讚** → 預設 qty=1
+> - 需要 >1 份的顧客會在記事本下方**留言**寫數量
+> - **推翻原本「+N 留言解析」假設**（聊天訊息裡根本沒有人喊單）
+
+- [ ] **v1 路徑（純人工）**：
+  - 小幫手打開對應 LINE 社群的**記事本貼文**、對照按讚名單 + 留言
+  - 進入「活動 → 登打」介面
+  - 介面分區：
+    - 頂部：活動資訊 + 本次商品清單（可拖放加入訂單）
+    - 左側：顧客搜尋（輸入 LINE 暱稱 / 手機 autocomplete）
+    - 中間：訂單明細表（可多筆顧客並列、類似 Excel）
+    - 右側：本活動總結單數 / 各 SKU 累計
+  - 快速鍵：
+    - `Tab` 跳欄
+    - `Enter` 新增明細列
+    - `Ctrl+N` 新顧客
+    - `Ctrl+S` 存檔
+  - Autocomplete：
+    - 打 LINE 暱稱 → 顯示既有 aliases + 會員資料
+    - 新暱稱 → 提示「新綁定」→ 輸入手機 → 系統建 member + alias
+    - **暱稱格式提示**（2026-04-21）：若顧客暱稱非 `{姓名}-{手機後6碼}-{取貨店}` 標準格式、UI 顯示 soft warning 提醒小幫手請顧客補齊（尤其多對多社群必含取貨店）
+  - Draft 自動存檔（30s）
+- [ ] **P1 路徑（截圖解析 — 兩段式）**：
+
+  **A. 按讚名單解析**（主要流量，[spike issue #104](https://github.com/www161616/new_erp/issues/104)）
+  - 上傳 1 張 **LINE 記事本按讚列表截圖**
+  - 系統呼叫 Claude Haiku vision（附活動 context + prompt）
+  - 回傳 JSON：
+    ```json
+    [
+      {"raw_nickname": "Janett8252228456中和環峰",
+       "parsed_name": "Janett",
+       "parsed_phone_hint": "8252228456",
+       "parsed_store_hint": "中和環峰",
+       "default_qty": 1,
+       "reaction_time": "相對時間（如 26 秒讚過）"}
+    ]
+    ```
+  - 系統**預填** `customer_orders` 草稿（qty=1、等小幫手人工確認）
+  - AutoMatch 到既有 `members` / `store`；無法 match 時跳 new customer 流程
+
+  **B. 留言數量補充**（有 qty > 1 的顧客，次要）
+  - 若某位顧客需要 qty > 1、他會在記事本留言（例「我要 3 份」）
+  - 小幫手看到後：
+    - v1 / P1：手動改 qty（省時、多數情況）
+    - P2：第二段 vision 解析留言文字 → 自動 match 回 A 的暱稱 → 更新 qty
+
+  **儲存來源證據**：`source_screenshots[]`（按讚圖 + 留言圖）、`source_parsed_json`、`manual_overrides[]`（記錄小幫手哪些欄位有改）
+
+- [ ] 登打完成：批次建 `customer_orders` + `customer_order_items` + 呼叫 `rpc_reserve`
+
+- [ ] **明確反模式**（2026-04-23 POC 確認、不要做）：
+  - ❌ 解析 LINE **一般聊天訊息**找「+N」留言 — 聊天裡沒人喊單、資料量 0
+  - ❌ 自動推測數量（從按讚 + emoji 反應之類猜）— 按讚本身無數量資訊、用 qty=1 預設 + 人工補就好
+  - ❌ 商品**實物照**辨識 — 70~80% 商品無標籤、ROI 低、見 `memory/project_new_erp_product_reality.md`
+
+### 7.4 顧客身份對應（Customer Line Aliases）
+
+- [ ] `customer_line_aliases (tenant_id, channel_id, nickname, member_id)` UNIQUE
+- [ ] 同一 nickname 在不同 channel 可對應不同 member（極少但理論上可能）
+- [ ] 首次綁定流程：
+  - 小幫手輸入 nickname → 找不到 alias
+  - 系統跳窗「綁定到既有會員 / 建新會員」
+  - 輸入手機 → 走會員模組 `rpc_resolve_member` / 申辦新會員
+  - 建立 alias
+- [ ] 二次之後：直接帶出
+- [ ] **LIFF 自助綁定（P1）**：
+  - 顧客加 OA 後 → LIFF 請填 nickname
+  - 系統自動建 alias（`created_by = self`）
+
+### 7.5 結單（Close Campaign）
+
+- [ ] 手動：小幫手按「結單」按鈕
+- [ ] 自動：達到 `end_at` 時間
+- [ ] 結單觸發：
+  - 活動狀態 `open → closed`
+  - 計算各 SKU 各門市總量（`GROUP BY location, sku`）
+  - 呼叫採購模組 `rpc_create_pr_from_campaign(campaign_id)`
+    - 自動產生一張 PR（或多張依供應商拆分）
+    - PR 來源類型 `source_type = 'campaign'`
+    - 可追溯：PR ← items ← orders ← customers
+  - 觸發通知：小幫手 / 採購員「Campaign #X 已結單、PR 已產生」
+
+### 7.6 收單上限 / Campaign Cap
+
+- [ ] **商品層級**：`campaign_items.cap_qty`（例：保鮮袋限量 500 份）
+- [ ] **頻道層級**：`campaign_channels.cap_qty`（例：A 頻道限 200 份）
+- [ ] **整團層級**：`campaigns.total_cap_qty`（例：整團 2000 份）
+- [ ] 下單時檢查（登打 / LLM 解析完要送出前）：
+  - 若超過 cap → 彈窗警告「超過上限、是否候補 / 截斷」
+  - 小幫手決定：接受 / 候補 / 拒絕
+  - 候補單 status = `waitlist`、不 reserve 庫存
+  - 若補貨補到 → 依候補順序轉 `confirmed`
+- [ ] UI：登打頁即時顯示剩餘名額
+
+### 7.7 取貨（Pickup）
+
+- [ ] **取貨識別**：
+  - 店員掃顧客 LIFF QR → 會員模組 `rpc_resolve_member` → 會員 ID
+  - OR 輸入手機查會員
+  - OR 輸入訂單號碼（小幫手事先給）
+- [ ] **調出訂單**：
+  - 顯示該會員在本店所有 `ready` / `partially_ready` 訂單
+  - 每訂單顯示：活動名稱、品項、數量、付款金額
+- [ ] **確認取貨**：
+  - 全額取貨：標記 order 全部 items 為 `picked_up`、`order.status = completed`
+  - 部分取貨：選要取的 items、status `partially_completed`
+- [ ] **觸發 POS 結算**：
+  - 呼叫銷售模組建立 `pos_sale` + `pos_sale_items`
+  - POS 觸發 `rpc_outbound` 扣庫存 + `rpc_release` 釋放 reserved
+  - POS 觸發 `rpc_earn_points` 會員點數
+  - **顧客付款**（2026-04-21 重寫）：
+    - v1 **全面只收現金**（延續 §5 Non-Goals、銷售 Q9）
+    - 架構上 `stores.allowed_payment_methods JSONB` 欄位已預留（為 P1 LINE Pay 鋪路）
+    - **v1 各店實際可選值只有 `['cash']`**、系統 enforce（不允許店家自行加 LINE Pay）
+    - P1 再開放各加盟店勾選是否啟用 LINE Pay（per-store 自主，延續加盟店自主權）
+    - 發票處理：見 **§7.12 per-store 發票模式**（`enabled` 走 ezPay API、`manual` 紙本、`none` 不開）
+- [ ] **逾期未取**：
+  - 超過取貨期限未取 → `order.status = expired`
+  - 釋放 reserved 庫存
+  - 通知小幫手處理（退款 / 放回庫存銷售 / 報廢）
+
+### 7.8 通知觸發
+
+- [ ] 活動到貨 → 本模組發事件 `order.ready_for_pickup`（包含 member_id, store, pickup_deadline, items）→ 通知模組推播
+- [ ] 取貨期限前 2 天 → `order.pickup_reminder`
+- [ ] 取貨期限到未取 → `order.pickup_expired`
+- [ ] 結單通知小幫手 → `campaign.closed`
+
+### 7.9 報表 / Dashboard
+
+- [ ] 本月團購總覽：活動數 / 總訂單 / 總金額 / 取貨率
+- [ ] 每團損益：售價合計 − 採購成本 = 毛利率
+- [ ] 熱銷 SKU（近 30 天）
+- [ ] 各頻道活躍度：下單數 / 取貨率
+- [ ] 顧客忠誠度：重複下單次數
+- [ ] 逾期未取清單
+
+### 7.10 員工團購（Employee Group-Buy）（2026-04-21 新增）
+
+- [ ] **身份辨識**：登打時若 `members.is_employee = true` → 自動套員工價、標記 `customer_orders.order_type = 'employee'`
+- [ ] **員工價規則**：
+  - 員工價 = 本次團購價 × **員工折數**（預設 **75%**，範圍 70%~80%，per-tenant 可設）
+  - `customer_order_items.unit_price` 記員工價、`discount_reason = 'employee_discount'`
+  - 員工折數沿用銷售模組既有設定（若有）、否則本模組建 `tenant_settings.employee_discount_rate`
+- [ ] **結算方式**（對齊銷售模組 `employee_meals` 月結）：
+  - 取貨時**不當場收錢、不開 POS 發票**
+  - 訂單自動寫入 `employee_meals` 月結表（或等價機制）
+  - 月底結薪時一次從薪資扣除 / 員工繳款
+  - `customer_orders.payment_status = 'pending_monthly_settlement'`
+- [ ] **權限 / 反濫用**：
+  - 員工僅能用自己的 `member_id` 下訂（不得代購他人帳號）
+  - 同活動同員工 UNIQUE 限制維持（Q6）
+  - 員工下訂數量若明顯異常（例：單次 > 10 份）→ UI 顯示警告、需店長 confirm
+- [ ] **加盟店自主**：
+  - 加盟店可**自行調整員工折數**（70~80% 之間、或完全不提供員工優惠）
+  - 設定欄位：`stores.employee_discount_rate`（NULL = 沿用 tenant 預設）
+- [ ] **schema 新增**（或對齊銷售模組）：
+  ```sql
+  ALTER TABLE customer_orders
+    ADD COLUMN order_type TEXT NOT NULL DEFAULT 'regular'
+      CHECK (order_type IN ('regular','employee','guest')),
+    ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (payment_status IN ('pending','paid','pending_monthly_settlement','refunded'));
+
+  ALTER TABLE stores
+    ADD COLUMN employee_discount_rate NUMERIC(3,2);  -- NULL = 沿用 tenant default
+  ```
+
+### 7.12 發票處理（Per-store Invoice Mode）（2026-04-23 新增）
+
+> **策略來源**：Q17 部分解（2026-04-23）— 廠商走 **ezPay 老客戶擴容**（不換綠界）、模式 per-store（符合 C 混合型）。
+> **相關 schema**：`stores.invoice_mode` / `stores.tax_id` / `stores.ezpay_sub_merchant_id` / `stores.monthly_revenue_threshold_cents`（見 migration `20260424130000_v02_q_closure_delta.sql` §7）。
+
+#### 三種 per-store 發票模式
+
+| 模式 | 意思 | 適用 | 結帳時行為 |
+|---|---|---|---|
+| `enabled` | 電子發票（ezPay 子商店）| 營業額 > 20 萬、或加盟主主動啟用 | 結帳 RPC 呼叫 ezPay API 開立 → 回傳發票號碼 → 寫入 `customer_orders.invoice_no` |
+| `manual` | 手動紙本 / 發票機 | 規模中等、還不想走電子 | 結帳 UI 提示店員「本店用紙本、請另開發票」→ 不呼叫 API |
+| `none` | 合法免開（預設） | 月營業額 < 20 萬 | 結帳完成、不提示、不開發票 |
+
+#### 模式切換（加盟主自助）
+
+- **誰能切**：該店加盟主（`store_manager` role）、不需總部審核（符合 C 混合型「看得到 ≠ 管得到」）
+- **切 `none` → `enabled`**：
+  1. 後台「發票設定」頁點擊「啟用電子發票」
+  2. 系統呼叫 **ezPay 主帳號 API** on-demand 開通子商店
+  3. 子商店 ID 回填 `stores.ezpay_sub_merchant_id`
+  4. 發票模式更新為 `enabled`
+  5. ⚠️ 需先填 `stores.tax_id`（統編）才能切換
+- **切 `enabled` → `manual/none`**：加盟主自行決定，但**已開出的發票不回溯**；切換後新訂單才走新模式
+- **總部可視**：admin role 能看所有店 `invoice_mode` 分佈（彙總報表 + 每店狀態）
+
+#### 月營業額門檻監控（法遵安全網）
+
+- 每日批次：計算每店**當月累計營業額**（`SUM(customer_orders.total_amount) WHERE ordered_at 在當月`）
+- 達到 `stores.monthly_revenue_threshold_cents × 0.8`（預設 16 萬）→ 觸發 **`invoice_threshold_warning`** 通知（見 [[PRD-通知模組]] §6.1）
+- 達到 100% 仍停留在 `none` → **每週提醒**加盟主 + **標記法遵風險**（admin dashboard 紅點）
+- 決策權仍在加盟主、系統**不強制切換**（符合 C 混合型加盟店自主）
+
+#### 員工團購（§7.10）發票處理
+
+- 員工價 + 月結機制已存在
+- 走 `enabled` 的店：**月底一張彙總發票**（而非每次開立）— 需 ezPay 支援「彙總開立」（業務確認中）
+- 走 `manual/none` 的店：人資部門月結 + 薪資扣款時紙本收據
+- 待決：會計師諮詢「員工折扣是否實物福利、需列薪資」
+
+#### 退貨折讓（§7.11）對接
+
+- `enabled` 模式：取消發票 → ezPay API `rpc_void_invoice` / 折讓 → `rpc_issue_allowance`
+- `manual` 模式：店員開紙本折讓單
+- `none` 模式：原訂單 = 收款否？依原結帳 method 退款（§7.11 既有邏輯）
+
+---
+
+### 7.11 退貨流程（Returns）（2026-04-21 新增）
+
+- [ ] **退貨時機**：
+  - v1 **限當天內退貨**（取貨當日該店營業時間內）
+  - 隔天起一律不受理（若顧客堅持、走客訴彈性處理、不進本系統流程）
+- [ ] **退貨可否判斷**（店員彈性 + 商品類型差異）：
+  | storage_type | 是否可退 | 備註 |
+  |---|---|---|
+  | 冷藏 refrigerated / 冷凍 frozen | ⚠️ 原則不退 | 食安風險、除非開箱即瑕疵 |
+  | 美食列車 meal_train | ❌ 不可退 | 當天食品、離店即無法判斷 |
+  | 常溫 room_temp / 非食品 | ✅ 可退 | 包裝完整、店員判斷 |
+  - 最終判斷權：**店員彈性**（延續寬鬆哲學）、爭議時升店長
+- [ ] **退品虛擬倉位**（兩個）：
+  - **退貨倉（`warehouse_type = 'return'`）**：商品已損壞 / 不可再出 → 最終**報廢銷毀**（走 `stock_movements.movement_type = 'damage'`）
+  - **瑕疵品倉（`warehouse_type = 'defective'`）**：商品完好但顧客悔單 / 輕微瑕疵 → **再處理**（內部消化 / 折扣出清 / 退回供應商）
+- [ ] **退貨流程**：
+  1. 店員開「退貨單」（引用原 `customer_order_items`）
+  2. 選退貨原因（下拉：品項錯誤 / 品質問題 / 顧客悔單 / 過期 / 其他）+ 選去向倉位
+  3. 系統觸發：
+     - `rpc_return_to_stock(order_item_id, qty, warehouse_type, reason)`
+     - 記 `order_returns`
+     - 若 warehouse_type = `return` → 寫 `stock_movements` movement_type='damage'
+     - 若 warehouse_type = `defective` → 寫 `stock_movements` movement_type='adjust_in'（進瑕疵虛擬倉）
+  4. **退款處理**：
+     - v1 顧客已付現金 → 現場現金退費（POS 建立 `pos_refund` 記錄）
+     - 員工團購 order_type='employee' → 從月結 `employee_meals` 扣除
+  5. 原 `customer_order_items.returned_qty` 累加、log 一筆 `order_return_events`
+- [ ] **金額 / 權限**：
+  - 店員可自主判斷（延續寬鬆哲學）、但**單筆退款金額 > 500 元** 需店長二次確認
+  - 所有退貨單留 `operator_id` + `manager_approval_id`（若有）稽核
+- [ ] **加盟店自主**：
+  - 加盟店可自行設定更嚴格的退貨標準（例：某些店連常溫也不退）
+  - 設定欄位：`stores.return_policy JSONB`（可覆寫總部預設）
+- [ ] **schema 新增**：
+  ```sql
+  CREATE TABLE order_returns (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    store_id BIGINT NOT NULL REFERENCES stores(id),
+    order_id BIGINT NOT NULL REFERENCES customer_orders(id),
+    order_item_id BIGINT NOT NULL REFERENCES customer_order_items(id),
+    qty NUMERIC(18,3) NOT NULL,
+    reason TEXT NOT NULL,
+    warehouse_type TEXT NOT NULL CHECK (warehouse_type IN ('return','defective')),
+    refund_amount NUMERIC(18,2) DEFAULT 0,
+    refund_method TEXT CHECK (refund_method IN ('cash','monthly_settlement','none')),
+    operator_id UUID NOT NULL,
+    manager_approval_id UUID,    -- > 500 元需店長
+    movement_id BIGINT REFERENCES stock_movements(id),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+
+  ALTER TABLE customer_order_items
+    ADD COLUMN returned_qty NUMERIC(18,3) NOT NULL DEFAULT 0;
+
+  ALTER TABLE stores
+    ADD COLUMN return_policy JSONB;  -- 加盟店自訂退貨規則
+  ```
+
+---
+
+## 8. 非功能需求（NFR）
+- [ ] **資料一致性**：`customer_orders` + `customer_order_items` + `rpc_reserve` 必須原子（transaction）
+- [ ] **併發**：登打時 5 人同時 → 同 campaign、同 member 不能被兩位小幫手同時綁定 alias（`UNIQUE` 索引保護）
+- [ ] **效能**：
+  - 活動清單載入 < 1s
+  - 登打 autocomplete P95 < 200ms
+  - LLM 截圖解析 P95 < 5s（P1）
+  - 結單彙總（15k SKU × 100 store）< 10s
+- [ ] **稽核**：所有訂單 CRUD 留 `created_by/updated_by` + 變更 log
+- [ ] **離線**：登打 UI 不支援離線（必需 server-side reserve）
+- [ ] **資料保留**：截圖 + LLM 解析 **2 年**（客訴防線）；訂單主檔 7 年（同稅務要求）
+- [ ] **多租戶**：所有表帶 `tenant_id`、RLS 隔離
+
+---
+
+## 9. 權限（RBAC）
+
+| 權限 | 老闆 | 小幫手 | 店長 | 店員 |
+|---|:-:|:-:|:-:|:-:|
+| 建 / 編輯團購活動 | ✅ | ✅ | ❌ | ❌ |
+| 產生發文文字 | ✅ | ✅ | ❌ | ❌ |
+| 登打訂單 | ✅ | ✅ | ❌ | ❌ |
+| 上傳截圖 + LLM 解析（P1）| ✅ | ✅ | ❌ | ❌ |
+| 綁定 / 修改 alias | ✅ | ✅ | ✅（本店）| ❌ |
+| 結單 | ✅ | ✅ | ❌ | ❌ |
+| 查全集團訂單 | ✅ | ✅ | ❌ | ❌ |
+| 查本店訂單 | ✅ | ✅ | ✅ | ✅ |
+| 確認取貨（POS） | ✅ | ✅ | ✅ | ✅ |
+| 處理逾期訂單 | ✅ | ✅ | ✅（本店）| ❌ |
+| 看報表 | ✅ | ✅ | ✅（本店）| ❌ |
+| **加盟店自主設定**（LINE Pay 啟用 / 員工折數 / 退貨政策 / 取貨時限覆寫）| ✅ | ⚠️ 僅建議 | ✅（本店）| ❌ |
+
+> **加盟店自主權註記**（2026-04-21 新增，呼應通知模組 Q12 加盟店模式）：
+>
+> 100 家加盟店**非直營**、總部對個別店營運細節無直接管轄權。以下項目由**各店店長（= 加盟店老闆）自行決定**，系統以 `stores.*` 欄位記錄：
+> - 是否啟用 LINE Pay（P1，見 §7.7） → `stores.allowed_payment_methods`
+> - 員工團購折數（70~80% 或不提供，見 §7.10） → `stores.employee_discount_rate`
+> - 退貨政策嚴格度（見 §7.11） → `stores.return_policy`
+> - 取貨時限覆寫（見 Q9） → `group_buy_campaigns.pickup_days` 活動層級 / 未來可開店層級
+>
+> 總部角色：**提供預設值 + 法遵底線**（例：統一發票政策 Q17 屬法遵、不得店家自訂）；其他項目**尊重店家自主**。
+>
+> RBAC 含意：此表「店長」若為加盟店老闆 → 擁有上述自主設定權；若為直營店店長（未來可能有）→ 僅限查看、實際設定歸總部。
+
+---
+
+## 10. 資料模型草稿（待 Review）
+
+- [ ] `line_channels` — 20 個 LINE 社群頻道主檔
+- [ ] `post_templates` — 發文範本
+- [ ] `group_buy_campaigns` — 團購活動單頭
+- [ ] `campaign_items` — 活動商品明細（SKU + 售價 + cap）
+- [ ] `campaign_channels` — 活動 × 頻道關聯（哪些頻道要發）
+- [ ] `customer_line_aliases` — 社群暱稱 ↔ 會員對應
+- [ ] `customer_orders` — 顧客訂單（單頭）
+- [ ] `customer_order_items` — 訂單明細
+- [ ] `customer_order_source` — 截圖 + LLM 解析存檔（或直接欄位）
+- [ ] `order_pickup_events` — 取貨紀錄 log
+- [ ] `order_waitlist` — 候補清單（超過 cap 的訂單）
+- [ ] `order_audit_log` — 稽核
+
+---
+
+## 11. 與其他模組的整合點
+
+- [ ] **商品模組** ← 讀 SKU / price / category；campaign_items.sku_id
+- [ ] **會員模組** ← `rpc_resolve_member`、alias 綁定；`rpc_earn_points`
+- [ ] **庫存模組** → `rpc_reserve` / `rpc_release` 鎖釋庫存；取貨時 `rpc_outbound`
+- [ ] **採購模組** → `rpc_create_pr_from_campaign`（新 RPC，v0.2）
+- [ ] **銷售模組** → 取貨時建立 `pos_sales`；**員工團購（§7.10）對齊 `employee_meals` 月結**；退貨（§7.11）建立 `pos_refund`
+- [ ] **通知模組** → 到貨 / 取貨期限 / 逾期事件推播；加盟店 LINE OA 模式（通知 Q12）決定通知能否送達
+- [ ] **LIFF 前端（另案）** → 顧客查訂單、取貨確認、補綁 alias
+
+---
+
+## 12. 驗收準則（Acceptance Criteria）
+
+- [ ] 建團購活動 → 產生發文文字 → 複製貼到 LINE → 活動狀態 `open`
+- [ ] 登打顧客「+3」→ 建 order + items + reserve 3 份 → 剩餘名額 -3
+- [ ] 首次登打新 nickname → 綁定會員流程完成 → 下次自動帶入
+- [ ] 顧客改單「+3 → +5」→ 找既有 order → 更新 qty + 補 reserve 2 份
+- [ ] 結單 → PR 自動產生 → 各門市各 SKU 總量正確
+- [ ] 到貨配送完成 → order status `ready` → 通知模組推播 LINE OA
+- [ ] 顧客到店掃 QR → 店員看到該顧客所有 ready 訂單 → 確認取貨 → POS 結算 + 扣庫存 + 賺點 + 釋放 reserved
+- [ ] 逾期未取 → status `expired` → 釋放 reserved → 通知小幫手
+- [ ] 登打中查過去某顧客某期團購 → 截圖 + LLM 解析 原文可查
+
+---
+
+## 13. Open Questions（待確認）
+
+### 活動設計
+- [x] **Q1 收單上限層級**：→ **三層都要（A）**，但全部 nullable。（2026-04-21）
+
+  **業態事實**：有單一門市爆單情況 → 頻道層 cap 必要。
+
+  **實作**：
+  | 層級 | 欄位 | 用途 | 必填 |
+  |---|---|---|---|
+  | 商品 | `campaign_items.cap_qty` | 某 SKU 整團上限（供應商可給的總量）| 選填 |
+  | 頻道 | `campaign_channels.cap_qty` | 某頻道可訂總量（防單店爆單）| 選填 |
+  | 整團 | `group_buy_campaigns.total_cap_qty` | 整團訂單總量（活動規模限制）| 選填 |
+
+  NULL = 無上限。下單時**三層都檢查**、任一超過即觸發 Q2 處理。
+
+  UI：
+  - 建活動時預設 cap 都 blank（無上限）
+  - 有經驗的小幫手才設限
+  - 登打介面即時顯示三層各自剩餘名額
+- [x] **Q2 超過 cap 處理**：→ **混合（D）：預設候補、小幫手可切拒絕 / 關團**。（2026-04-21）
+
+  **邏輯**：
+  - 登打時系統偵測超 cap → 彈窗
+  - 預設動作：**候補（waitlist）**
+  - 小幫手可改選：
+    - **候補**：進 `order_waitlist`，不 reserve 庫存
+    - **拒絕此單**：不建訂單、小幫手自己回覆顧客抱歉
+    - **自動關團**：把活動狀態改 `closed`、之後都拒收
+  - **候補轉正**：別人取消 / 到貨超預期時、依 waitlist 順序補上
+  - 候補顧客要另外推播通知（「您在保鮮袋團購候補、順位 3」/「已補到您、請確認」）
+
+  **schema**：
+  ```sql
+  CREATE TABLE order_waitlist (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    campaign_id BIGINT NOT NULL REFERENCES group_buy_campaigns(id),
+    sku_id BIGINT NOT NULL,
+    member_id BIGINT REFERENCES members(id),
+    nickname TEXT,
+    qty NUMERIC(18,3) NOT NULL,
+    position INTEGER,                    -- 候補順位
+    status TEXT DEFAULT 'waiting' CHECK (status IN ('waiting','promoted','cancelled','expired')),
+    promoted_order_id BIGINT REFERENCES customer_orders(id),
+    created_by UUID, updated_by UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  ```
+- [x] **Q3 一團多頻道**：→ **各頻道獨立、不合併（A）**。（2026-04-21）
+
+  **原則**：頻道對應門市、取貨地點由頻道決定。
+  - 同會員在 X 頻道 +3 → 訂單 A（X 店取貨）
+  - 同會員在 Y 頻道 +2 → 訂單 B（Y 店取貨）
+  - 兩筆獨立、各自 reserve、各自結帳、各自取貨
+  - `customer_orders.channel_id` 決定 `pickup_location_id`（不由顧客選）
+
+  **schema 影響**：`customer_orders` 要有 `channel_id` NOT NULL，且 `pickup_location_id` 從 `line_channels.home_location_id` 取。
+
+  **偶發跨頻道情境**：視為正常 — 顧客就是在兩家店都要取貨、分兩筆沒問題。
+- [x] **Q4 活動編輯限制**：→ **全部可改、留稽核（C）**。（2026-04-21）
+
+  **延續寬鬆哲學**（同 Q8 店長改售價、Q1 B2B 額度、Q4 POS 折扣）：信任操作者、事後稽核。
+
+  **實作**：
+  - 活動 `open` 狀態後任何欄位都可改（售價、SKU、cap、結單日…）
+  - **每次變更必填 `edit_reason`**（一句話原因）
+  - 所有變更寫 `campaign_audit_log`：
+    - `campaign_id, field, before_value, after_value, edit_reason, operator_id, created_at`
+  - **已下單顧客的保護**：
+    - 售價改了 → 既有訂單保留**下單當時的 unit_price**（不追溯）
+    - SKU 移除 → 既有訂單該 item 不受影響，新訂單無法再加
+    - Cap 改小 → 若已超現況、系統跳警告（不強制處理）
+  - 影響較大的變更（售價 / SKU 移除 / 結單日提前）→ 推播通知小幫手團隊
+
+  **schema 新增**：
+  ```sql
+  CREATE TABLE campaign_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    campaign_id BIGINT NOT NULL REFERENCES group_buy_campaigns(id),
+    entity_type TEXT NOT NULL,      -- 'campaign' / 'item' / 'channel'
+    entity_id BIGINT,
+    field TEXT NOT NULL,
+    before_value JSONB,
+    after_value JSONB,
+    edit_reason TEXT NOT NULL,
+    operator_id UUID NOT NULL,
+    operator_ip INET,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  ```
+
+  **顧客訂單保護欄位**：
+  - `customer_order_items.unit_price` 已記錄下單時價（不追溯後續修改）
+
+### 訂單與登打
+- [x] **Q5 改單 / 取消時限**：→ **結單前隨時可改（A）**。（2026-04-21）
+
+  **原則**：活動狀態 `open` 期間，顧客 / 小幫手可自由改單、取消。
+  - 結單（`open → closed`）瞬間凍結、之後不可改
+  - 小幫手處理改單 / 取消時同樣更新庫存 reserve（加 / 減）
+  - 沒有「結單前 X 小時凍結」的緩衝期 — 延續寬鬆哲學
+
+  **trade-off 已接受**：
+  - 結單前一分鐘取消 → 採購數字可能浮動
+  - 但小幫手本來就要在結單**後**才彙總跑 PR，不影響採購流程
+  - 實務上結單瞬間 snapshot 即為採購依據
+- [x] **Q6 一顧客一團多筆訂單**：→ **合併現有訂單（A）**。（2026-04-21）
+
+  **UNIQUE constraint**：`(tenant_id, campaign_id, channel_id, member_id)` — 同團同頻道同會員只有一筆 order。
+
+  **邏輯**：
+  - 登打時 lookup 是否已有 → 有則 UPDATE / 新增 items；無則 CREATE
+  - 數量變動 → 對應 `rpc_reserve` / `rpc_release`（加或減）
+  - 取貨時一次結算所有 items（取貨地點相同）
+  - `customer_order_items` 可一筆 order 內多個 SKU（本來就支援）
+
+  **追溯來源**：
+  - `customer_order_items.source_line_raw TEXT[]` 可存多次留言原文（每次加訂留一條）
+  - LLM 解析時若偵測為加訂 → append 到既有 items 的 source_raw
+  - 保留「早上 +3 / 下午 +2」時序紀錄以利客訴
+- [x] **Q7 最低訂購量 MOQ**：→ **不做（A）**。（2026-04-21）
+
+  系統不追蹤 / 不警告 MOQ；結單照實收到的數量 → 採購模組 / 小幫手自己決定要不要補單或跟供應商商量。
+
+  **不影響 schema** — 無需額外欄位。未來若真需要、再加 `campaign_items.moq` 欄位（P2）。
+- [x] **Q8 匿名 / 訪客下單**：→ **自動建 guest 會員（C）**。（2026-04-21）
+
+  **流程**：
+  - 小幫手登打遇到無法綁定的 nickname → 系統自動建「訪客會員」（`member_type = 'guest'`）
+  - 訂單正常建立、關聯到 guest member
+  - 顧客日後加 OA / 填手機 → 觸發合併流程（會員模組 `member_merges` 表已規劃）
+  - 合併後：訂單 / 點數 / 儲值金 / alias 全部搬到 real member
+
+  **v0.2 schema 變動（會員模組）**：
+  ```sql
+  ALTER TABLE members
+    ADD COLUMN member_type TEXT NOT NULL DEFAULT 'full'
+      CHECK (member_type IN ('full','guest'));
+
+  -- Guest 的 phone_hash 用 placeholder 滿足 UNIQUE：'GUEST_' || id
+  -- phone_enc NULL 允許（已允許）
+  -- 新增部分 UNIQUE index，避免 GUEST_* 互相衝突：
+  -- UNIQUE (tenant_id, phone_hash) 現已存在，placeholder 'GUEST_<id>' 天然 unique
+  ```
+
+  **guest 會員特性**：
+  - 無手機、無 PII、無法識別個別身份
+  - 取貨時識別：看 nickname + 訂單號碼（或 guest 升級成 full 後憑手機）
+  - 點數 / 儲值金仍可累（合併時搬移）
+  - GDPR 刪除：同 full member 邏輯
+
+  **RPC 新增**：
+  - `rpc_create_guest_member(tenant_id, channel_id, nickname)` → 回 member_id
+  - `rpc_merge_member(guest_id, real_id)` → 搬移所有關聯資料到 real、guest 標 `status='merged'`
+
+  **取貨識別**（更新自 §7.7）：
+  - Guest 取貨：靠 nickname + 訂單號
+  - Full member 取貨：手機 / LIFF QR
+  - 小幫手可在取貨當下升級 guest → full（填手機）
+
+### 取貨
+- [x] **Q9 取貨期限**：→ **依 SKU 儲存類型預設，可覆寫**。（2026-04-21）
+
+  **設計**：
+  - 商品新增 `storage_type` 屬性：`frozen`（冷凍）/ `refrigerated`（冷藏）/ `room_temp`（常溫）
+  - 全 tenant 共用預設值（可調）：
+    | storage_type | 預設取貨天數 |
+    |---|---|
+    | 冷凍 frozen | 7 天 |
+    | 冷藏 refrigerated | **2 天** |
+    | 常溫 room_temp | 7 天 |
+    | **美食列車 meal_train** | **0 天（當天取）** |
+  - 建活動時，系統自動依 SKU 的 storage_type 計算**最嚴格的取貨期限**（取 MIN）
+    - 例：活動含冷凍 + 冷藏商品 → 2 天（取最短）
+    - 例：活動含美食列車 → 當天 0 天（最嚴）
+  - **美食列車特殊規則**：
+    - 若活動含 `meal_train` 商品 → 到貨即當日結案
+    - 未取貨顧客在當日營業結束後自動 `expired`
+    - 推播通知時機需提早（例：到貨前 2 小時就先推播）
+  - 小幫手可在活動層級**手動覆寫**（`group_buy_campaigns.pickup_days` 欄位）
+
+  **v0.2 schema 變動（商品模組）**：
+  ```sql
+  ALTER TABLE products
+    ADD COLUMN storage_type TEXT
+      CHECK (storage_type IN ('frozen','refrigerated','room_temp','meal_train'))
+      DEFAULT 'room_temp';
+  ```
+
+  **v0.2 schema 變動（tenant_settings）**：
+  ```sql
+  -- tenant_settings.pickup_days_by_storage JSONB
+  -- DEFAULT '{"frozen": 7, "refrigerated": 2, "room_temp": 7, "meal_train": 0}'
+  ```
+
+  **v0.2 schema 變動（本模組）**：
+  ```sql
+  ALTER TABLE group_buy_campaigns
+    ADD COLUMN pickup_days INTEGER,  -- NULL = 自動依 SKU storage_type 計算最小值
+    ADD COLUMN pickup_deadline_at TIMESTAMPTZ;  -- 到貨日 + pickup_days 計算
+  ```
+
+  **與庫存 Q2 呼應**：`categories.expiry_grace_days`（效期寬限）是關於**商品本身過期**；本題 `storage_type + pickup_days` 是關於**顧客取貨時限**。兩者獨立但邏輯類似（依商品特性分層設定）。
+- [x] **Q10 逾期未取處理**：→ **依 storage_type 複合規則**。（2026-04-21）
+
+  | storage_type | 處理方式 | 說明 |
+  |---|---|---|
+  | `meal_train`（美食列車）| **報廢** | 當天取貨、過期必須扔掉（食安）|
+  | `refrigerated`（冷藏）| **報廢** | 短效、風險大 |
+  | `frozen`（冷凍）| **放回一般庫存** | 仍可冷凍保存銷售 |
+  | `room_temp`（常溫）| **放回一般庫存** | 保存期長 |
+
+  **流程**（排程 job 每日凌晨跑）：
+  - 掃 `customer_orders` where `pickup_deadline_at < NOW()` AND `status IN ('ready','partially_ready')`
+  - 逐筆處理：
+    1. 訂單 status → `expired`
+    2. 釋放 reserved：`rpc_release`
+    3. 依每個 item 的 SKU storage_type 決定：
+       - 報廢 → `rpc_outbound(movement_type='damage', reason='pickup_expired')`
+       - 放回庫存 → 什麼都不做（reserved 已釋放、on_hand 就回一般庫存了）
+    4. 產生 `order_expiry_events` 紀錄（含處理方式）
+    5. 通知店長 / 小幫手
+  - 顧客：透過通知模組發「您的訂單已逾期」告知（若有賺過點則照 points_ledger 反向扣回、v1 尚未付款故無退款）
+
+  **schema 新增**：
+  ```sql
+  CREATE TABLE order_expiry_events (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    order_id BIGINT NOT NULL REFERENCES customer_orders(id),
+    order_item_id BIGINT,
+    action TEXT NOT NULL CHECK (action IN ('damaged','returned_to_stock','refunded')),
+    storage_type TEXT,
+    qty NUMERIC(18,3) NOT NULL,
+    movement_id BIGINT REFERENCES stock_movements(id),
+    operator_id UUID,    -- NULL = 系統自動
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  ```
+- [x] **Q11 部分取貨後剩餘**：→ **原期限繼續（A）**。（2026-04-21）
+
+  **邏輯**：
+  - 訂單原本 pickup_deadline_at = X
+  - 顧客部分取貨後，剩餘 items 仍使用同一個 deadline X
+  - 不延長期限、顧客需在原期限內回來取完
+  - 到期未取 → 套 Q10 處理（依 storage_type）
+
+  **schema**：
+  - `customer_orders.status` 增加 `partially_picked_up` 狀態（部分已取、仍 open）
+  - `customer_order_items.picked_qty / remaining_qty` 追蹤
+  - 取貨時逐 item 記 `order_pickup_events`（已有規劃）
+
+### 技術 / 整合
+- [x] **Q12 LLM 解析階段策略**：→ **沿用採購 Q3：v1 純人工 / P1 Claude vision / P2 OCR**。（2026-04-21）
+
+  v1 實作重點：`customer_orders.source_raw_text`, `source_screenshots[]`, `source_parsed_json` 三欄位 NULL 即可（留給 P1 / P2 填）。
+  UI：登打介面設計成「順手人工登打」為主、不依賴截圖功能。
+
+- [x] **Q13 campaign_cap 計算時機**：→ **Real-time 即時扣**。（2026-04-21）
+
+  **實作**：
+  - 登打送出訂單 → Transaction 內：
+    1. `SELECT ... FOR UPDATE` 鎖 `campaign_items` / `campaign_channels` / `group_buy_campaigns` 相關列
+    2. 檢查三層 cap 剩餘（`qty_cap - qty_ordered >= requested_qty`）
+    3. 通過 → 建 `customer_order_items` + 更新 `qty_ordered` 計數 + `rpc_reserve`
+    4. 超過 → 依 Q2 流程（彈窗、候補 / 拒絕 / 關團）
+  - `version` 樂觀鎖配合
+  - 登打 UI 實時顯示「剩餘 XX 份」（每次送出後 refresh，或用 Supabase Realtime 推播）
+
+- [x] **Q14 訂單號碼格式**：→ **`ORD-yyMMdd-NNNN`**（例：`ORD-260421-0001`）。（2026-04-21）
+
+  - DB sequence `order_no_seq` 每日 reset（cron 或 trigger 處理）
+  - `customer_orders.order_no TEXT UNIQUE`
+  - RPC `rpc_next_order_no(tenant_id)` 產號
+
+### 報表 / 分析
+- [x] **Q15 逾期閾值警示**：→ **絕對數 ≥ 10 筆、通知門市店長**（非老闆）。（2026-04-21）
+
+  **邏輯**：
+  - 逾期處理 job（Q10）跑完後、每活動 × 每門市彙總
+  - 若某門市在該活動的逾期數 **≥ 10 筆** → 透過通知模組推播該店店長
+  - 推播訊息：「活動 #X 在您的門市有 Y 筆逾期未取（已依規則報廢 / 放回庫存）、請 review 原因」
+  - 老闆可在 dashboard 看全集團彙總、不另外推播
+
+  **why 店長而非老闆**：
+  - 店長最能直接處理該店問題（配送延誤、通知沒發到、顧客反應差）
+  - 老闆只看 dashboard 彙總即可
+  - 閾值絕對數（非比例）避免小團誤報（例：只 8 筆訂單全部逾期 = 100% 但實際不嚴重）
+- [x] **Q16 庫存短缺分配**：→ **FIFO 先下單先得（A）**。（2026-04-21）
+
+  **情境**：到貨 < 訂單總量時的分配機制。
+
+  **邏輯**（排程 job / 手動觸發）：
+  - 依 `customer_orders.created_at ASC` 排序所有該 campaign 的訂單
+  - 依序分配：每筆訂單若 requested_qty ≤ remaining_stock → 全額滿足
+  - 最後一筆可能部分滿足（剩餘不夠）→ `partially_fulfilled`
+  - 之後的訂單全部 `shortage_unfulfilled`
+  - 分配完成：
+    - 滿足的訂單 → status 照正常流程（ready → 推播取貨）
+    - 部分滿足 → 只滿足可給的份數、剩餘轉 `waitlist` 等補貨或退單
+    - 未滿足 → 推播通知顧客「抱歉、本次缺貨、下次優先」+ 記 `shortage_events`（供下次優先處理）
+
+  **schema 新增**：
+  ```sql
+  CREATE TABLE order_shortage_events (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    campaign_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL REFERENCES customer_orders(id),
+    sku_id BIGINT NOT NULL,
+    requested_qty NUMERIC(18,3),
+    fulfilled_qty NUMERIC(18,3),
+    shortage_qty NUMERIC(18,3) GENERATED ALWAYS AS (requested_qty - fulfilled_qty) STORED,
+    reason TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  ```
+
+  **考量**：
+  - 透明公平、顧客能理解「先到先得」
+  - 系統實作簡單（只需 ORDER BY created_at）
+  - 不會產生等級 / 隨機類的客訴
+  - 未來若要改（例如 VIP 優先）可擴充成 score-based（`score = f(tier, time)`），但 v1 純 FIFO
+
+### 發票 / 合規
+- [🟡] **Q17 發票政策**（2026-04-23 部分解 — 等 ezPay 業務 + 會計師確認後收 closed）
+
+  **現況（2026-04-23 session 決定）**：
+  - 📁 廠商策略文件：[[Q17-電子發票廠商比較]] + [[Q17-會計師諮詢清單]]
+  - 📁 決策基準：[[decisions/2026-04-23-系統立場-混合型]] C 混合型
+  - 📁 本模組落地：§7.12 per-store 發票模式（`enabled` / `manual` / `none`）
+
+  **已決定的部分**：
+  1. **廠商 = ezPay 老客戶擴容**（不換綠界；總部已是 3 年 ezPay 客戶）
+  2. **架構 = per-store 模式**（加盟主自主切換，符合 C 混合型）
+  3. **schema 已落地**：`stores.invoice_mode` + `tax_id` + `ezpay_sub_merchant_id` + `monthly_revenue_threshold_cents`（migration `2f6f1f7`）
+  4. **開通方式 = on-demand**：加盟主切到 `enabled` 時、系統呼叫 ezPay API 建立子商店（不預先簽 100 個）
+  5. **門檻監控**：月營業額 > 16 萬（80% × 20 萬）觸發通知、提醒加盟主考慮切 `enabled`
+  6. **v1 預設 = `none`**（合法免開，各店自己決定何時啟用）
+
+  **仍待確認（才能完全 close）**：
+  - [ ] **ezPay 業務**：主帳號 + 子商店架構 / 老客戶擴容折扣 / 計費時機 / 單店方案張數上限層級（見 `Q17-ezPay電話備忘.md`）
+  - [ ] **會計師**：加盟店獨立稅籍分工 / 員工團購發票 / 退貨折讓單 / 過渡期法律風險（見 `Q17-會計師諮詢清單.md`）
+  - [ ] **對接銷售模組** POS 結算流程（§7.7）— 確認 `customer_orders` 結帳時的發票 hook 呼叫點
+  - [ ] **員工團購發票**：彙總月結單張 vs 每次 — 視會計師意見決定
+
+  **與過去版本的變更**：
+  - ~~v1 不開發票~~ → v1 per-store 模式、各店自主決定；`none` 店仍不開但**有法遵監控**、不會失控
+
+---
+
+## 14. 下一步
+- [x] 回答 Q1~Q16（2026-04-21）
+- [x] 合併 2026-04-21 session 8 個 delta（2026-04-22，本次 update）
+- [🟡] **Q17 發票政策**（部分解 2026-04-23；待 ezPay 業務 + 會計師雙軌確認後收 closed）
+- [ ] 進入 v0.2（展開 DB schema + RPC）
+- [ ] 建 `docs/DB-訂單取貨模組.md`
+- [ ] 建 `docs/sql/order_schema.sql`
+- [ ] ~~Spike：Claude Haiku vision 解析準確率（POC）~~ → **2026-04-23 拆為 3 個具體 spike**：
+  - [ ] [#104](https://github.com/www161616/new_erp/issues/104) AI vision — LINE 記事本按讚名單解析（訂單登打）
+  - [ ] [#102](https://github.com/www161616/new_erp/issues/102) AI vision — 團購記事本貼文解析（每天 21-30 篇 campaign）
+  - [ ] [#103](https://github.com/www161616/new_erp/issues/103) AI vision — 1688/拼多多商品頁解析（陸貨建檔）
+  - POC 報告：[[POC-2026-04-23-vision-reality-check]]
+- [ ] Spike：campaign_cap 併發扣除正確性（5 人同時登打）
+- [ ] 與會員模組整合：alias 綁定流程 UX
+- [ ] 和銷售模組對齊：`employee_meals` 月結 + `pos_refund` 退款
+
+---
+
+## 相關連結
+- [[PRD-商品模組]] — 團購商品來源（SKU / price）
+- [[PRD-會員模組]] — 顧客身份、LIFF、OA 推播入口
+- [[PRD-庫存模組]] — reserve / release / outbound
+- [[PRD-採購模組]] — 結單後的 PR / PO
+- [[PRD-銷售模組]] — 取貨時的 POS 結算
+- [[通知模組]] — 推播事件消費者（尚未建立 PRD）
+- [[LIFF前端]] — 顧客端網頁（另案）
+- [專案總覽](Home)
+
+---
+
+## 本 PRD 已吸收的既有決策（跨模組）
+
+- **業態**：團購店**加盟連鎖（100 店，非直營）**、20 LINE 社群頻道 × 300~2000 顧客 / 頻道、婆婆媽媽客群
+- **LINE 社群無 API**：半自動發文 / 截圖解析
+- **雙加架構**：顧客加社群 + OA，訂單模組負責 alias 綁定
+- **加盟店模式**（2026-04-21 新增，呼應通知 Q12）：
+  - 每店自主 LINE OA（通知模組 full/simple/none 三模式）
+  - 每店自主付款方式（v1 僅 cash、P1 開放 LINE Pay）
+  - 每店自主員工折數、退貨政策
+  - 總部提供預設 + 法遵底線，其餘尊重店家自主
+- **預留庫存**：下單即 reserve（庫存 Q7）
+- **解析分階段**：v1 人工 / P1 Claude vision / P2 OCR（採購 Q3）
+- **POS 結算**：v1 只收現金（銷售 Q6 + 本模組 §7.7）
+- **員工團購**：走員工價 + `employee_meals` 月結（本模組 §7.10 對齊銷售）
+- **會員等級**：4 級 + 點數 1% + 等級倍率（會員 Q5）
+- **稽核**：所有表帶四欄位 created_by / updated_by / created_at / updated_at
+
+---
+
+## 變更歷史（Changelog）
+
+- **2026-04-21** v0.1：Q1~Q16 初版完成，commit `d00abab`
+- **2026-04-22** v0.1.1：合併 8 個 delta
+  - Delta 1：顧客暱稱格式規則 `{姓名}-{手機後6碼}-{取貨店}`（§2, §7.3）
+  - Delta 2：v1 不開發票 + 新增 Q17（Open，⚠️ 法遵風險）（§5, §13）
+  - Delta 3：v1 全面只收現金、`stores.allowed_payment_methods` 預留未來（§5, §7.7）
+  - Delta 4：員工團購走員工價 + 月結對齊 `employee_meals`（§7.10 新增）
+  - Delta 5：退貨流程 + 退貨倉/瑕疵品倉（§7.11 新增）
+  - Delta 6：結團類型 常規/快速/限量團（§2）
+  - Delta 7：社群 vs 門市 N:N 已支援、僅確認
+  - Delta 8：§9 RBAC 加入加盟店自主權註記

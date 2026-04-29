@@ -1,0 +1,6 @@
+1:"$Sreact.fragment"
+2:I[39274,["/_next/static/chunks/04qg~bn.qng-b.js","/_next/static/chunks/0iq8l1j18qson.js","/_next/static/chunks/0d3shmwh5_nmn.js","/_next/static/chunks/0dnfg82a2r-hm.js","/_next/static/chunks/0gxiux0akuy~3.js"],"ProductForm"]
+3:I[97367,["/_next/static/chunks/04qg~bn.qng-b.js","/_next/static/chunks/0iq8l1j18qson.js","/_next/static/chunks/0d3shmwh5_nmn.js"],"OutletBoundary"]
+4:"$Sreact.suspense"
+0:{"rsc":["$","$1","c",{"children":[["$","div",null,{"className":"mx-auto w-full max-w-3xl space-y-6 p-6","children":[["$","header",null,{"children":[["$","h1",null,{"className":"text-xl font-semibold","children":"新增商品"}],["$","p",null,{"className":"text-sm text-zinc-500","children":"建立後會自動回編輯頁；SKU / 條碼 / 價格請在下一步加入。"}]]}],["$","$L2",null,{}]]}],[["$","script","script-0",{"src":"/_next/static/chunks/0gxiux0akuy~3.js","async":true}]],["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"cdjjAS2Wy1_dW4V7W3Oz5"}
+5:null
