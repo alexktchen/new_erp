@@ -580,10 +580,9 @@ function Chip({ onClick, children, active }: { onClick: () => void; children: Re
 //   pending → confirmed   （rpc_advance_order_status）
 //   confirmed → shipping  （rpc_ship_aid_order — 派貨 + outbound 庫存 + 建 transfer chain）
 //   shipping → ready      （由店家在「收貨」代辦頁觸發，rpc_receive_transfer 內部自動推進）
-//   ready → completed     （rpc_advance_order_status）
+//   ready → completed     （由門市在「取貨」流程觸發、HQ 不需手動推進）
 const ADVANCE_NEXT: Partial<Record<OrderStatus, OrderStatus>> = {
   pending: "confirmed",
-  ready: "completed",
 };
 
 function StatusButton({
@@ -676,7 +675,7 @@ function StatusButton({
           onClick={advance}
           disabled={busy}
           title={`點擊 → ${STATUS_LABEL[advanceNext]}`}
-          className="rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          className="rounded bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50"
         >
           → {STATUS_LABEL[advanceNext]}
         </button>
@@ -685,7 +684,7 @@ function StatusButton({
         <button
           onClick={ship}
           disabled={busy}
-          className="rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          className="rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
         >
           🚚 派貨
         </button>
@@ -695,11 +694,16 @@ function StatusButton({
           （待店家收貨）
         </span>
       )}
+      {order.status === "ready" && (
+        <span className="text-[10px] text-zinc-400" title="此狀態由門市在「取貨」流程點取貨後自動推進到「已完成」">
+          （待門市取貨）
+        </span>
+      )}
       {isCancellable && (
         <button
           onClick={cancel}
           disabled={busy}
-          className="rounded border border-red-300 px-1.5 py-0.5 text-[10px] text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+          className="rounded bg-rose-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm hover:bg-rose-700 disabled:opacity-50"
         >
           {order.status === "shipping" ? "撤回" : "取消"}
         </button>
