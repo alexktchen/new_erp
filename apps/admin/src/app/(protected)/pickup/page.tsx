@@ -18,6 +18,7 @@ type OpenOrder = {
   status: string;
   pickup_deadline: string | null;
   pickup_store_id: number | null;
+  pickup_ready?: boolean; // 從 v_order_pickup_ready merge 進來
   campaign: { id: number; campaign_no: string; name: string } | null;
   store: { id: number; name: string } | null;
   items: {
@@ -36,8 +37,10 @@ type OpenOrder = {
 const ACTIVE_STATUSES = ["pending", "confirmed", "reserved", "ready", "partially_ready", "partially_completed", "shipping"];
 const INACTIVE_ITEM_STATUSES = new Set(["cancelled", "picked_up", "expired"]);
 
+// 取貨判斷改用 v_order_pickup_ready (基於分店收貨 transfer 實際狀態)
+// 不再依賴 customer_orders.status === 'ready'（status 同步可能漏推）
 function isPickable(order: OpenOrder): boolean {
-  return order.status === "ready" || order.status === "partially_completed";
+  return order.pickup_ready === true;
 }
 function activeItems(order: OpenOrder) {
   return order.items.filter((it) => !INACTIVE_ITEM_STATUSES.has(it.status));
@@ -92,8 +95,21 @@ export default function PickupPage() {
         .in("status", ACTIVE_STATUSES)
         .order("updated_at", { ascending: false });
       if (e2) { setError(e2.message); return; }
+
+      // 一次撈所有訂單的 pickup_ready
+      const orderIds = (ords ?? []).map((o) => o.id);
+      const { data: prData } = orderIds.length > 0
+        ? await sb.from("v_order_pickup_ready").select("order_id, pickup_ready").in("order_id", orderIds)
+        : { data: [] as { order_id: number; pickup_ready: boolean }[] };
+      const prMap = new Map<number, boolean>();
+      for (const row of (prData as { order_id: number; pickup_ready: boolean }[]) ?? []) {
+        prMap.set(row.order_id, row.pickup_ready);
+      }
+
       const m = new Map<number, OpenOrder[]>();
       for (const r of (ords ?? []) as unknown as (OpenOrder & { member_id: number })[]) {
+        // merge pickup_ready 進每筆 order
+        r.pickup_ready = prMap.get(r.id) ?? false;
         const arr = m.get(r.member_id) ?? [];
         arr.push(r);
         m.set(r.member_id, arr);

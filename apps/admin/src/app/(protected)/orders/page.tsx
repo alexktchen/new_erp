@@ -53,6 +53,7 @@ export default function OrdersListPage() {
   const [itemSummary, setItemSummary] = useState<
     Map<number, { lineCount: number; totalQty: number; totalAmount: number }>
   >(new Map());
+  const [pickupReady, setPickupReady] = useState<Map<number, boolean>>(new Map());
   const [detailId, setDetailId] = useState<number | null>(null);
   const [detailNo, setDetailNo] = useState<string>("");
   const [pickup, setPickup] = useState<{ id: number; no: string } | null>(null);
@@ -97,13 +98,16 @@ export default function OrdersListPage() {
 
         const ids = (data ?? []).map((r) => r.id);
         const memIds = Array.from(new Set((data ?? []).map((r) => r.member_id).filter((x): x is number => x != null)));
-        const [ic, ms] = await Promise.all([
+        const [ic, ms, pr] = await Promise.all([
           ids.length
             ? getSupabase().from("customer_order_items").select("order_id, qty, unit_price").in("order_id", ids)
             : Promise.resolve({ data: [] as { order_id: number; qty: number; unit_price: number }[] }),
           memIds.length
             ? getSupabase().from("members").select("id, name, phone, member_no").in("id", memIds)
             : Promise.resolve({ data: [] as Member[] }),
+          ids.length
+            ? getSupabase().from("v_order_pickup_ready").select("order_id, pickup_ready").in("order_id", ids)
+            : Promise.resolve({ data: [] as { order_id: number; pickup_ready: boolean }[] }),
         ]);
         const im = new Map<number, { lineCount: number; totalQty: number; totalAmount: number }>();
         for (const id of ids) im.set(id, { lineCount: 0, totalQty: 0, totalAmount: 0 });
@@ -116,7 +120,11 @@ export default function OrdersListPage() {
         }
         const mm = new Map<number, Member>();
         for (const m of (ms.data as Member[]) ?? []) mm.set(m.id, m);
-        if (!cancelled) { setItemSummary(im); setMembers(mm); }
+        const prMap = new Map<number, boolean>();
+        for (const row of (pr.data as { order_id: number; pickup_ready: boolean }[]) ?? []) {
+          prMap.set(row.order_id, row.pickup_ready);
+        }
+        if (!cancelled) { setItemSummary(im); setMembers(mm); setPickupReady(prMap); }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -212,8 +220,10 @@ export default function OrdersListPage() {
                   <Td className="text-right font-mono">${itemSummary.get(r.id)?.totalAmount ?? 0}</Td>
                   <Td className="text-right text-xs text-zinc-500">{new Date(r.updated_at).toLocaleString("zh-TW")}</Td>
                   <Td className="text-right">
-                    {["pending","confirmed","reserved","ready","partially_ready","partially_completed","shipping"].includes(r.status) && (() => {
-                      const canPickup = r.status === "ready" || r.status === "partially_completed";
+                    {!["completed","expired","cancelled","transferred_out"].includes(r.status) && (() => {
+                      // 取貨判斷改用 v_order_pickup_ready (基於分店收貨 transfer 實際狀態)
+                      // 不再依賴 customer_orders.status === 'ready'（status 同步可能漏推）
+                      const canPickup = pickupReady.get(r.id) === true;
                       return (
                         <button
                           onClick={() => setPickup({ id: r.id, no: r.order_no })}

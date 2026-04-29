@@ -65,6 +65,7 @@ export function OrderDetail({
   const [items, setItems] = useState<ItemRow[] | null>(null);
   const [timeline, setTimeline] = useState<TimelineStep[] | null>(null);
   const [staffNames, setStaffNames] = useState<Map<string, string>>(new Map());
+  const [pickupReady, setPickupReady] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [transferOpen, setTransferOpen] = useState(false);
@@ -112,6 +113,16 @@ export function OrderDetail({
       const skuIds = itemsData.map((it) => it.sku?.id).filter((x): x is number => !!x);
       const tl = await buildTimeline(headData, skuIds, onNavigate);
       if (!cancelled) setTimeline(tl);
+
+      // ========== 載入 pickup_ready (基於分店收貨 transfer 實際狀態) ==========
+      const { data: prData } = await sb
+        .from("v_order_pickup_ready")
+        .select("pickup_ready")
+        .eq("order_id", orderId)
+        .maybeSingle();
+      if (!cancelled) {
+        setPickupReady(((prData as { pickup_ready: boolean } | null)?.pickup_ready) ?? false);
+      }
     })();
     return () => { cancelled = true; };
   }, [orderId, reloadTick]);
@@ -131,7 +142,11 @@ export function OrderDetail({
   const canTransfer = ["pending", "confirmed", "reserved"].includes(head.status);
   const isTransferredOut = head.status === "transferred_out";
   const pickableItems = items.filter((it) => ["pending", "reserved", "ready"].includes(it.status));
-  const canPickup = pickableItems.length > 0 && !["completed","expired","cancelled","transferred_out"].includes(head.status);
+  // 取貨判斷改用 v_order_pickup_ready (基於分店收貨 transfer 實際狀態)
+  // 不再依賴 customer_orders.status === 'ready'（status 同步可能漏推）
+  const canPickup = pickableItems.length > 0
+    && !["completed","expired","cancelled","transferred_out"].includes(head.status)
+    && pickupReady;
   const memberLabel = head.member
     ? `${head.member.name ?? "—"} (${head.member.member_no})`
     : `(${head.nickname_snapshot ?? "—"})`;
