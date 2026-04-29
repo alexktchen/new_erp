@@ -151,12 +151,30 @@ LINE 社群有人貼商品
 
 ## 7. 待確認（技術細節）
 
-### Alex 自決（純技術）
+### Alex 已答（2026-04-29）
 
-1. **狀態軸**：分兩軸（系統判定 + 老闆動作）還是 flat 一個欄位？建議兩軸、避免邏輯打架。
-2. **候選池跟既有 `lele_order_imports` 是否合表**？建議**新開**（一個是訂單來源、一個是商品來源、混一起會亂）。
-3. **「商品週曆」是新表還是新欄位**？建議候選池表加 `scheduled_open_at DATE`、週曆 UI 純讀這欄位、不開新表。
-4. **機器人密鑰放哪**：Supabase Vault / 環境變數 / Edge Function secret？延續既有做法即可。
+> 完整 schema 草稿留到 PRD-社群商品候選池.md；本節給結論。
+
+1. ✅ **狀態軸 → 分兩軸**：`system_status`（new / duplicate_hint / insufficient_data / archived_by_age）+ `owner_action`（none / collected / scheduled / adopted / ignored）。
+   - 比照既有專案慣例：`purchase_requests.status` + `review_status`、`goods_receipts.status` + `arrival_status` 都這樣設計。
+   - 兩軸正交、UI 上下兩個 badge、避免「老闆已收藏 + 系統 30 天 archive」flat 寫法打架。
+
+2. ✅ **不合表、新開 `community_product_candidates`**：
+   - 業務域不同（lele_order_imports = 訂單來源 → customer_orders；新表 = 商品來源 → products）
+   - Lifecycle 不同（lele 用完即丟、候選池要持續顯示在週曆 / 比對相似度）
+   - **借 lele 的 JSONB pattern**（raw + parsed + status enum + tenant index + RLS），但欄位另開（加 source_post_url / source_user_id / scheduled_open_at / similar_product_id 等）
+
+3. ✅ **不開新表、候選池表加 `scheduled_open_at DATE` 欄位**：
+   - 週曆 UI = `WHERE scheduled_open_at BETWEEN today AND today+6` 純讀
+   - 拖排 UI = `UPDATE ... SET scheduled_open_at = ?` 一句、不要 join
+   - partial index `WHERE scheduled_open_at IS NOT NULL`、未排程不佔 index
+   - 同表加 `scheduled_by` / `scheduled_at` 留審計
+
+4. ✅ **機器人密鑰 → Edge Function Secrets 延續既有**：
+   - 新 secret：`COMMUNITY_BOT_SECRET`（Supabase Dashboard → Edge Functions → Secrets）
+   - 驗證點：新 Edge Function `community-bot-ingest`，header `X-Bot-Secret: <token>`、不一致回 401 + audit log
+   - **不放 Vault**：Vault 是 v1 infra issue（PRD-LIFF前端.md 列為基建）、目前還沒部署、升 Vault 是橫向任務、不該卡候選池 MVP
+   - **不放表 BYTEA enc**：那是給 outbound 用（總部代加盟店打 LINE OA API 需要可解密）；候選池機器人是 inbound webhook、密鑰只用來驗證對方 → Edge Secret 即可
 
 ### 香奈已決（2026-04-28）
 
@@ -193,9 +211,9 @@ LINE 社群有人貼商品
 
 ---
 
-## 8. 後續可轉 PRD 的內容
+## 8. 後續可轉 PRD 的內容（§7 全結 → 可立即升 PRD）
 
-當 §7 全部答完後（Alex 4 題技術 + 香奈最後 1 題 LINE 推播），這份可升 `PRD-社群商品候選池.md`，需要展開的內容：
+§7 已全部收斂（香奈 Q3/Q5/Q6/Q8 + Alex Q1/Q2/Q4/Q7）→ 這份可立即升 `PRD-社群商品候選池.md`、需要展開的內容：
 
 - **候選池表 schema**：完整欄位、type、constraints、index、RLS policy
 - **機器人 POST API spec**：URL、headers（密鑰）、body shape、response、錯誤碼
@@ -309,3 +327,4 @@ LINE 社群有人貼商品
 - **2026-04-28** v0.5：香奈回 Q3/Q5/Q6（30 天 / 先簡單版升 AI / 分類+供應商）→ 進「已確認決策」。Q8（LINE 推播）一度誤判成本、香奈點破實際算法後修正：1 老闆 × 30 則/月在免費額度內、成本 = 0；問題改回「需不需要推」、待香奈決。
 - **2026-04-29** v0.6：新增附錄「實際文案範例與 AI 解析難度」。香奈提供真實 LINE 團購文案（西井村丼飯）、含 emoji 化價格 / 多選項 / 噪音 / 賣點混合等典型難度。對應 issue #102 校準工程方期望、確認 MVP 不做 AI 解析（raw 進 Sheet + 人工讀）、但候選池 schema 預留 `parsed JSONB` 欄位給之後填。
 - **2026-04-29** v0.7：Q8 LINE 推播 → **MVP 延後不做**。首頁紅色徽章 baseline 已足、跑一陣子看會不會忘記再決定。未來真要做時的設計筆記入 §7：用既有 group-buy-bot（不另開 OA）、走「拉式」優先（老闆私訊「今天」bot 回清單、reply message 完全免費）、推式 P2 再評。§7 全部問題狀態已收斂、剩 Alex 4 題技術。
+- **2026-04-29** v0.8：§7 4 題技術細節 Alex 答完。Q1 雙軸 status（system_status + owner_action，比照既有 purchase_requests / goods_receipts 慣例）；Q2 新開 `community_product_candidates` 表（借 lele_order_imports 的 JSONB / status enum / RLS pattern 但業務域不同不合表）；Q3 候選池表加 `scheduled_open_at DATE` 欄位 + partial index（不開新表）；Q4 Edge Function Secrets 模式（`COMMUNITY_BOT_SECRET`，延續既有 LINE_CHANNEL_SECRET 慣例、不走 Vault 因 infra 未建、不走表 BYTEA enc 因 inbound webhook 不需可解密）。**§7 全收斂 → 可升 `PRD-社群商品候選池.md`**。
