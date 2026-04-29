@@ -66,6 +66,8 @@ export default function PurchaseRequestsListPage() {
   const [creatingBlank, setCreatingBlank] = useState(false);
   const [showCampaignModal, setShowCampaignModal] = useState(false);
   const [closedCampaigns, setClosedCampaigns] = useState<ClosedCampaignRow[] | null>(null);
+  const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<number>>(new Set());
+  const [creatingMulti, setCreatingMulti] = useState(false);
   const [creatingFromCampaignId, setCreatingFromCampaignId] = useState<number | null>(null);
   const [progressById, setProgressById] = useState<
     Map<number, {
@@ -351,6 +353,34 @@ export default function PurchaseRequestsListPage() {
     }
   }
 
+  // 多選 campaigns 一次建一張 PR
+  async function handleCreateFromMultipleCampaigns() {
+    if (selectedCampaignIds.size === 0) return;
+    setCreatingMulti(true);
+    setError(null);
+    try {
+      const supabase = getSupabase();
+      const { data: userData } = await supabase.auth.getUser();
+      const { data: prId, error: rpcErr } = await supabase.rpc("rpc_create_pr_from_campaigns", {
+        p_campaign_ids: Array.from(selectedCampaignIds),
+        p_operator: userData.user?.id,
+      });
+      if (rpcErr) throw new Error(rpcErr.message);
+      router.push(`/purchase/requests/edit?id=${prId}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setCreatingMulti(false);
+    }
+  }
+
+  function toggleCampaignSelect(id: number) {
+    setSelectedCampaignIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
   async function approve(id: number) {
     if (!confirm("確定通過審核？")) return;
     setBusyId(id);
@@ -633,16 +663,21 @@ export default function PurchaseRequestsListPage() {
       {showCampaignModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setShowCampaignModal(false)}
+          onClick={() => { setShowCampaignModal(false); setSelectedCampaignIds(new Set()); }}
         >
           <div
             className="max-h-[80vh] w-full max-w-2xl overflow-hidden rounded-lg bg-white shadow-xl dark:bg-zinc-900"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-              <h3 className="text-base font-semibold">針對單一團購建單</h3>
+              <div>
+                <h3 className="text-base font-semibold">針對團購建採購單</h3>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  可多選、同團購可重複開單（補單）
+                </p>
+              </div>
               <button
-                onClick={() => setShowCampaignModal(false)}
+                onClick={() => { setShowCampaignModal(false); setSelectedCampaignIds(new Set()); }}
                 className="text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
               >
                 ✕
@@ -656,9 +691,20 @@ export default function PurchaseRequestsListPage() {
               ) : (
                 <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
                   {closedCampaigns.map((c) => {
-                    const disabled = c.existing_pr_id !== null || creatingFromCampaignId !== null;
+                    const checked = selectedCampaignIds.has(c.id);
                     return (
-                      <li key={c.id} className="flex items-center justify-between gap-3 py-2">
+                      <li
+                        key={c.id}
+                        className="flex cursor-pointer items-center gap-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                        onClick={() => toggleCampaignSelect(c.id)}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleCampaignSelect(c.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-500"
+                        />
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium">{c.name}</div>
                           <div className="mt-0.5 text-xs text-zinc-500">
@@ -666,29 +712,42 @@ export default function PurchaseRequestsListPage() {
                             {c.existing_pr_id !== null && (
                               <Link
                                 href={`/purchase/requests/edit?id=${c.existing_pr_id}`}
+                                onClick={(e) => e.stopPropagation()}
                                 className="ml-2 text-amber-600 hover:underline dark:text-amber-400"
                               >
-                                · 已有採購單 #{c.existing_pr_id}
+                                · 已有採購單 #{c.existing_pr_id}（補單會新建）
                               </Link>
-                            )}
-                            {c.existing_pr_id === null && c.same_close_date_has_pr && (
-                              <span className="ml-2 text-zinc-400">· 同日已有結單日 PR（共存）</span>
                             )}
                           </div>
                         </div>
-                        <button
-                          onClick={() => handleCreateFromCampaign(c.id)}
-                          disabled={disabled}
-                          className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40"
-                        >
-                          {creatingFromCampaignId === c.id ? "建立中…" : "建單"}
-                        </button>
                       </li>
                     );
                   })}
                 </ul>
               )}
             </div>
+            {closedCampaigns && closedCampaigns.length > 0 && (
+              <div className="flex items-center justify-between gap-3 border-t border-zinc-200 px-4 py-3 dark:border-zinc-800">
+                <span className="text-xs text-zinc-500">
+                  已選 {selectedCampaignIds.size} 個
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setShowCampaignModal(false); setSelectedCampaignIds(new Set()); }}
+                    className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={handleCreateFromMultipleCampaigns}
+                    disabled={selectedCampaignIds.size === 0 || creatingMulti}
+                    className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-40"
+                  >
+                    {creatingMulti ? "建立中…" : `📋 建立採購單（${selectedCampaignIds.size}）`}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
