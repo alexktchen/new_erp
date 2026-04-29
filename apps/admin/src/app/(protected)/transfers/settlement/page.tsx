@@ -408,7 +408,7 @@ function HqToStoreDetail({
   }, [settlement.id]);
 
   async function onConfirm() {
-    if (!confirm("確認此月結算？確認後將自動產生對應 vendor_bill 入應付帳款。")) return;
+    if (!confirm("確認此月結算？確認後將自動產生應付帳款單入帳。")) return;
     setConfirming(true);
     setErr(null);
     try {
@@ -440,9 +440,21 @@ function HqToStoreDetail({
         <Stat label="商品行數" value={String(settlement.item_count)} />
       </div>
 
-      {settlement.generated_vendor_bill_id && (
-        <p className="text-xs text-zinc-500">已產生 vendor_bill #{settlement.generated_vendor_bill_id}</p>
-      )}
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-zinc-500">
+          {settlement.generated_vendor_bill_id && (
+            <span>已產生應付帳款單 #{settlement.generated_vendor_bill_id}</span>
+          )}
+        </div>
+        <a
+          href={`/finance/payables/print?settlement_id=${settlement.id}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"
+        >
+          📄 列印對帳單
+        </a>
+      </div>
 
       <div>
         <div className="mb-2 text-sm font-medium">出貨明細（{items?.length ?? 0} 筆）</div>
@@ -521,7 +533,7 @@ function HqToStoreDetail({
             disabled={confirming}
             className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
           >
-            {confirming ? "確認中…" : "確認此結算（建 vendor_bill）"}
+            {confirming ? "確認中…" : "確認此結算（產生應付帳款單）"}
           </button>
         </div>
       )}
@@ -800,7 +812,7 @@ function StoreToStoreDetail({
   }, [settlement.id]);
 
   async function onConfirm() {
-    if (!confirm("確認此結算？確認後狀態變 confirmed，net≠0 會自動產生對應 vendor_bill。")) return;
+    if (!confirm("確認此結算？確認後淨額不為零會自動產生應付帳款單。")) return;
     setConfirming(true);
     setErr(null);
     try {
@@ -834,7 +846,7 @@ function StoreToStoreDetail({
       </div>
 
       {settlement.generated_vendor_bill_id && (
-        <p className="text-xs text-zinc-500">已產生 vendor_bill #{settlement.generated_vendor_bill_id}</p>
+        <p className="text-xs text-zinc-500">已產生應付帳款單 #{settlement.generated_vendor_bill_id}</p>
       )}
 
       <div>

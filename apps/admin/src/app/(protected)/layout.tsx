@@ -40,6 +40,12 @@ const NAV: NavGroup[] = [
       { href: "/transfers/settlement", label: "月結算", match: /^\/transfers\/settlement/ },
     ],
   },
+  {
+    title: "財務",
+    items: [
+      { href: "/finance/payables", label: "應付帳款", match: /^\/finance\/payables(?!\/print)/ },
+    ],
+  },
 ];
 
 export default function ProtectedLayout({ children }: { children: ReactNode }) {
