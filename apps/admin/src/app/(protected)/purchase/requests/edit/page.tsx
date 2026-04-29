@@ -52,6 +52,7 @@ type ItemRow = {
   source_campaign_id: number | null;
   retail_price: number | null;     // PR snapshot，可手動覆寫
   franchise_price: number | null;  // PR snapshot，可手動覆寫
+  purchased_so_far: number;        // 同 (campaign, sku) 在其他已通過 PR 的累積採購量
   dirty: boolean;
 };
 
@@ -280,6 +281,17 @@ function PageContent() {
           }),
         );
 
+        // 拉「該 PR 各 (campaign, sku) 在其他已通過 PR 已採購過多少」
+        const { data: purchasedRows } = await supabase
+          .from("v_pr_purchased_history")
+          .select("campaign_id, sku_id, purchased_so_far")
+          .eq("current_pr_id", id);
+        // 同一 sku 可能有多 campaign、加總（避免漏算）
+        const purchasedMap = new Map<number, number>();
+        for (const p of (purchasedRows as { campaign_id: number; sku_id: number; purchased_so_far: number }[] | null) ?? []) {
+          purchasedMap.set(p.sku_id, (purchasedMap.get(p.sku_id) ?? 0) + Number(p.purchased_so_far));
+        }
+
         const merged: ItemRow[] = (itemRows ?? []).map((r) => {
           const m = skuMap.get(r.sku_id);
           return {
@@ -296,6 +308,7 @@ function PageContent() {
             source_campaign_id: r.source_campaign_id,
             retail_price: r.retail_price !== null && r.retail_price !== undefined ? Number(r.retail_price) : null,
             franchise_price: r.franchise_price !== null && r.franchise_price !== undefined ? Number(r.franchise_price) : null,
+            purchased_so_far: purchasedMap.get(r.sku_id) ?? 0,
             dirty: false,
           };
         });
@@ -683,6 +696,7 @@ function PageContent() {
               <Th>品名</Th>
               <Th>供應商</Th>
               <Th>單位</Th>
+              <Th className="text-right">已採購</Th>
               <Th className="text-right">數量</Th>
               <Th className="text-right">成本</Th>
               <Th className="text-right">售價</Th>
@@ -694,7 +708,7 @@ function PageContent() {
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
             {items.length === 0 ? (
               <tr>
-                <td colSpan={10} className="p-6 text-center text-zinc-500">
+                <td colSpan={11} className="p-6 text-center text-zinc-500">
                   {header?.source_type === "manual" ? (
                     <div className="space-y-1">
                       <div>無品項</div>
@@ -742,6 +756,15 @@ function PageContent() {
                     )}
                   </Td>
                   <Td className="text-zinc-500">{r.unit_uom ?? "—"}</Td>
+                  <Td className="text-right">
+                    {r.purchased_so_far > 0 ? (
+                      <span className="font-mono text-amber-600 dark:text-amber-400" title="此 SKU 在同團購的其他已通過 PR 已採購過">
+                        {r.purchased_so_far}
+                      </span>
+                    ) : (
+                      <span className="text-zinc-300">—</span>
+                    )}
+                  </Td>
                   <Td className="text-right">
                     {editable ? (
                       <input

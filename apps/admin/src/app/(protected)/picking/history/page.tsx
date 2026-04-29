@@ -17,6 +17,8 @@ type Wave = {
   created_at: string;
   expected_total: number;
   actual_total: number;
+  source_po_id: number | null;
+  source_po_no: string | null;
 };
 
 type WaveItem = {
@@ -53,6 +55,8 @@ export default function PickingHistoryPage() {
   const [editing, setEditing] = useState<Wave | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [filterDate, setFilterDate] = useState<string>("");
+  const [filterPoId, setFilterPoId] = useState<string>("");
+  const [poOptions, setPoOptions] = useState<Array<{ id: number; po_no: string }>>([]);
   const [autoOpenWaveId, setAutoOpenWaveId] = useState<number | null>(() => {
     if (typeof window === "undefined") return null;
     const id = new URLSearchParams(window.location.search).get("wave");
@@ -75,11 +79,24 @@ export default function PickingHistoryPage() {
         const sb = getSupabase();
         const { data, error: e } = await sb
           .from("picking_waves")
-          .select("id, wave_code, wave_date, status, store_count, item_count, total_qty, note, created_at")
+          .select("id, wave_code, wave_date, status, store_count, item_count, total_qty, note, created_at, source_po_id")
           .order("created_at", { ascending: false })
           .limit(50);
         if (e) throw new Error(e.message);
-        const waveRows = (data as Omit<Wave, "expected_total" | "actual_total">[] | null) ?? [];
+        const waveRows = (data as Omit<Wave, "expected_total" | "actual_total" | "source_po_no">[] | null) ?? [];
+
+        // 拉對應 PO no
+        const poIds = Array.from(new Set(waveRows.map((w) => w.source_po_id).filter((x): x is number => x !== null)));
+        const poNoMap = new Map<number, string>();
+        if (poIds.length) {
+          const { data: poRows } = await sb
+            .from("purchase_orders")
+            .select("id, po_no")
+            .in("id", poIds);
+          for (const p of (poRows as { id: number; po_no: string }[] | null) ?? []) {
+            poNoMap.set(p.id, p.po_no);
+          }
+        }
         const ids = waveRows.map((w) => w.id);
         const totals = new Map<number, { expected: number; actual: number; itemCount: number }>();
         if (ids.length > 0) {
@@ -96,18 +113,27 @@ export default function PickingHistoryPage() {
           }
         }
         if (!cancelled) {
-          setWaves(
-            waveRows.map((r) => {
-              const t = totals.get(r.id);
-              return {
-                ...r,
-                total_qty: Number(r.total_qty),
-                expected_total: t?.expected ?? 0,
-                actual_total: t?.actual ?? 0,
-                item_count: t?.itemCount ?? r.item_count,
-              };
-            }),
-          );
+          const enrichedWaves = waveRows.map((r) => {
+            const t = totals.get(r.id);
+            return {
+              ...r,
+              total_qty: Number(r.total_qty),
+              expected_total: t?.expected ?? 0,
+              actual_total: t?.actual ?? 0,
+              item_count: t?.itemCount ?? r.item_count,
+              source_po_no: r.source_po_id ? (poNoMap.get(r.source_po_id) ?? null) : null,
+            };
+          });
+          setWaves(enrichedWaves);
+          // 更新 PO 篩選下拉選項
+          const poOpts = Array.from(
+            new Map(
+              enrichedWaves
+                .filter((w) => w.source_po_id !== null && w.source_po_no !== null)
+                .map((w) => [w.source_po_id as number, { id: w.source_po_id as number, po_no: w.source_po_no as string }])
+            ).values()
+          ).sort((a, b) => a.po_no.localeCompare(b.po_no));
+          setPoOptions(poOpts);
           setError(null);
         }
       } catch (e) {
@@ -127,9 +153,17 @@ export default function PickingHistoryPage() {
           <p className="text-sm text-zinc-500">
             {waves === null
               ? "載入中…"
-              : filterDate
-                ? `共 ${waves.filter((w) => w.wave_date === filterDate).length} 張（配送日 ${filterDate}）／ ${waves.length} 張`
-                : `共 ${waves.length} 張撿貨單`}
+              : (() => {
+                  const filtered = waves.filter((w) =>
+                    (!filterDate || w.wave_date === filterDate) &&
+                    (!filterPoId || String(w.source_po_id) === filterPoId)
+                  );
+                  if (filterDate || filterPoId) {
+                    return `共 ${filtered.length} 張（已篩選）／ ${waves.length} 張`;
+                  }
+                  return `共 ${waves.length} 張撿貨單`;
+                })()
+            }
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -144,6 +178,28 @@ export default function PickingHistoryPage() {
             {filterDate && (
               <button
                 onClick={() => setFilterDate("")}
+                className="ml-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+                title="清除"
+              >
+                ✕
+              </button>
+            )}
+          </label>
+          <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-300">
+            <span>採購單</span>
+            <select
+              value={filterPoId}
+              onChange={(e) => setFilterPoId(e.target.value)}
+              className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800"
+            >
+              <option value="">全部</option>
+              {poOptions.map((p) => (
+                <option key={p.id} value={p.id}>{p.po_no}</option>
+              ))}
+            </select>
+            {filterPoId && (
+              <button
+                onClick={() => setFilterPoId("")}
                 className="ml-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
                 title="清除"
               >
@@ -189,6 +245,7 @@ export default function PickingHistoryPage() {
             <tr>
               <Th>作業時間</Th>
               <Th>撿貨單號</Th>
+              <Th>來源 PO</Th>
               <Th>摘要</Th>
               <Th></Th>
             </tr>
@@ -196,19 +253,25 @@ export default function PickingHistoryPage() {
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
             {waves !== null && waves.length === 0 && (
               <tr>
-                <td colSpan={4} className="p-6 text-center text-sm text-zinc-500">
+                <td colSpan={5} className="p-6 text-center text-sm text-zinc-500">
                   尚無撿貨單，請至「撿貨工作站」建立。
                 </td>
               </tr>
             )}
-            {waves !== null && waves.length > 0 && filterDate && waves.filter((w) => w.wave_date === filterDate).length === 0 && (
+            {waves !== null && waves.length > 0 && (filterDate || filterPoId) && waves.filter((w) =>
+              (!filterDate || w.wave_date === filterDate) &&
+              (!filterPoId || String(w.source_po_id) === filterPoId)
+            ).length === 0 && (
               <tr>
-                <td colSpan={4} className="p-6 text-center text-sm text-zinc-500">
-                  此配送日無撿貨單。
+                <td colSpan={5} className="p-6 text-center text-sm text-zinc-500">
+                  此篩選條件下無撿貨單。
                 </td>
               </tr>
             )}
-            {waves?.filter((w) => !filterDate || w.wave_date === filterDate).map((w) => {
+            {waves?.filter((w) =>
+              (!filterDate || w.wave_date === filterDate) &&
+              (!filterPoId || String(w.source_po_id) === filterPoId)
+            ).map((w) => {
               const diff = w.actual_total - w.expected_total;
               const diffEl =
                 diff === 0 ? (
@@ -262,6 +325,13 @@ export default function PickingHistoryPage() {
                     {STATUS_LABEL[w.status] ?? w.status}
                   </span>
                   {w.note && <div className="mt-1 text-[11px] text-zinc-500">{w.note}</div>}
+                </td>
+                <td className="px-3 py-2 text-xs">
+                  {w.source_po_no ? (
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">{w.source_po_no}</span>
+                  ) : (
+                    <span className="text-zinc-400">—</span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-sm">
                   <span className="text-zinc-600 dark:text-zinc-300">{w.item_count} 品項</span>
