@@ -57,6 +57,18 @@ type HqToStoreItem = {
   unit_cost: number;
   line_amount: number;
   received_at: string;
+  entry_type: "hq_inbound" | "air_in" | "air_out";
+};
+
+const ENTRY_TYPE_LABEL: Record<HqToStoreItem["entry_type"], string> = {
+  hq_inbound: "HQ 進貨",
+  air_in: "空中轉入",
+  air_out: "空中轉出",
+};
+const ENTRY_TYPE_COLOR: Record<HqToStoreItem["entry_type"], string> = {
+  hq_inbound: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  air_in: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+  air_out: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
 };
 
 type Transfer = {
@@ -369,8 +381,9 @@ function HqToStoreDetail({
       const sb = getSupabase();
       const { data, error } = await sb
         .from("store_monthly_settlement_items")
-        .select("id, transfer_id, transfer_item_id, sku_id, qty_received, unit_cost, line_amount, received_at")
+        .select("id, transfer_id, transfer_item_id, sku_id, qty_received, unit_cost, line_amount, received_at, entry_type")
         .eq("settlement_id", settlement.id)
+        .order("entry_type", { ascending: true })
         .order("received_at", { ascending: true });
       if (cancelled) return;
       if (error) { setErr(error.message); setItems([]); return; }
@@ -433,10 +446,14 @@ function HqToStoreDetail({
 
       <div>
         <div className="mb-2 text-sm font-medium">出貨明細（{items?.length ?? 0} 筆）</div>
+        <p className="mb-2 text-xs text-zinc-500">
+          📦 HQ 進貨：總倉送來；✈️ 空中轉入：別店空中轉來（加應付）；✈️ 空中轉出：空中轉去別店（減應付，金額負）
+        </p>
         <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
           <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
             <thead className="bg-zinc-50 dark:bg-zinc-900">
               <tr>
+                <Th>類型</Th>
                 <Th>收貨日</Th>
                 <Th>調撥單</Th>
                 <Th>商品</Th>
@@ -447,14 +464,20 @@ function HqToStoreDetail({
             </thead>
             <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
               {items === null ? (
-                <tr><td colSpan={6} className="p-3 text-center text-zinc-500">載入中…</td></tr>
+                <tr><td colSpan={7} className="p-3 text-center text-zinc-500">載入中…</td></tr>
               ) : items.length === 0 ? (
-                <tr><td colSpan={6} className="p-3 text-center text-zinc-500">無明細。</td></tr>
+                <tr><td colSpan={7} className="p-3 text-center text-zinc-500">無明細。</td></tr>
               ) : items.map((it) => {
                 const tx = transfers.get(it.transfer_id);
                 const sku = skus.get(it.sku_id);
+                const isNeg = Number(it.line_amount) < 0;
                 return (
                   <tr key={it.id}>
+                    <Td>
+                      <span className={`inline-block rounded px-2 py-0.5 text-xs ${ENTRY_TYPE_COLOR[it.entry_type] ?? ENTRY_TYPE_COLOR.hq_inbound}`}>
+                        {ENTRY_TYPE_LABEL[it.entry_type] ?? it.entry_type}
+                      </span>
+                    </Td>
                     <Td className="text-xs">{new Date(it.received_at).toLocaleDateString("zh-TW")}</Td>
                     <Td className="font-mono text-xs">{tx?.transfer_no ?? `#${it.transfer_id}`}</Td>
                     <Td className="text-xs">
@@ -464,7 +487,9 @@ function HqToStoreDetail({
                     </Td>
                     <Td className="text-right font-mono">{Number(it.qty_received).toLocaleString()}</Td>
                     <Td className="text-right font-mono text-zinc-500">${Number(it.unit_cost).toFixed(2)}</Td>
-                    <Td className="text-right font-mono">${Number(it.line_amount).toLocaleString("zh-TW", { maximumFractionDigits: 0 })}</Td>
+                    <Td className={`text-right font-mono ${isNeg ? "text-amber-600" : ""}`}>
+                      ${Number(it.line_amount).toLocaleString("zh-TW", { maximumFractionDigits: 0 })}
+                    </Td>
                   </tr>
                 );
               })}
@@ -472,7 +497,7 @@ function HqToStoreDetail({
             {items && items.length > 0 && (
               <tfoot className="bg-zinc-50 dark:bg-zinc-900">
                 <tr>
-                  <td colSpan={5} className="px-3 py-2 text-right text-xs text-zinc-500">合計</td>
+                  <td colSpan={6} className="px-3 py-2 text-right text-xs text-zinc-500">合計</td>
                   <td className="px-3 py-2 text-right font-mono font-medium text-rose-600">
                     ${items.reduce((sum, it) => sum + Number(it.line_amount), 0).toLocaleString("zh-TW", { maximumFractionDigits: 0 })}
                   </td>
