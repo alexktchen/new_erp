@@ -294,13 +294,13 @@ export default function PickingWorkstationPage() {
                   <thead className="bg-zinc-50 dark:bg-zinc-900">
                     <tr>
                       <Th className="sticky left-0 bg-zinc-50 dark:bg-zinc-900">SKU</Th>
-                      <Th className="text-right">進貨量</Th>
-                      <Th className="text-right">已撿</Th>
-                      <Th className="text-right">已派</Th>
-                      <Th className="text-right">可分配</Th>
-                      <Th className="text-right">本次合計</Th>
+                      <Th className="w-20 text-center">進貨量</Th>
+                      <Th className="w-16 text-center">已撿</Th>
+                      <Th className="w-16 text-center">已派</Th>
+                      <Th className="w-20 text-center">可分配</Th>
+                      <Th className="w-20 text-center">本次合計</Th>
                       {section.stores.map((st) => (
-                        <Th key={st.store_id} className="text-right text-xs">
+                        <Th key={st.store_id} className="w-24 text-center text-xs">
                           <div>{st.store_name}</div>
                           <div className="font-mono text-[10px] text-zinc-400">{st.store_code}</div>
                         </Th>
@@ -326,26 +326,28 @@ export default function PickingWorkstationPage() {
                             <div className="font-mono text-zinc-500">{sku.sku_code ?? "—"}</div>
                             <div>{sku.sku_label}</div>
                           </Td>
-                          <Td className="text-right font-mono">{sku.gr_qty}</Td>
-                          <Td className="text-right font-mono text-zinc-500">{waveTotal}</Td>
-                          <Td className="text-right font-mono text-zinc-500">{shippedTotal}</Td>
-                          <Td className="text-right font-mono">{remaining}</Td>
-                          <Td className={`text-right font-mono font-semibold ${overAlloc ? "text-rose-600" : "text-blue-600"}`}>
-                            {allocSum}
-                          </Td>
+                          <NumCell value={sku.gr_qty} bold />
+                          <NumCell value={waveTotal} muted />
+                          <NumCell value={shippedTotal} muted />
+                          <NumCell value={remaining} bold />
+                          <NumCell value={allocSum} accent={overAlloc ? "danger" : "primary"} />
                           {section.stores.map((st) => {
                             const cell = section.cell.get(`${sku.sku_id}:${st.store_id}`);
                             const demandQty = cell ? Number(cell.demand_qty) : 0;
                             const value = getAlloc(section.poId, sku.sku_id, st.store_id);
                             return (
-                              <Td key={st.store_id} className="text-right">
+                              <Td key={st.store_id} className="px-2 py-2 text-center">
                                 <input
                                   type="number"
                                   value={value}
                                   onChange={(e) => setAlloc(section.poId, sku.sku_id, st.store_id, Number(e.target.value))}
                                   min={0}
                                   step={1}
-                                  className="w-16 rounded border border-zinc-300 px-2 py-1 text-right font-mono text-sm dark:border-zinc-700 dark:bg-zinc-800"
+                                  className={`w-16 rounded border px-2 py-1 text-center font-mono text-base font-semibold tabular-nums dark:bg-zinc-800 ${
+                                    value === 0
+                                      ? "border-zinc-200 text-zinc-300 dark:border-zinc-700"
+                                      : "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-300"
+                                  }`}
                                 />
                                 <div className="mt-0.5 text-[10px] text-zinc-400">需 {demandQty}</div>
                               </Td>
@@ -370,4 +372,34 @@ function Th({ children, className = "" }: { children: React.ReactNode; className
 }
 function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <td className={`px-3 py-2 ${className}`}>{children}</td>;
+}
+
+function NumCell({
+  value,
+  bold = false,
+  muted = false,
+  accent,
+}: {
+  value: number;
+  bold?: boolean;
+  muted?: boolean;
+  accent?: "primary" | "danger";
+}) {
+  const isZero = value === 0;
+  // 顏色順序：accent 最優先，否則 muted（已撿/已派灰色），否則 bold（重點數字深色）
+  const cls = accent === "danger"
+    ? "text-rose-600 font-bold"
+    : accent === "primary"
+      ? (isZero ? "text-zinc-300" : "text-blue-600 font-bold")
+      : muted
+        ? (isZero ? "text-zinc-300" : "text-zinc-500")
+        : bold
+          ? (isZero ? "text-zinc-300" : "text-zinc-900 font-semibold dark:text-zinc-100")
+          : "text-zinc-700 dark:text-zinc-300";
+
+  return (
+    <td className={`px-3 py-2 text-center font-mono text-base tabular-nums ${cls}`}>
+      {value}
+    </td>
+  );
 }
