@@ -1,14 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 
 type CalendarCandidate = {
   id: number;
   product_name_hint: string | null;
   scheduled_open_at: string | null;
+  scheduled_sort_order: number | null;
   owner_action: string;
+  created_at: string;
   adopted_supplier_name: string | null;
   adopted_cost: number | null;
   adopted_sale_price: number | null;
@@ -39,9 +41,17 @@ function formatDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+function suggestedTime(idx: number): string {
+  const total = 9 * 60 + idx * 30;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
 export default function CommunityCandidatesCalendarPage() {
   const [rows, setRows] = useState<CalendarCandidate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const days = useMemo(() => {
     const today = new Date();
@@ -53,23 +63,30 @@ export default function CommunityCandidatesCalendarPage() {
     });
   }, []);
 
-  useEffect(() => {
-    const todayStr = formatDate(days[0]);
+  const reload = useCallback(async () => {
+    const startStr = formatDate(days[0]);
     const endStr = formatDate(days[6]);
-    getSupabase()
+    const { data, error: err } = await getSupabase()
       .from("community_product_candidates")
       .select(
-        "id, product_name_hint, scheduled_open_at, owner_action, adopted_supplier_name, adopted_cost, adopted_sale_price"
+        "id, product_name_hint, scheduled_open_at, scheduled_sort_order, owner_action, created_at, adopted_supplier_name, adopted_cost, adopted_sale_price"
       )
       .not("scheduled_open_at", "is", null)
-      .gte("scheduled_open_at", todayStr)
+      .gte("scheduled_open_at", startStr)
       .lte("scheduled_open_at", endStr)
-      .order("scheduled_open_at")
-      .then(({ data, error: err }) => {
-        if (err) setError(err.message);
-        else setRows((data as CalendarCandidate[]) ?? []);
-      });
+      .order("scheduled_open_at", { ascending: true })
+      .order("scheduled_sort_order", { ascending: true, nullsFirst: false })
+      .order("created_at", { ascending: true });
+    if (err) setError(err.message);
+    else {
+      setError(null);
+      setRows((data as CalendarCandidate[]) ?? []);
+    }
   }, [days]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
 
   const byDate = useMemo(() => {
     const map = new Map<string, CalendarCandidate[]>();
@@ -82,6 +99,70 @@ export default function CommunityCandidatesCalendarPage() {
     }
     return map;
   }, [days, rows]);
+
+  const swapWith = async (a: CalendarCandidate, b: CalendarCandidate) => {
+    setBusy(true);
+    try {
+      const sa = a.scheduled_sort_order ?? 0;
+      const sb = b.scheduled_sort_order ?? 0;
+      const now = new Date().toISOString();
+      const sb1 = getSupabase();
+      const r1 = await sb1
+        .from("community_product_candidates")
+        .update({ scheduled_sort_order: sb, updated_at: now })
+        .eq("id", a.id);
+      if (r1.error) throw r1.error;
+      const r2 = await sb1
+        .from("community_product_candidates")
+        .update({ scheduled_sort_order: sa, updated_at: now })
+        .eq("id", b.id);
+      if (r2.error) throw r2.error;
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleMoveUp = async (r: CalendarCandidate) => {
+    if (!r.scheduled_open_at) return;
+    const dayCards = byDate.get(r.scheduled_open_at.slice(0, 10)) ?? [];
+    const idx = dayCards.findIndex((c) => c.id === r.id);
+    if (idx <= 0) return;
+    await swapWith(r, dayCards[idx - 1]);
+  };
+
+  const handleMoveDown = async (r: CalendarCandidate) => {
+    if (!r.scheduled_open_at) return;
+    const dayCards = byDate.get(r.scheduled_open_at.slice(0, 10)) ?? [];
+    const idx = dayCards.findIndex((c) => c.id === r.id);
+    if (idx < 0 || idx >= dayCards.length - 1) return;
+    await swapWith(r, dayCards[idx + 1]);
+  };
+
+  const handleRemove = async (r: CalendarCandidate) => {
+    const label = r.product_name_hint ?? "(No title)";
+    if (!window.confirm(`Remove "${label}" from schedule?`)) return;
+    setBusy(true);
+    try {
+      const { error: err } = await getSupabase()
+        .from("community_product_candidates")
+        .update({
+          owner_action: "none",
+          scheduled_open_at: null,
+          scheduled_sort_order: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", r.id);
+      if (err) throw err;
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const todayStr = formatDate(days[0]);
 
@@ -132,17 +213,26 @@ export default function CommunityCandidatesCalendarPage() {
                     No schedule
                   </div>
                 ) : (
-                  cards.map((r) => {
+                  cards.map((r, idx) => {
                     const any = r.adopted_supplier_name || r.adopted_cost !== null || r.adopted_sale_price !== null;
                     const complete = !!(r.adopted_supplier_name && r.adopted_cost !== null && r.adopted_sale_price !== null);
+                    const isFirst = idx === 0;
+                    const isLast = idx === cards.length - 1;
                     return (
-                      <Link
+                      <div
                         key={r.id}
-                        href="/community-candidates"
-                        className="flex flex-col gap-1.5 rounded-md border border-zinc-200 bg-white p-2 text-xs transition hover:shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+                        className="flex flex-col gap-1.5 rounded-md border border-zinc-200 bg-white p-2 text-xs dark:border-zinc-800 dark:bg-zinc-900"
                       >
-                        <div className="font-medium leading-snug">
-                          {r.product_name_hint ?? "(No title)"}
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="font-mono text-[10px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {suggestedTime(idx)}
+                          </span>
+                          <Link
+                            href="/community-candidates"
+                            className="font-medium leading-snug hover:underline"
+                          >
+                            {r.product_name_hint ?? "(No title)"}
+                          </Link>
                         </div>
                         <div className="flex flex-wrap gap-1">
                           <span
@@ -170,7 +260,37 @@ export default function CommunityCandidatesCalendarPage() {
                             {r.adopted_sale_price !== null && <div>Price: {r.adopted_sale_price}</div>}
                           </div>
                         )}
-                      </Link>
+                        <div className="flex gap-1 pt-0.5">
+                          {!isFirst && (
+                            <button
+                              onClick={() => handleMoveUp(r)}
+                              disabled={busy}
+                              className="rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 disabled:opacity-50"
+                              title="Move up"
+                            >
+                              Up
+                            </button>
+                          )}
+                          {!isLast && (
+                            <button
+                              onClick={() => handleMoveDown(r)}
+                              disabled={busy}
+                              className="rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 disabled:opacity-50"
+                              title="Move down"
+                            >
+                              Down
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleRemove(r)}
+                            disabled={busy}
+                            className="ml-auto rounded border border-red-300 px-1.5 py-0.5 text-[10px] text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30 disabled:opacity-50"
+                            title="Remove from schedule"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
                     );
                   })
                 )}

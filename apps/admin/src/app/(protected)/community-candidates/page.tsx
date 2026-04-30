@@ -13,6 +13,7 @@ type Candidate = {
   system_status: string;
   owner_action: string;
   scheduled_open_at: string | null;
+  scheduled_sort_order: number | null;
   created_at: string;
   adopted_supplier_name: string | null;
   adopted_cost: number | null;
@@ -69,7 +70,7 @@ export default function CommunityCandidatesPage() {
     let q = getSupabase()
       .from("community_product_candidates")
       .select(
-        "id, product_name_hint, raw_text, source_user_id, source_user_name, source_channel, system_status, owner_action, scheduled_open_at, created_at, adopted_supplier_name, adopted_cost, adopted_sale_price"
+        "id, product_name_hint, raw_text, source_user_id, source_user_name, source_channel, system_status, owner_action, scheduled_open_at, scheduled_sort_order, created_at, adopted_supplier_name, adopted_cost, adopted_sale_price"
       )
       .order("created_at", { ascending: false })
       .limit(200);
@@ -114,15 +115,50 @@ export default function CommunityCandidatesPage() {
   };
 
   const handleCollect = (id: number) =>
-    patch(id, { owner_action: "collected", scheduled_open_at: null });
+    patch(id, { owner_action: "collected", scheduled_open_at: null, scheduled_sort_order: null });
   const handleIgnore = (id: number) =>
-    patch(id, { owner_action: "ignored", scheduled_open_at: null });
+    patch(id, { owner_action: "ignored", scheduled_open_at: null, scheduled_sort_order: null });
   const handleRestore = (id: number) =>
-    patch(id, { owner_action: "none", scheduled_open_at: null });
+    patch(id, { owner_action: "none", scheduled_open_at: null, scheduled_sort_order: null });
+
+  const nextSortOrderForDay = async (date: string): Promise<number> => {
+    const { data, error: err } = await getSupabase()
+      .from("community_product_candidates")
+      .select("scheduled_sort_order")
+      .eq("scheduled_open_at", date)
+      .not("scheduled_sort_order", "is", null)
+      .order("scheduled_sort_order", { ascending: false })
+      .limit(1);
+    if (err) throw err;
+    const max = (data?.[0]?.scheduled_sort_order as number | null) ?? 0;
+    return max + 1;
+  };
+
+  const scheduleAt = async (id: number, dateStr: string) => {
+    setBusy(true);
+    try {
+      const nextOrder = await nextSortOrderForDay(dateStr);
+      const { error: err } = await getSupabase()
+        .from("community_product_candidates")
+        .update({
+          owner_action: "scheduled",
+          scheduled_open_at: dateStr,
+          scheduled_sort_order: nextOrder,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id);
+      if (err) throw err;
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleSchedule = async (id: number) => {
     if (!scheduleDate) return;
-    await patch(id, { owner_action: "scheduled", scheduled_open_at: scheduleDate });
+    await scheduleAt(id, scheduleDate);
     setScheduling(null);
     setScheduleDate("");
   };
@@ -149,7 +185,7 @@ export default function CommunityCandidatesPage() {
   };
 
   const handleQuickSchedule = async (id: number, dateStr: string) => {
-    await patch(id, { owner_action: "scheduled", scheduled_open_at: dateStr });
+    await scheduleAt(id, dateStr);
     setScheduling(null);
     setScheduleDate("");
   };
