@@ -49,12 +49,27 @@ export default function Dashboard() {
   const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
   const [recentMembers, setRecentMembers] = useState<RecentMember[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [pendingCandidates, setPendingCandidates] = useState<number | null>(null);
 
   useEffect(() => {
     (async () => {
       const { data } = await getSupabase()
         .from("stores").select("id, code, name").eq("is_active", true).order("name");
       setStores((data as Store[]) ?? []);
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { count } = await getSupabase()
+          .from("community_product_candidates")
+          .select("id", { count: "exact", head: true })
+          .eq("owner_action", "none");
+        setPendingCandidates(count ?? 0);
+      } catch (e) {
+        console.warn("Failed to load pending community candidates count", e);
+      }
     })();
   }, []);
 
@@ -145,6 +160,16 @@ export default function Dashboard() {
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
             {error}
           </div>
+        )}
+
+        {pendingCandidates !== null && pendingCandidates > 0 && (
+          <Link
+            href="/community-candidates"
+            className="flex items-center justify-between rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 transition hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950/60"
+          >
+            <span>📥 社群選品待處理：<span className="font-semibold">{pendingCandidates} 筆</span></span>
+            <span className="text-xs opacity-70">前往候選池 →</span>
+          </Link>
         )}
 
         <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
