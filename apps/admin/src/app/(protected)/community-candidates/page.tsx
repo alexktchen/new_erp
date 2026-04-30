@@ -14,6 +14,9 @@ type Candidate = {
   owner_action: string;
   scheduled_open_at: string | null;
   created_at: string;
+  adopted_supplier_name: string | null;
+  adopted_cost: number | null;
+  adopted_sale_price: number | null;
 };
 
 type Tab = "pending" | "collected" | "scheduled" | "ignored" | "adopted" | "all";
@@ -52,9 +55,10 @@ export default function CommunityCandidatesPage() {
   const [scheduling, setScheduling] = useState<number | null>(null);
   const [scheduleDate, setScheduleDate] = useState("");
   const [busy, setBusy] = useState(false);
-  const [adopting, setAdopting] = useState<number | null>(null);
-  const [adoptName, setAdoptName] = useState("");
-  const [adoptPrice, setAdoptPrice] = useState("");
+  const [editingInfo, setEditingInfo] = useState<number | null>(null);
+  const [adoptSupplier, setAdoptSupplier] = useState("");
+  const [adoptCost, setAdoptCost] = useState("");
+  const [adoptSalePrice, setAdoptSalePrice] = useState("");
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(queryDraft), 300);
@@ -65,7 +69,7 @@ export default function CommunityCandidatesPage() {
     let q = getSupabase()
       .from("community_product_candidates")
       .select(
-        "id, product_name_hint, raw_text, source_user_id, source_user_name, source_channel, system_status, owner_action, scheduled_open_at, created_at"
+        "id, product_name_hint, raw_text, source_user_id, source_user_name, source_channel, system_status, owner_action, scheduled_open_at, created_at, adopted_supplier_name, adopted_cost, adopted_sale_price"
       )
       .order("created_at", { ascending: false })
       .limit(200);
@@ -150,25 +154,76 @@ export default function CommunityCandidatesPage() {
     setScheduleDate("");
   };
 
-  const handleAdoptSubmit = async (id: number) => {
-    if (!adoptName.trim()) return;
-    const priceVal = adoptPrice.trim() ? Number(adoptPrice) : null;
-    if (priceVal !== null && (isNaN(priceVal) || priceVal < 0)) {
-      setError("售價不可為負數");
-      return;
+  const extractPrice = (text: string): string => {
+    const patterns = [
+      /\$(\d+(?:\.\d+)?)/,
+      /(\d+(?:\.\d+)?)元/,
+      /售價\s*(\d+(?:\.\d+)?)/,
+      /特價\s*(\d+(?:\.\d+)?)/,
+      /一組\s*(\d+(?:\.\d+)?)/,
+    ];
+    for (const p of patterns) {
+      const m = text.match(p);
+      if (m) return m[1];
     }
+    return "";
+  };
+
+  const handleFillSubmit = async (id: number) => {
     setBusy(true);
     try {
-      const { error: err } = await getSupabase().rpc("rpc_adopt_candidate", {
-        p_candidate_id: id,
-        p_product_name: adoptName.trim(),
-        p_retail_price: priceVal,
-      });
+      const costVal = adoptCost.trim() ? Number(adoptCost) : null;
+      if (costVal !== null && (isNaN(costVal) || costVal < 0)) {
+        setError("成本不可為負數");
+        return;
+      }
+      const salePriceVal = adoptSalePrice.trim() ? Number(adoptSalePrice) : null;
+      if (salePriceVal !== null && (isNaN(salePriceVal) || salePriceVal < 0)) {
+        setError("售價不可為負數");
+        return;
+      }
+      const { error: err } = await getSupabase()
+        .from("community_product_candidates")
+        .update({
+          adopted_supplier_name: adoptSupplier.trim() || null,
+          adopted_cost: costVal,
+          adopted_sale_price: salePriceVal,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id);
       if (err) throw err;
-      setAdopting(null);
-      setAdoptName("");
-      setAdoptPrice("");
+      setEditingInfo(null);
+      setAdoptSupplier("");
+      setAdoptCost("");
+      setAdoptSalePrice("");
       setError(null);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAdopt = async (id: number) => {
+    setBusy(true);
+    try {
+      const { data: { user } } = await getSupabase().auth.getUser();
+      if (!user) {
+        setError("無法取得登入資訊，請重新整理後再試");
+        return;
+      }
+      const now = new Date().toISOString();
+      const { error: err } = await getSupabase()
+        .from("community_product_candidates")
+        .update({
+          owner_action: "adopted",
+          adopted_at: now,
+          adopted_by: user.id,
+          updated_at: now,
+        })
+        .eq("id", id);
+      if (err) throw err;
       await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -265,12 +320,28 @@ export default function CommunityCandidatesPage() {
               {rows.map((r) => (
                 <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50">
                   <td className="whitespace-nowrap px-3 py-3 text-zinc-500">{fmt(r.created_at)}</td>
-                  <td className="px-3 py-3 font-medium">{r.product_name_hint ?? "—"}</td>
+                  <td className="px-3 py-3 font-medium">
+                    {r.product_name_hint ?? "—"}
+                    {(() => {
+                      const any = r.adopted_supplier_name || r.adopted_cost !== null || r.adopted_sale_price !== null;
+                      const complete = !!(r.adopted_supplier_name && r.adopted_cost !== null && r.adopted_sale_price !== null);
+                      if (complete) return <span className="ml-1.5 inline-flex rounded-full bg-teal-100 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:bg-teal-900/30 dark:text-teal-300">已補資料</span>;
+                      if (any) return <span className="ml-1.5 inline-flex rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">資料未完整</span>;
+                      return null;
+                    })()}
+                  </td>
                   <td className="max-w-xs px-3 py-3 text-zinc-600 dark:text-zinc-300">
                     <span title={r.raw_text}>
                       {r.raw_text.slice(0, 80)}
                       {r.raw_text.length > 80 ? "…" : ""}
                     </span>
+                    {(r.adopted_supplier_name || r.adopted_cost !== null || r.adopted_sale_price !== null) && (
+                      <div className="mt-1 space-y-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                        {r.adopted_supplier_name && <div>廠商：{r.adopted_supplier_name}</div>}
+                        {r.adopted_cost !== null && <div>成本：{r.adopted_cost}</div>}
+                        {r.adopted_sale_price !== null && <div>售價：{r.adopted_sale_price}</div>}
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-3 text-zinc-500">
                     {r.source_user_name ?? r.source_user_id ?? "—"}
@@ -289,16 +360,22 @@ export default function CommunityCandidatesPage() {
                     {r.scheduled_open_at ?? "—"}
                   </td>
                   <td className="px-3 py-3">
-                    {adopting === r.id ? (
+                    {editingInfo === r.id ? (
                       <div className="flex flex-col gap-2">
-                        <div className="max-w-xs rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800">
-                          {r.raw_text.slice(0, 100)}{r.raw_text.length > 100 ? "…" : ""}
-                        </div>
                         <input
                           autoFocus
-                          placeholder="商品名稱（必填）"
-                          value={adoptName}
-                          onChange={(e) => setAdoptName(e.target.value)}
+                          placeholder="廠商（選填）"
+                          value={adoptSupplier}
+                          onChange={(e) => setAdoptSupplier(e.target.value)}
+                          className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          step="1"
+                          placeholder="成本（選填）"
+                          value={adoptCost}
+                          onChange={(e) => setAdoptCost(e.target.value)}
                           className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
                         />
                         <input
@@ -306,20 +383,20 @@ export default function CommunityCandidatesPage() {
                           min={0}
                           step="1"
                           placeholder="售價（選填）"
-                          value={adoptPrice}
-                          onChange={(e) => setAdoptPrice(e.target.value)}
+                          value={adoptSalePrice}
+                          onChange={(e) => setAdoptSalePrice(e.target.value)}
                           className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
                         />
                         <div className="flex gap-1">
                           <button
-                            onClick={() => handleAdoptSubmit(r.id)}
-                            disabled={!adoptName.trim() || busy}
-                            className="rounded bg-green-600 px-2 py-0.5 text-xs text-white hover:bg-green-700 disabled:opacity-50"
+                            onClick={() => handleFillSubmit(r.id)}
+                            disabled={busy}
+                            className="rounded bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
                           >
-                            {busy ? "建立中…" : "建立商品"}
+                            {busy ? "儲存中…" : "儲存"}
                           </button>
                           <button
-                            onClick={() => { setAdopting(null); setAdoptName(""); setAdoptPrice(""); }}
+                            onClick={() => { setEditingInfo(null); setAdoptSupplier(""); setAdoptCost(""); setAdoptSalePrice(""); }}
                             disabled={busy}
                             className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 disabled:opacity-50"
                           >
@@ -373,13 +450,25 @@ export default function CommunityCandidatesPage() {
                       </div>
                     ) : (
                       <div className="flex flex-wrap items-center gap-1">
+                        <button
+                          onClick={() => {
+                            setEditingInfo(r.id);
+                            setAdoptSupplier(r.adopted_supplier_name ?? "");
+                            setAdoptCost(r.adopted_cost !== null ? String(r.adopted_cost) : "");
+                            setAdoptSalePrice(r.adopted_sale_price !== null ? String(r.adopted_sale_price) : extractPrice(r.raw_text));
+                            setScheduling(null);
+                          }}
+                          disabled={busy}
+                          className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 disabled:opacity-50"
+                        >
+                          {r.adopted_supplier_name || r.adopted_cost !== null || r.adopted_sale_price !== null ? "修改資料" : "補資料"}
+                        </button>
                         {r.owner_action !== "adopted" && (
                           <button
                             onClick={() => {
-                              setAdopting(r.id);
-                              setAdoptName(r.product_name_hint ?? "");
-                              setAdoptPrice("");
-                              setScheduling(null);
+                              const complete = !!(r.adopted_supplier_name && r.adopted_cost !== null && r.adopted_sale_price !== null);
+                              if (!complete && !window.confirm("廠商、成本、售價尚未完整，確定要採用嗎？")) return;
+                              handleAdopt(r.id);
                             }}
                             disabled={busy}
                             className="rounded border border-green-400 px-2 py-0.5 text-xs text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/30 disabled:opacity-50"
