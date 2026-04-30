@@ -46,6 +46,12 @@ const NAV: NavGroup[] = [
       { href: "/finance/receivables", label: "HQ 應收", match: /^\/finance\/receivables(?!\/print)/ },
     ],
   },
+  {
+    title: "社群選品",
+    items: [
+      { href: "/community-candidates", label: "候選池", match: /^\/community-candidates/ },
+    ],
+  },
 ];
 
 export default function ProtectedLayout({ children }: { children: ReactNode }) {
