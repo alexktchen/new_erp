@@ -17,11 +17,11 @@ type CalendarCandidate = {
 };
 
 const ACTION_LABEL: Record<string, string> = {
-  none: "Pending",
-  collected: "Saved",
-  scheduled: "Scheduled",
-  adopted: "Adopted",
-  ignored: "Ignored",
+  none: "未處理",
+  collected: "已收藏",
+  scheduled: "已排程",
+  adopted: "已採用",
+  ignored: "已忽略",
 };
 
 const ACTION_COLOR: Record<string, string> = {
@@ -32,7 +32,7 @@ const ACTION_COLOR: Record<string, string> = {
   ignored: "bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400",
 };
 
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 
 function formatDate(d: Date): string {
   const y = d.getFullYear();
@@ -142,8 +142,8 @@ export default function CommunityCandidatesCalendarPage() {
   };
 
   const handleRemove = async (r: CalendarCandidate) => {
-    const label = r.product_name_hint ?? "(No title)";
-    if (!window.confirm(`Remove "${label}" from schedule?`)) return;
+    const label = r.product_name_hint ?? "（無商品名）";
+    if (!window.confirm(`確定把「${label}」移出排程嗎？`)) return;
     setBusy(true);
     try {
       const { error: err } = await getSupabase()
@@ -170,14 +170,14 @@ export default function CommunityCandidatesCalendarPage() {
     <div className="flex flex-1 flex-col gap-4 p-6">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Candidate Calendar</h1>
-          <p className="mt-0.5 text-sm text-zinc-500">Next 7 days</p>
+          <h1 className="text-xl font-semibold">選品週曆</h1>
+          <p className="mt-0.5 text-sm text-zinc-500">未來 7 天</p>
         </div>
         <Link
           href="/community-candidates"
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
         >
-          Candidates
+          候選池
         </Link>
       </header>
 
@@ -188,7 +188,7 @@ export default function CommunityCandidatesCalendarPage() {
       )}
 
       {rows === null ? (
-        <div className="text-sm text-zinc-400">Loading...</div>
+        <div className="text-sm text-zinc-400">載入中…</div>
       ) : (
         <div className="grid grid-cols-7 gap-2 overflow-x-auto">
           {days.map((d) => {
@@ -205,12 +205,12 @@ export default function CommunityCandidatesCalendarPage() {
                   }`}
                 >
                   <div>{d.getMonth() + 1}/{d.getDate()}</div>
-                  <div className="text-[10px] font-normal opacity-70">{WEEKDAYS[d.getDay()]}</div>
+                  <div className="text-[10px] font-normal opacity-70">週{WEEKDAYS[d.getDay()]}</div>
                 </div>
 
                 {cards.length === 0 ? (
                   <div className="rounded border border-dashed border-zinc-200 px-2 py-4 text-center text-[10px] text-zinc-400 dark:border-zinc-800">
-                    No schedule
+                    無排程
                   </div>
                 ) : (
                   cards.map((r, idx) => {
@@ -228,10 +228,10 @@ export default function CommunityCandidatesCalendarPage() {
                             {suggestedTime(idx)}
                           </span>
                           <Link
-                            href="/community-candidates"
+                            href={`/community-candidates?highlight=${r.id}`}
                             className="font-medium leading-snug hover:underline"
                           >
-                            {r.product_name_hint ?? "(No title)"}
+                            {r.product_name_hint ?? "（無商品名）"}
                           </Link>
                         </div>
                         <div className="flex flex-wrap gap-1">
@@ -244,20 +244,20 @@ export default function CommunityCandidatesCalendarPage() {
                           </span>
                           {complete && (
                             <span className="inline-flex rounded-full bg-teal-100 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:bg-teal-900/30 dark:text-teal-300">
-                              Ready
+                              已補資料
                             </span>
                           )}
                           {any && !complete && (
                             <span className="inline-flex rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-                              Incomplete
+                              資料未完整
                             </span>
                           )}
                         </div>
                         {any && (
                           <div className="space-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-                            {r.adopted_supplier_name && <div>Supplier: {r.adopted_supplier_name}</div>}
-                            {r.adopted_cost !== null && <div>Cost: {r.adopted_cost}</div>}
-                            {r.adopted_sale_price !== null && <div>Price: {r.adopted_sale_price}</div>}
+                            {r.adopted_supplier_name && <div>廠商：{r.adopted_supplier_name}</div>}
+                            {r.adopted_cost !== null && <div>成本：{r.adopted_cost}</div>}
+                            {r.adopted_sale_price !== null && <div>售價：{r.adopted_sale_price}</div>}
                           </div>
                         )}
                         <div className="flex gap-1 pt-0.5">
@@ -266,9 +266,9 @@ export default function CommunityCandidatesCalendarPage() {
                               onClick={() => handleMoveUp(r)}
                               disabled={busy}
                               className="rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 disabled:opacity-50"
-                              title="Move up"
+                              title="上移"
                             >
-                              Up
+                              上移
                             </button>
                           )}
                           {!isLast && (
@@ -276,18 +276,18 @@ export default function CommunityCandidatesCalendarPage() {
                               onClick={() => handleMoveDown(r)}
                               disabled={busy}
                               className="rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 disabled:opacity-50"
-                              title="Move down"
+                              title="下移"
                             >
-                              Down
+                              下移
                             </button>
                           )}
                           <button
                             onClick={() => handleRemove(r)}
                             disabled={busy}
                             className="ml-auto rounded border border-red-300 px-1.5 py-0.5 text-[10px] text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30 disabled:opacity-50"
-                            title="Remove from schedule"
+                            title="移出排程"
                           >
-                            Remove
+                            移出
                           </button>
                         </div>
                       </div>
@@ -300,7 +300,7 @@ export default function CommunityCandidatesCalendarPage() {
         </div>
       )}
 
-      <div className="text-xs text-zinc-400">Total: {rows?.length ?? 0}</div>
+      <div className="text-xs text-zinc-400">共 {rows?.length ?? 0} 筆</div>
     </div>
   );
 }

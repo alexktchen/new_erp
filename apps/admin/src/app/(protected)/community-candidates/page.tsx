@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 
 type Candidate = {
@@ -60,11 +60,28 @@ export default function CommunityCandidatesPage() {
   const [adoptSupplier, setAdoptSupplier] = useState("");
   const [adoptCost, setAdoptCost] = useState("");
   const [adoptSalePrice, setAdoptSalePrice] = useState("");
+  const [highlightId, setHighlightId] = useState<number | null>(null);
+
+  const highlightRowRef = useRef<HTMLTableRowElement | null>(null);
+
+  useEffect(() => {
+    const id = Number(new URLSearchParams(window.location.search).get("highlight"));
+    if (Number.isFinite(id) && id > 0) {
+      setHighlightId(id);
+      setTab("all");
+    }
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(queryDraft), 300);
     return () => clearTimeout(t);
   }, [queryDraft]);
+
+  useEffect(() => {
+    if (highlightId && highlightRowRef.current) {
+      highlightRowRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [highlightId, rows]);
 
   const reload = async () => {
     let q = getSupabase()
@@ -354,7 +371,15 @@ export default function CommunityCandidatesPage() {
             </thead>
             <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
               {rows.map((r) => (
-                <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50">
+                <tr
+                  key={r.id}
+                  ref={r.id === highlightId ? highlightRowRef : null}
+                  className={`hover:bg-zinc-50 dark:hover:bg-zinc-900/50 ${
+                    r.id === highlightId
+                      ? "bg-amber-50 ring-2 ring-amber-300 dark:bg-amber-950/30 dark:ring-amber-700"
+                      : ""
+                  }`}
+                >
                   <td className="whitespace-nowrap px-3 py-3 text-zinc-500">{fmt(r.created_at)}</td>
                   <td className="px-3 py-3 font-medium">
                     {r.product_name_hint ?? "—"}
