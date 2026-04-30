@@ -120,6 +120,33 @@ export default function CommunityCandidatesPage() {
     setScheduleDate("");
   };
 
+  const formatLocalDate = (d: Date): string => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
+  const localDateStr = (daysFromNow: number): string => {
+    const d = new Date();
+    d.setDate(d.getDate() + daysFromNow);
+    return formatLocalDate(d);
+  };
+
+  const nextWeekMonday = (): string => {
+    const d = new Date();
+    const day = d.getDay();
+    const daysUntil = day === 0 ? 1 : 8 - day;
+    d.setDate(d.getDate() + daysUntil);
+    return formatLocalDate(d);
+  };
+
+  const handleQuickSchedule = async (id: number, dateStr: string) => {
+    await patch(id, { owner_action: "scheduled", scheduled_open_at: dateStr });
+    setScheduling(null);
+    setScheduleDate("");
+  };
+
   const fmt = (s: string) =>
     new Date(s).toLocaleString("zh-TW", {
       month: "numeric",
@@ -233,29 +260,48 @@ export default function CommunityCandidatesPage() {
                   </td>
                   <td className="px-3 py-3">
                     {scheduling === r.id ? (
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="date"
-                          value={scheduleDate}
-                          onChange={(e) => setScheduleDate(e.target.value)}
-                          className="rounded border border-zinc-300 px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                        />
-                        <button
-                          onClick={() => handleSchedule(r.id)}
-                          disabled={!scheduleDate || busy}
-                          className="rounded bg-amber-500 px-2 py-0.5 text-xs text-white hover:bg-amber-600 disabled:opacity-50"
-                        >
-                          確定
-                        </button>
-                        <button
-                          onClick={() => {
-                            setScheduling(null);
-                            setScheduleDate("");
-                          }}
-                          className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700"
-                        >
-                          取消
-                        </button>
+                      <div className="flex flex-col gap-1.5">
+                        <div className="flex gap-1">
+                          {[
+                            { label: "明天", date: localDateStr(1) },
+                            { label: "後天", date: localDateStr(2) },
+                            { label: "下週一", date: nextWeekMonday() },
+                          ].map(({ label, date }) => (
+                            <button
+                              key={label}
+                              onClick={() => handleQuickSchedule(r.id, date)}
+                              disabled={busy}
+                              className="rounded bg-amber-500 px-2 py-0.5 text-xs text-white hover:bg-amber-600 disabled:opacity-50"
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="date"
+                            value={scheduleDate}
+                            onChange={(e) => setScheduleDate(e.target.value)}
+                            className="rounded border border-zinc-300 px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                          />
+                          <button
+                            onClick={() => handleSchedule(r.id)}
+                            disabled={!scheduleDate || busy}
+                            className="rounded bg-amber-500 px-2 py-0.5 text-xs text-white hover:bg-amber-600 disabled:opacity-50"
+                          >
+                            確定
+                          </button>
+                          <button
+                            onClick={() => {
+                              setScheduling(null);
+                              setScheduleDate("");
+                            }}
+                            disabled={busy}
+                            className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 disabled:opacity-50"
+                          >
+                            取消
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div className="flex flex-wrap items-center gap-1">
