@@ -49,7 +49,8 @@ const NAV: NavGroup[] = [
   {
     title: "社群選品",
     items: [
-      { href: "/community-candidates", label: "候選池", match: /^\/community-candidates/ },
+      { href: "/community-candidates", label: "候選池", match: /^\/community-candidates(?!\/calendar)/ },
+      { href: "/community-candidates/calendar", label: "週曆", match: /^\/community-candidates\/calendar/ },
     ],
   },
 ];
