@@ -52,6 +52,9 @@ export default function CommunityCandidatesPage() {
   const [scheduling, setScheduling] = useState<number | null>(null);
   const [scheduleDate, setScheduleDate] = useState("");
   const [busy, setBusy] = useState(false);
+  const [adopting, setAdopting] = useState<number | null>(null);
+  const [adoptName, setAdoptName] = useState("");
+  const [adoptPrice, setAdoptPrice] = useState("");
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(queryDraft), 300);
@@ -145,6 +148,33 @@ export default function CommunityCandidatesPage() {
     await patch(id, { owner_action: "scheduled", scheduled_open_at: dateStr });
     setScheduling(null);
     setScheduleDate("");
+  };
+
+  const handleAdoptSubmit = async (id: number) => {
+    if (!adoptName.trim()) return;
+    const priceVal = adoptPrice.trim() ? Number(adoptPrice) : null;
+    if (priceVal !== null && (isNaN(priceVal) || priceVal < 0)) {
+      setError("售價不可為負數");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { error: err } = await getSupabase().rpc("rpc_adopt_candidate", {
+        p_candidate_id: id,
+        p_product_name: adoptName.trim(),
+        p_retail_price: priceVal,
+      });
+      if (err) throw err;
+      setAdopting(null);
+      setAdoptName("");
+      setAdoptPrice("");
+      setError(null);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const fmt = (s: string) =>
@@ -259,7 +289,45 @@ export default function CommunityCandidatesPage() {
                     {r.scheduled_open_at ?? "—"}
                   </td>
                   <td className="px-3 py-3">
-                    {scheduling === r.id ? (
+                    {adopting === r.id ? (
+                      <div className="flex flex-col gap-2">
+                        <div className="max-w-xs rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800">
+                          {r.raw_text.slice(0, 100)}{r.raw_text.length > 100 ? "…" : ""}
+                        </div>
+                        <input
+                          autoFocus
+                          placeholder="商品名稱（必填）"
+                          value={adoptName}
+                          onChange={(e) => setAdoptName(e.target.value)}
+                          className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          step="1"
+                          placeholder="售價（選填）"
+                          value={adoptPrice}
+                          onChange={(e) => setAdoptPrice(e.target.value)}
+                          className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
+                        />
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => handleAdoptSubmit(r.id)}
+                            disabled={!adoptName.trim() || busy}
+                            className="rounded bg-green-600 px-2 py-0.5 text-xs text-white hover:bg-green-700 disabled:opacity-50"
+                          >
+                            {busy ? "建立中…" : "建立商品"}
+                          </button>
+                          <button
+                            onClick={() => { setAdopting(null); setAdoptName(""); setAdoptPrice(""); }}
+                            disabled={busy}
+                            className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 disabled:opacity-50"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : scheduling === r.id ? (
                       <div className="flex flex-col gap-1.5">
                         <div className="flex gap-1">
                           {[
@@ -305,6 +373,20 @@ export default function CommunityCandidatesPage() {
                       </div>
                     ) : (
                       <div className="flex flex-wrap items-center gap-1">
+                        {r.owner_action !== "adopted" && (
+                          <button
+                            onClick={() => {
+                              setAdopting(r.id);
+                              setAdoptName(r.product_name_hint ?? "");
+                              setAdoptPrice("");
+                              setScheduling(null);
+                            }}
+                            disabled={busy}
+                            className="rounded border border-green-400 px-2 py-0.5 text-xs text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/30 disabled:opacity-50"
+                          >
+                            採用
+                          </button>
+                        )}
                         {r.owner_action !== "collected" && r.owner_action !== "adopted" && (
                           <button
                             onClick={() => handleCollect(r.id)}
