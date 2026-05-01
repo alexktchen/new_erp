@@ -1,0 +1,39 @@
+import { defaultCache } from "@serwist/next/worker";
+import type { PrecacheEntry, SerwistGlobalConfig } from "serwist";
+import { Serwist } from "serwist";
+
+declare global {
+  interface ServiceWorkerGlobalScope extends SerwistGlobalConfig {}
+}
+
+const serwist = new Serwist({
+  precacheEntries: self.__SW_MANIFEST,
+  skipWaiting: true,
+  clientsClaim: true,
+  navigationPreload: true,
+  runtimeCaching: defaultCache,
+});
+
+self.addEventListener("push", (event) => {
+  const data = event.data?.json();
+  if (!data) return;
+
+  const title = data.title || "新訊息";
+  const options = {
+    body: data.body || "您有一則新通知",
+    icon: "/icons/icon-192x192.png",
+    badge: "/icons/icon-192x192.png",
+    data: data.url || "/",
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.openWindow(event.notification.data)
+  );
+});
+
+serwist.addEventListeners();

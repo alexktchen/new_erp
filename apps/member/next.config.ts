@@ -1,10 +1,14 @@
 import type { NextConfig } from "next";
+import withSerwistInit from "@serwist/next";
 
-// apps/member 部署到 Vercel，走原生 Next.js（非 static export）
-// 需要走 static export（例如移到 GitHub Pages）時再加回：
-//   output: "export", trailingSlash: true, basePath, assetPrefix
+const withSerwist = withSerwistInit({
+  swSrc: "src/sw.ts",
+  swDest: "public/sw.js",
+});
+
 const nextConfig: NextConfig = {
   images: { unoptimized: true },
 };
 
-export default nextConfig;
+export default withSerwist(nextConfig);
+
