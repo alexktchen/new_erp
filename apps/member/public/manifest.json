@@ -3,6 +3,7 @@
   "short_name": "New ERP",
   "description": "零售連鎖 ERP 會員端應用程式",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#000000",

@@ -22,6 +22,22 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // ── body ──
+    const body = await req.json() as Record<string, unknown>;
+    const action = String(body.action ?? "");
+
+    // ── service role client ──
+    const sb = createClient(
+      requireEnv("SUPABASE_URL"),
+      requireEnv("SUPABASE_SERVICE_ROLE_KEY"),
+      { auth: { persistSession: false, autoRefreshToken: false } },
+    );
+
+    // ── [NEW] 特殊 action：領取 PWA 驗證碼 (不需要 Token) ──
+    if (action === "claim_pwa_auth_code") {
+      return await claimPwaAuthCode(sb, String(body.code ?? ""));
+    }
+
     // ── auth ──
     const auth = req.headers.get("authorization");
     if (!auth) return json({ error: "missing authorization" }, 401);
@@ -40,17 +56,6 @@ Deno.serve(async (req) => {
     if (!tenantId || !storeId || !lineUserId) {
       return json({ error: "missing claims in token" }, 401);
     }
-
-    // ── body ──
-    const body = await req.json() as Record<string, unknown>;
-    const action = String(body.action ?? "");
-
-    // ── service role client ──
-    const sb = createClient(
-      requireEnv("SUPABASE_URL"),
-      requireEnv("SUPABASE_SERVICE_ROLE_KEY"),
-      { auth: { persistSession: false, autoRefreshToken: false } },
-    );
 
     const memberId = claims.member_id ? Number(claims.member_id) : null;
 
@@ -104,6 +109,33 @@ Deno.serve(async (req) => {
     return json({ error: "internal", detail: msg }, 500);
   }
 });
+
+async function claimPwaAuthCode(
+  sb: ReturnType<typeof createClient>,
+  code: string,
+) {
+  if (!code || code.length !== 6) {
+    return json({ error: "invalid code format" }, 400);
+  }
+
+  // 1) 查找 code
+  const { data: row, error: fetchErr } = await sb
+    .from("pwa_auth_codes")
+    .select("*")
+    .eq("code", code)
+    .gt("expires_at", new Date().toISOString())
+    .single();
+
+  if (fetchErr || !row) {
+    return json({ error: "code invalid or expired" }, 404);
+  }
+
+  // 2) 刪除 code (單次使用)
+  await sb.from("pwa_auth_codes").delete().eq("id", row.id);
+
+  // 3) 回傳 session_data
+  return json(row.session_data);
+}
 
 // ─── actions ─────────────────────────────────────────────────────────────────
 

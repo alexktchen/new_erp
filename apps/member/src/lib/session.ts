@@ -1,4 +1,5 @@
-// Session helpers — 從 URL fragment 抓 token + LINE 個資，存 sessionStorage
+// Session helpers — 從 URL fragment 抓 token + LINE 個資，存入持久化儲存 (localStorage)
+// 並透過 BroadcastChannel 通知其他視窗（如 PWA 視窗）
 
 const TOKEN_KEY    = "member_jwt";
 const STORE_KEY    = "member_store_id";
@@ -6,6 +7,8 @@ const MEMBER_KEY   = "member_id";
 const LINE_UID_KEY = "line_user_id";
 const LINE_NAME_KEY    = "line_name";
 const LINE_PIC_KEY     = "line_picture";
+
+const AUTH_CHANNEL_NAME = "member_auth_sync";
 
 export type Session = {
   token: string;
@@ -17,7 +20,7 @@ export type Session = {
   linePicture: string | null;
 };
 
-/** 從 URL fragment 解出 session，存入 sessionStorage，並清理 URL。 */
+/** 從 URL fragment 解出 session，存入儲存空間，並清理 URL。 */
 export function consumeFragmentToSession(): Session | null {
   if (typeof window === "undefined") return null;
   const hash = window.location.hash.replace(/^#/, "");
@@ -33,17 +36,14 @@ export function consumeFragmentToSession(): Session | null {
   const lineName    = p.get("line_name");
   const linePicture = p.get("line_picture");
 
-  sessionStorage.setItem(TOKEN_KEY, token);
-  sessionStorage.setItem(STORE_KEY, store);
-  if (memberId)    sessionStorage.setItem(MEMBER_KEY, String(memberId));
-  if (lineUserId)  sessionStorage.setItem(LINE_UID_KEY, lineUserId);
-  if (lineName)    sessionStorage.setItem(LINE_NAME_KEY, lineName);
-  if (linePicture) sessionStorage.setItem(LINE_PIC_KEY, linePicture);
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(STORE_KEY, store);
+  if (memberId)    localStorage.setItem(MEMBER_KEY, String(memberId));
+  if (lineUserId)  localStorage.setItem(LINE_UID_KEY, lineUserId);
+  if (lineName)    localStorage.setItem(LINE_NAME_KEY, lineName);
+  if (linePicture) localStorage.setItem(LINE_PIC_KEY, linePicture);
 
-  // 清 fragment，避免 refresh / 分享外洩
-  window.history.replaceState(null, "", window.location.pathname + window.location.search);
-
-  return {
+  const session: Session = {
     token,
     storeId: store,
     memberId,
@@ -52,27 +52,56 @@ export function consumeFragmentToSession(): Session | null {
     lineName,
     linePicture,
   };
+
+  // 廣播給其他視窗 (例如原本開著的 PWA 視窗)
+  if ("BroadcastChannel" in window) {
+    const channel = new BroadcastChannel(AUTH_CHANNEL_NAME);
+    channel.postMessage({ type: "LOGIN_SUCCESS", session });
+    channel.close();
+  }
+
+  // 清 fragment，避免 refresh / 分享外洩
+  window.history.replaceState(null, "", window.location.pathname + window.location.search);
+
+  return session;
 }
 
 export function getSession(): Session | null {
   if (typeof window === "undefined") return null;
-  const token = sessionStorage.getItem(TOKEN_KEY);
-  const storeId = sessionStorage.getItem(STORE_KEY);
+  const token = localStorage.getItem(TOKEN_KEY);
+  const storeId = localStorage.getItem(STORE_KEY);
   if (!token || !storeId) return null;
-  const mid = sessionStorage.getItem(MEMBER_KEY);
+  const mid = localStorage.getItem(MEMBER_KEY);
   return {
     token,
     storeId,
     memberId: mid ? Number(mid) : null,
     bound: !!mid,
-    lineUserId:  sessionStorage.getItem(LINE_UID_KEY),
-    lineName:    sessionStorage.getItem(LINE_NAME_KEY),
-    linePicture: sessionStorage.getItem(LINE_PIC_KEY),
+    lineUserId:  localStorage.getItem(LINE_UID_KEY),
+    lineName:    localStorage.getItem(LINE_NAME_KEY),
+    linePicture: localStorage.getItem(LINE_PIC_KEY),
   };
 }
 
 export function clearSession() {
   if (typeof window === "undefined") return;
   [TOKEN_KEY, STORE_KEY, MEMBER_KEY, LINE_UID_KEY, LINE_NAME_KEY, LINE_PIC_KEY]
-    .forEach((k) => sessionStorage.removeItem(k));
+    .forEach((k) => localStorage.removeItem(k));
+}
+
+/** 監聽來自其他視窗的登入成功的訊息 (用於 PWA 視窗感應瀏覽器視窗的登入) */
+export function listenForSession(callback: (s: Session) => void) {
+  if (typeof window === "undefined" || !("BroadcastChannel" in window)) return () => {};
+  
+  const channel = new BroadcastChannel(AUTH_CHANNEL_NAME);
+  const handler = (e: MessageEvent) => {
+    if (e.data?.type === "LOGIN_SUCCESS" && e.data.session) {
+      callback(e.data.session);
+    }
+  };
+  channel.addEventListener("message", handler);
+  return () => {
+    channel.removeEventListener("message", handler);
+    channel.close();
+  };
 }

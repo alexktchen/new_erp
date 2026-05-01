@@ -115,18 +115,40 @@ Deno.serve(async (req) => {
       jwtSecret,
     );
 
-    // 7) redirect 回前端 /me（token 放 fragment 不進 log）
+    // 7) 產生 6 位數驗證碼 (PWA 跨視窗同步用)
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const sessionData = {
+      token: jwt,
+      store: storeId,
+      member_id: memberId,
+      line_user_id: lineUserId,
+      line_name: payload.name ?? null,
+      line_picture: payload.picture ?? null,
+    };
+
+    const sb = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false },
+    });
+    const { error: codeErr } = await sb
+      .from("pwa_auth_codes")
+      .insert({
+        code,
+        session_data: sessionData,
+        tenant_id: tenantId,
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5分鐘有效
+      });
+    if (codeErr) console.error("failed to save pwa code:", codeErr);
+
+    // 8) redirect 回前端 /auth/success（顯示驗證碼）
+    // 同時保留 fragment token，讓一般瀏覽器能直接進入
     const params = new URLSearchParams({
+      code,
       bound: "1",
       store: storeId,
-      member_id: String(memberId),
     });
-    if (payload.name) params.set("line_name", payload.name);
-    if (payload.picture) params.set("line_picture", payload.picture);
-    params.set("line_user_id", lineUserId);
     return redirectFrontWithFragment(
-      "/me",
-      params.toString() + `&token=${encodeURIComponent(jwt)}`,
+      "/auth/success",
+      params.toString() + `&token=${encodeURIComponent(jwt)}`
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

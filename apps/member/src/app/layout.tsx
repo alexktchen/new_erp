@@ -10,6 +10,9 @@ export const metadata: Metadata = {
     statusBarStyle: "default",
     title: "New ERP",
   },
+  other: {
+    "apple-mobile-web-app-capable": "yes",
+  },
 };
 
 export const viewport: Viewport = {
