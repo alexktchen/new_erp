@@ -47,8 +47,46 @@ export function MemberDetail({ memberId }: { memberId: number }) {
   const [wallet, setWallet] = useState(0);
   const [pLedger, setPLedger] = useState<PointsEntry[]>([]);
   const [wLedger, setWLedger] = useState<WalletEntry[]>([]);
-  const [tab, setTab] = useState<"points" | "wallet">("points");
+  const [tab, setTab] = useState<"points" | "wallet" | "test">("points");
   const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
+  async function sendTestNotification() {
+    if (!member) return;
+    setSending(true);
+    try {
+      const sb = getSupabase();
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) throw new Error("No session");
+
+      const resp = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/admin-notify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          member_id: memberId,
+          title: "測試通知",
+          message: `管理員已於 ${new Date().toLocaleString()} 發送測試通知`,
+          url: "/",
+        }),
+      });
+
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result.error || "發送失敗");
+      
+      if (result.ok) {
+        alert(`發送成功！送出 ${result.sent} 個裝置，失敗 ${result.failed} 個。`);
+      } else {
+        alert(`未發送：${result.message}`);
+      }
+    } catch (e) {
+      alert(`錯誤：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSending(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -135,6 +173,7 @@ export function MemberDetail({ memberId }: { memberId: number }) {
         <div className="flex gap-2 border-b border-zinc-200 dark:border-zinc-800">
           <TabBtn active={tab === "points"}  onClick={() => setTab("points")}>積分流水 ({pLedger.length})</TabBtn>
           <TabBtn active={tab === "wallet"}  onClick={() => setTab("wallet")}>儲值流水 ({wLedger.length})</TabBtn>
+          <TabBtn active={tab === "test"}    onClick={() => setTab("test")}>測試操作</TabBtn>
         </div>
         <div className="mt-3 overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
           {tab === "points" ? (
@@ -160,7 +199,7 @@ export function MemberDetail({ memberId }: { memberId: number }) {
                 ))}
               </tbody>
             </table>
-          ) : (
+          ) : tab === "wallet" ? (
             <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
               <thead className="bg-zinc-50 dark:bg-zinc-900">
                 <tr>
@@ -184,6 +223,21 @@ export function MemberDetail({ memberId }: { memberId: number }) {
                 ))}
               </tbody>
             </table>
+          ) : (
+            <div className="p-6">
+              <h4 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-4">PWA 通知測試</h4>
+              <p className="text-xs text-zinc-500 mb-4">
+                此功能會向該會員所有已訂閱的 PWA 裝置發送一則測試通知。
+                請確保會員已在手機/電腦上開啟通知權限。
+              </p>
+              <button
+                onClick={sendTestNotification}
+                disabled={sending}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+              >
+                {sending ? "發送中..." : "發送測試通知"}
+              </button>
+            </div>
           )}
         </div>
       </div>

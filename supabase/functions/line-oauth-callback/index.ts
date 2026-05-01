@@ -12,12 +12,38 @@
 //   5. 302 redirect 回前端 /auth/complete#token=...&bound=0|1&member_id=...
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
 import { corsHeaders } from "../_shared/cors.ts";
 import { signJwtHs256, verifyStateToken } from "../_shared/jwt.ts";
 import { exchangeCode, verifyIdToken } from "../_shared/line.ts";
 import { autoRegister } from "../_shared/auto-register.ts";
 
 const SESSION_TTL_SEC = 60 * 60; // 1h
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+function requireEnv(name: string): string {
+  const v = Deno.env.get(name);
+  if (!v) throw new Error(`missing env ${name}`);
+  return v;
+}
+
+function frontBase(): string {
+  return Deno.env.get("MEMBER_FRONT_BASE_URL") ?? "http://localhost:3001";
+}
+
+function redirectFront(path: string, qs: Record<string, string>): Response {
+  const url = new URL(path, frontBase());
+  for (const [k, v] of Object.entries(qs)) url.searchParams.set(k, v);
+  return Response.redirect(url.toString(), 302);
+}
+
+function redirectFrontWithFragment(path: string, fragment: string): Response {
+  const url = new URL(path, frontBase());
+  return Response.redirect(`${url.toString()}#${fragment}`, 302);
+}
+
+// ─── main ────────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -116,7 +142,7 @@ Deno.serve(async (req) => {
     );
 
     // 7) 產生 6 位數驗證碼 (PWA 跨視窗同步用)
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code6 = Math.floor(100000 + Math.random() * 900000).toString();
     const sessionData = {
       token: jwt,
       store: storeId,
@@ -132,7 +158,7 @@ Deno.serve(async (req) => {
     const { error: codeErr } = await sb
       .from("pwa_auth_codes")
       .insert({
-        code,
+        code: code6,
         session_data: sessionData,
         tenant_id: tenantId,
         expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5分鐘有效
@@ -142,7 +168,7 @@ Deno.serve(async (req) => {
     // 8) redirect 回前端 /auth/success（顯示驗證碼）
     // 同時保留 fragment token，讓一般瀏覽器能直接進入
     const params = new URLSearchParams({
-      code,
+      code: code6,
       bound: "1",
       store: storeId,
     });
@@ -156,26 +182,3 @@ Deno.serve(async (req) => {
     return redirectFront("/", { error: "oauth_failed", detail: msg });
   }
 });
-
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-function requireEnv(name: string): string {
-  const v = Deno.env.get(name);
-  if (!v) throw new Error(`missing env ${name}`);
-  return v;
-}
-
-function frontBase(): string {
-  return Deno.env.get("MEMBER_FRONT_BASE_URL") ?? "http://localhost:3001";
-}
-
-function redirectFront(path: string, qs: Record<string, string>): Response {
-  const url = new URL(path, frontBase());
-  for (const [k, v] of Object.entries(qs)) url.searchParams.set(k, v);
-  return Response.redirect(url.toString(), 302);
-}
-
-function redirectFrontWithFragment(path: string, fragment: string): Response {
-  const url = new URL(path, frontBase());
-  return Response.redirect(`${url.toString()}#${fragment}`, 302);
-}
