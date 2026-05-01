@@ -24,31 +24,30 @@ Deno.serve(async (req) => {
     const auth = req.headers.get("authorization");
     if (!auth) return json({ error: "missing authorization" }, 401);
     
-    const token = auth.replace(/^Bearer\s+/i, "");
-    const jwtSecret = requireEnv("PROJECT_JWT_SECRET");
-    let claims;
-    try {
-      claims = await verifyJwtHs256(token, jwtSecret);
-    } catch (e) {
-      return json({ error: "invalid token", detail: String(e) }, 401);
-    }
-
-    const tenantId = String(claims.tenant_id ?? "");
-    if (!tenantId) return json({ error: "missing tenant_id in token" }, 401);
-
-    // Optional: Check role if implemented, for now we assume anyone with tenant_id in admin app is authorized
-    // const role = claims.role;
-
-    const body = await req.json();
-    const { member_id, title, message, url } = body;
-
-    if (!member_id) return json({ error: "member_id is required" }, 400);
-
     const sb = createClient(
       requireEnv("SUPABASE_URL"),
       requireEnv("SUPABASE_SERVICE_ROLE_KEY"),
       { auth: { persistSession: false } }
     );
+
+    // Get the user from the token to verify they are authenticated
+    const token = auth.replace(/^Bearer\s+/i, "");
+    const { data: { user }, error: authErr } = await sb.auth.getUser(token);
+    
+    if (authErr || !user) {
+      return json({ error: "invalid token", detail: authErr?.message }, 401);
+    }
+
+    // Extract tenant_id from user metadata or claims
+    const tenantId = user.app_metadata?.tenant_id;
+    if (!tenantId) {
+      return json({ error: "user has no tenant_id" }, 403);
+    }
+
+    const body = await req.json();
+    const { member_id, title, message, url } = body;
+
+    if (!member_id) return json({ error: "member_id is required" }, 400);
 
     // Get subscriptions for this member
     const { data: subs, error: subErr } = await sb
