@@ -72,16 +72,16 @@ export default function OverviewPage() {
 
             {/* 未結金額卡 */}
             <section className="rounded-2xl bg-[var(--card-bg)] px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-              <div className="text-[13px] text-[var(--secondary-label)]">未結單金額</div>
+              <div className="text-[14px] text-[var(--secondary-label)]">未結單金額</div>
               <div className="mt-1 flex items-baseline gap-1">
-                <span className="text-[34px] font-semibold tabular-nums text-[var(--brand-strong)] leading-none">
+                <span className="text-[40px] font-semibold tabular-nums text-[var(--brand-strong)] leading-none">
                   ${Number(data.receivable_amount).toLocaleString()}
                 </span>
               </div>
               {data.active_orders_count > 0 && (
                 <button
                   onClick={() => router.push("/orders")}
-                  className="mt-3 flex w-full items-center justify-between rounded-xl bg-[#7676801a] px-3 py-2.5 text-[14px] text-[var(--foreground)] active:bg-[#76768033]"
+                  className="mt-3 flex w-full items-center justify-between rounded-xl bg-[#7676801a] px-3 py-3 text-[16px] text-[var(--foreground)] active:bg-[#76768033]"
                 >
                   <span>進行中訂單 {data.active_orders_count} 筆</span>
                   <span className="text-[var(--ios-gray)]">›</span>
@@ -92,7 +92,7 @@ export default function OverviewPage() {
             {/* 賣場介紹 */}
             {data.store.description && (
               <Section title="賣場介紹">
-                <p className="whitespace-pre-wrap px-4 py-3 text-[14px] leading-relaxed text-[var(--foreground)]">
+                <p className="whitespace-pre-wrap px-4 py-3.5 text-[16px] leading-relaxed text-[var(--foreground)]">
                   {data.store.description}
                 </p>
               </Section>
@@ -102,17 +102,17 @@ export default function OverviewPage() {
             {(data.store.payment_methods_text || data.store.shipping_methods_text) && (
               <Section title="付款・出貨方式">
                 {data.store.payment_methods_text && (
-                  <div className="border-b border-[var(--separator)] px-4 py-3">
-                    <div className="text-[13px] text-[var(--secondary-label)]">付款</div>
-                    <p className="mt-0.5 whitespace-pre-wrap text-[14px] text-[var(--foreground)]">
+                  <div className="border-b border-[var(--separator)] px-4 py-3.5">
+                    <div className="text-[14px] text-[var(--secondary-label)]">付款</div>
+                    <p className="mt-0.5 whitespace-pre-wrap text-[16px] text-[var(--foreground)]">
                       {data.store.payment_methods_text}
                     </p>
                   </div>
                 )}
                 {data.store.shipping_methods_text && (
-                  <div className="px-4 py-3">
-                    <div className="text-[13px] text-[var(--secondary-label)]">出貨</div>
-                    <p className="mt-0.5 whitespace-pre-wrap text-[14px] text-[var(--foreground)]">
+                  <div className="px-4 py-3.5">
+                    <div className="text-[14px] text-[var(--secondary-label)]">出貨</div>
+                    <p className="mt-0.5 whitespace-pre-wrap text-[16px] text-[var(--foreground)]">
                       {data.store.shipping_methods_text}
                     </p>
                   </div>

@@ -70,14 +70,14 @@ export default function OrderCard({ order }: { order: OrderRow }) {
           </div>
         )}
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[17px] font-semibold text-[var(--foreground)]">{title}</h3>
-          <p className="mt-0.5 text-[13px] text-[var(--secondary-label)]">
+          <h3 className="truncate text-[18px] font-semibold text-[var(--foreground)]">{title}</h3>
+          <p className="mt-0.5 text-[14px] text-[var(--secondary-label)]">
             <span className="font-mono">{order.order_no}</span>
             <span className="mx-1.5 text-[var(--tertiary-label)]">·</span>
             {fmtDate(order.created_at)}
           </p>
           {order.campaign_cutoff_date && (
-            <p className="text-[13px] text-[var(--secondary-label)]">
+            <p className="text-[14px] text-[var(--secondary-label)]">
               結單日 {order.campaign_cutoff_date}
             </p>
           )}
@@ -100,23 +100,23 @@ export default function OrderCard({ order }: { order: OrderRow }) {
             }`}
           >
             <div className="min-w-0 flex-1">
-              <div className="text-[15px] text-[var(--foreground)]">
+              <div className="text-[16px] text-[var(--foreground)]">
                 {it.product_name ?? `SKU#${it.sku_id}`}
                 {it.variant_name && (
                   <span className="ml-1 text-[var(--secondary-label)]">/ {it.variant_name}</span>
                 )}
               </div>
               {it.sku_code && (
-                <div className="font-mono text-[11px] text-[var(--tertiary-label)]">{it.sku_code}</div>
+                <div className="font-mono text-[12px] text-[var(--tertiary-label)]">{it.sku_code}</div>
               )}
-              <div className="text-[13px] text-[var(--secondary-label)]">
+              <div className="text-[14px] text-[var(--secondary-label)]">
                 {fmtAmount(it.unit_price)} × {it.qty}
               </div>
               {it.notes && (
-                <div className="mt-0.5 text-[13px] text-[var(--secondary-label)]">📝 {it.notes}</div>
+                <div className="mt-0.5 text-[14px] text-[var(--secondary-label)]">📝 {it.notes}</div>
               )}
             </div>
-            <div className="flex-shrink-0 text-right text-[15px] font-medium tabular-nums text-[var(--foreground)]">
+            <div className="flex-shrink-0 text-right text-[16px] font-medium tabular-nums text-[var(--foreground)]">
               {fmtAmount(it.subtotal)}
             </div>
           </li>
@@ -124,12 +124,12 @@ export default function OrderCard({ order }: { order: OrderRow }) {
       </ul>
 
       {order.notes && (
-        <div className="mx-4 mb-3 rounded-xl bg-[#7676801a] p-3 text-[13px] text-[var(--secondary-label)]">
+        <div className="mx-4 mb-3 rounded-xl bg-[#7676801a] p-3 text-[14px] text-[var(--secondary-label)]">
           📝 {order.notes}
         </div>
       )}
 
-      <div className="space-y-1 border-t border-[var(--separator)] px-4 py-3 text-[13px]">
+      <div className="space-y-1 border-t border-[var(--separator)] px-4 py-3 text-[14px]">
         <div className="flex justify-between text-[var(--secondary-label)]">
           <span>商品（{totalQty} 件）</span>
           <span className="tabular-nums">{fmtAmount(order.items_total)}</span>
@@ -147,14 +147,14 @@ export default function OrderCard({ order }: { order: OrderRow }) {
           </div>
         )}
         <div className="flex items-baseline justify-between pt-2">
-          <span className="text-[15px] text-[var(--foreground)]">應付金額</span>
-          <span className="text-[20px] font-semibold tabular-nums text-[var(--brand-strong)]">
+          <span className="text-[16px] text-[var(--foreground)]">應付金額</span>
+          <span className="text-[24px] font-semibold tabular-nums text-[var(--brand-strong)]">
             ${fmtAmount(order.payable_amount)}
           </span>
         </div>
       </div>
 
-      <div className="border-t border-[var(--separator)] px-4 py-2.5 text-[11px] text-[var(--tertiary-label)]">
+      <div className="border-t border-[var(--separator)] px-4 py-2.5 text-[12px] text-[var(--tertiary-label)]">
         結單編號 <span className="font-mono">{order.settlement_no}</span>
         {order.store_name && <span className="ml-2">· 取貨 {order.store_name}</span>}
       </div>

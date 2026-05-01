@@ -21,15 +21,15 @@ export default function PageShell({
   return (
     <div
       className="min-h-[100dvh] bg-[var(--background)]"
-      style={{ paddingBottom: "calc(60px + env(safe-area-inset-bottom))" }}
+      style={{ paddingBottom: "calc(80px + env(safe-area-inset-bottom))" }}
     >
       <main className="mx-auto w-full max-w-md">
         {title !== undefined && (
           <header
             className="sticky top-0 z-20 flex items-end justify-between gap-3 bg-[color-mix(in_srgb,var(--background)_85%,transparent)] px-5 pb-2 backdrop-blur-xl"
-            style={{ paddingTop: "calc(env(safe-area-inset-top) + 12px)" }}
+            style={{ paddingTop: "calc(env(safe-area-inset-top) + 14px)" }}
           >
-            <h1 className="text-[32px] font-bold tracking-tight text-[var(--foreground)] leading-tight">
+            <h1 className="text-[34px] font-bold tracking-tight text-[var(--foreground)] leading-tight">
               {title}
             </h1>
             {rightAction && <div className="pb-1">{rightAction}</div>}

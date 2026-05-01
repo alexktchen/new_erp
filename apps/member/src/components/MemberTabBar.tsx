@@ -56,7 +56,7 @@ export default function MemberTabBar() {
   return (
     <nav
       className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--separator)] bg-white/85 backdrop-blur-xl"
-      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      style={{ paddingBottom: "max(env(safe-area-inset-bottom), 14px)" }}
     >
       <ul className="mx-auto flex max-w-md items-stretch">
         {tabs.map((t) => {
@@ -65,7 +65,7 @@ export default function MemberTabBar() {
             <li key={t.href} className="flex-1">
               <Link
                 href={t.href}
-                className={`flex flex-col items-center justify-center gap-0.5 px-1 pb-1.5 pt-2 text-[10px] font-medium transition-colors ${
+                className={`flex flex-col items-center justify-center gap-1 px-1 pb-2 pt-2.5 text-[12px] font-medium transition-colors ${
                   active ? "text-[var(--brand-strong)]" : "text-[var(--ios-gray)]"
                 }`}
               >

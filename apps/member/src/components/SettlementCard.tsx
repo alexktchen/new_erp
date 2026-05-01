@@ -32,9 +32,9 @@ function Row({
   value: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-3 border-t border-[var(--separator)] py-2.5 first:border-t-0">
-      <span className="text-[13px] text-[var(--secondary-label)]">{label}</span>
-      <span className="max-w-[60%] text-right text-[14px] text-[var(--foreground)]">{value}</span>
+    <div className="flex items-start justify-between gap-3 border-t border-[var(--separator)] py-3 first:border-t-0">
+      <span className="text-[14px] text-[var(--secondary-label)]">{label}</span>
+      <span className="max-w-[60%] text-right text-[16px] text-[var(--foreground)]">{value}</span>
     </div>
   );
 }
@@ -47,8 +47,8 @@ export default function SettlementCard({ settlement: s }: { settlement: Settleme
     <article className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
       <header className="flex items-center justify-between gap-2 px-4 pt-3.5 pb-3">
         <div>
-          <div className="text-[11px] uppercase tracking-wide text-[var(--tertiary-label)]">結單編號</div>
-          <div className="font-mono text-[15px] font-medium text-[var(--foreground)]">{s.settlement_no}</div>
+          <div className="text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">結單編號</div>
+          <div className="font-mono text-[17px] font-medium text-[var(--foreground)]">{s.settlement_no}</div>
         </div>
         <div className="flex gap-1.5">
           <StatusChip tone={paid ? "ok" : "warn"} label={paid ? "已付款" : "未付款"} />
@@ -57,7 +57,7 @@ export default function SettlementCard({ settlement: s }: { settlement: Settleme
       </header>
 
       <section className="border-t border-[var(--separator)] px-4">
-        <div className="py-2 text-[11px] uppercase tracking-wide text-[var(--tertiary-label)]">付款資訊</div>
+        <div className="py-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">付款資訊</div>
         <Row label="付款方式" value={s.payment_method ?? "—"} />
         <Row label="匯款金額" value={<span className="tabular-nums">{fmtAmount(s.remit_amount)}</span>} />
         <Row label="匯款時間" value={s.remit_at ?? "—"} />
@@ -65,14 +65,14 @@ export default function SettlementCard({ settlement: s }: { settlement: Settleme
       </section>
 
       <section className="border-t border-[var(--separator)] px-4">
-        <div className="py-2 text-[11px] uppercase tracking-wide text-[var(--tertiary-label)]">出貨資訊</div>
+        <div className="py-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">出貨資訊</div>
         <Row label="出貨方式" value={s.shipping_method ?? "—"} />
         <Row label="收件電話" value={s.shipping_phone ?? "—"} />
         {s.shipping_address && <Row label="收件地址" value={s.shipping_address} />}
         <Row label="出貨備註" value={s.shipping_note ?? "—"} />
       </section>
 
-      <section className="border-t border-[var(--separator)] space-y-1 px-4 py-3 text-[13px]">
+      <section className="border-t border-[var(--separator)] space-y-1 px-4 py-3 text-[14px]">
         <div className="flex justify-between text-[var(--secondary-label)]">
           <span>商品總額</span>
           <span className="tabular-nums">{fmtAmount(s.items_total)}</span>
@@ -88,8 +88,8 @@ export default function SettlementCard({ settlement: s }: { settlement: Settleme
           </span>
         </div>
         <div className="flex items-baseline justify-between pt-2">
-          <span className="text-[15px] text-[var(--foreground)]">應付金額</span>
-          <span className="text-[20px] font-semibold tabular-nums text-[var(--brand-strong)]">
+          <span className="text-[16px] text-[var(--foreground)]">應付金額</span>
+          <span className="text-[24px] font-semibold tabular-nums text-[var(--brand-strong)]">
             ${fmtAmount(s.payable_amount)}
           </span>
         </div>

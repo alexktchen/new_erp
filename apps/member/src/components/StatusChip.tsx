@@ -19,7 +19,7 @@ export default function StatusChip({
 }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2 py-[2px] text-[12px] font-medium leading-tight ${styles[tone]}`}
+      className={`inline-flex items-center rounded-full px-2.5 py-[3px] text-[13px] font-medium leading-tight ${styles[tone]}`}
     >
       {label}
     </span>

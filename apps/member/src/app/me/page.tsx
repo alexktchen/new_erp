@@ -137,9 +137,9 @@ export default function MePage() {
               </div>
             )}
             <div className="min-w-0 flex-1">
-              <div className="text-[19px] font-semibold text-[var(--foreground)]">{displayName}</div>
-              <div className="font-mono text-[12px] text-[var(--secondary-label)]">{me.member_no}</div>
-              <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-[#06C755]/15 px-2 py-[2px] text-[11px] font-medium text-[#067a37]">
+              <div className="text-[20px] font-semibold text-[var(--foreground)]">{displayName}</div>
+              <div className="font-mono text-[13px] text-[var(--secondary-label)]">{me.member_no}</div>
+              <div className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-[#06C755]/15 px-2.5 py-[3px] text-[12px] font-medium text-[#067a37]">
                 ✓ 已綁定 LINE
               </div>
             </div>
@@ -178,7 +178,7 @@ export default function MePage() {
                     type="text"
                     value={form.name}
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    className="w-full bg-transparent text-right text-[15px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
+                    className="w-full bg-transparent text-right text-[17px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
                     placeholder="請輸入"
                     required
                   />
@@ -190,7 +190,7 @@ export default function MePage() {
                     value={form.phone}
                     onChange={(e) => setForm({ ...form, phone: e.target.value })}
                     placeholder="0912345678"
-                    className="w-full bg-transparent text-right font-mono text-[15px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
+                    className="w-full bg-transparent text-right font-mono text-[17px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
                   />
                 </FormField>
                 <FormField label="生日">
@@ -198,7 +198,7 @@ export default function MePage() {
                     type="date"
                     value={form.birthday}
                     onChange={(e) => setForm({ ...form, birthday: e.target.value })}
-                    className="w-full bg-transparent text-right text-[15px] text-[var(--foreground)] outline-none"
+                    className="w-full bg-transparent text-right text-[17px] text-[var(--foreground)] outline-none"
                   />
                 </FormField>
                 <FormField label="Email">
@@ -207,7 +207,7 @@ export default function MePage() {
                     value={form.email}
                     onChange={(e) => setForm({ ...form, email: e.target.value })}
                     placeholder="you@example.com"
-                    className="w-full bg-transparent text-right text-[15px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
+                    className="w-full bg-transparent text-right text-[17px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
                   />
                 </FormField>
               </div>
@@ -264,10 +264,10 @@ function InfoRow({
   small?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 border-t border-[var(--separator)] px-4 py-3 first:border-t-0">
-      <span className="text-[15px] text-[var(--foreground)]">{label}</span>
+    <div className="flex items-center justify-between gap-3 border-t border-[var(--separator)] px-4 py-3.5 first:border-t-0">
+      <span className="text-[17px] text-[var(--foreground)]">{label}</span>
       <span
-        className={`max-w-[60%] text-right ${small ? "text-[13px]" : "text-[15px]"} ${
+        className={`max-w-[60%] text-right ${small ? "text-[14px]" : "text-[17px]"} ${
           mono ? "font-mono" : ""
         } ${breakAll ? "break-all" : ""} ${
           value ? "text-[var(--secondary-label)]" : "text-[var(--tertiary-label)]"
@@ -291,13 +291,13 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <label className="flex items-center gap-3 border-t border-[var(--separator)] px-4 py-2.5 first:border-t-0">
-      <div className="w-[88px] flex-shrink-0">
-        <div className="text-[15px] text-[var(--foreground)]">
+    <label className="flex items-center gap-3 border-t border-[var(--separator)] px-4 py-3 first:border-t-0">
+      <div className="w-[96px] flex-shrink-0">
+        <div className="text-[17px] text-[var(--foreground)]">
           {label}
           {required && <span className="ml-0.5 text-[var(--ios-red)]">*</span>}
         </div>
-        {hint && <div className="text-[11px] text-[var(--tertiary-label)]">{hint}</div>}
+        {hint && <div className="text-[12px] text-[var(--tertiary-label)]">{hint}</div>}
       </div>
       <div className="flex-1">{children}</div>
     </label>

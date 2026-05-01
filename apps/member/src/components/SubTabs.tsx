@@ -24,7 +24,7 @@ export default function SubTabs({
             <button
               key={o.value}
               onClick={() => onChange(o.value)}
-              className={`flex-1 rounded-[8px] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+              className={`flex-1 rounded-[8px] px-3 py-2 text-[15px] font-medium transition-colors ${
                 active
                   ? "bg-white text-[var(--foreground)] shadow-[0_3px_8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)]"
                   : "bg-transparent text-[var(--ios-gray)]"

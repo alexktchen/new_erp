@@ -188,24 +188,24 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
         通知設定
       </div>
       <div className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-        <div className="flex items-start justify-between gap-3 border-b border-[var(--separator)] px-4 py-3">
+        <div className="flex items-start justify-between gap-3 border-b border-[var(--separator)] px-4 py-3.5">
           <div className="min-w-0 flex-1">
-            <div className="text-[15px] text-[var(--foreground)]">推播通知</div>
-            <p className="mt-0.5 text-[13px] text-[var(--secondary-label)]">
+            <div className="text-[17px] text-[var(--foreground)]">推播通知</div>
+            <p className="mt-0.5 text-[14px] text-[var(--secondary-label)]">
               開啟以獲得訂閱商品提醒。
             </p>
           </div>
           <button
             onClick={rebind}
-            className="flex-shrink-0 text-[13px] text-[var(--ios-blue)] active:opacity-60"
+            className="flex-shrink-0 text-[15px] text-[var(--ios-blue)] active:opacity-60"
           >
             重新連動 LINE
           </button>
         </div>
 
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
+        <div className="flex items-center justify-between gap-3 px-4 py-3.5">
           {subscription ? (
-            <div className="flex items-center gap-1.5 text-[15px] font-medium text-[#1f8a3c]">
+            <div className="flex items-center gap-1.5 text-[17px] font-medium text-[#1f8a3c]">
               <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
               </svg>
@@ -213,11 +213,11 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
             </div>
           ) : (
             <>
-              <span className="text-[15px] text-[var(--secondary-label)]">尚未啟用</span>
+              <span className="text-[17px] text-[var(--secondary-label)]">尚未啟用</span>
               <button
                 onClick={subscribe}
                 disabled={!jwt}
-                className="rounded-full bg-[var(--ios-blue)] px-4 py-1.5 text-[14px] font-medium text-white active:opacity-80 disabled:opacity-50"
+                className="rounded-full bg-[var(--ios-blue)] px-4 py-2 text-[15px] font-semibold text-white active:opacity-80 disabled:opacity-50"
               >
                 開啟通知
               </button>
@@ -226,7 +226,7 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
         </div>
 
         {debugStatus && (
-          <div className="border-t border-[var(--separator)] bg-[#7676800a] px-4 py-2 font-mono text-[10px] text-[var(--secondary-label)]">
+          <div className="border-t border-[var(--separator)] bg-[#7676800a] px-4 py-2 font-mono text-[11px] text-[var(--secondary-label)]">
             {debugStatus} {isPWA ? " · PWA" : " · Browser"}
           </div>
         )}
