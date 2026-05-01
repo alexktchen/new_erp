@@ -20,6 +20,7 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
   const [isSupported, setIsSupported] = useState(false);
   const [permission, setPermission] = useState<NotificationPermission>("default");
   const [subscription, setSubscription] = useState<PushSubscription | null>(null);
+  const [debugStatus, setDebugStatus] = useState<string>("");
 
   useEffect(() => {
     if ("serviceWorker" in navigator && "PushManager" in window) {
@@ -27,10 +28,11 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       setPermission(Notification.permission);
       
       navigator.serviceWorker.ready.then((registration) => {
+        setDebugStatus("Service Worker 已就緒");
         registration.pushManager.getSubscription().then((sub) => {
           setSubscription(sub);
           if (sub && jwt) {
-            // 自動同步已存在的訂閱到資料庫 (避免 DB 被 reset 後瀏覽器仍有訂閱但 DB 沒資料)
+            setDebugStatus("偵測到舊訂閱，同步中...");
             const subJson = sub.toJSON();
             callLiffApi(jwt, {
               action: "upsert_push_subscription",
@@ -38,29 +40,33 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
               p256dh: subJson.keys?.p256dh,
               auth: subJson.keys?.auth,
               user_agent: navigator.userAgent,
-            }).catch(err => console.error("Failed to sync existing subscription:", err));
+            })
+            .then(() => setDebugStatus("舊訂閱同步成功"))
+            .catch(err => {
+              setDebugStatus(`同步失敗: ${err.message}`);
+              alert(`同步舊訂閱失敗：${err.message}`);
+            });
           }
         });
       });
+    } else {
+      setDebugStatus("瀏覽器不支援 Web Push");
     }
   }, [jwt]);
 
   const subscribe = async () => {
-    if (!jwt) return;
+    if (!jwt) {
+      alert("未登入，無法訂閱");
+      return;
+    }
     
     try {
-      // 在 iOS 上，權限請求必須由使用者動作直接觸發，儘量放前面
+      setDebugStatus("請求通知權限...");
       const result = await Notification.requestPermission();
       setPermission(result);
       if (result !== "granted") {
         alert("未獲得通知權限，無法開啟。");
         return;
-      }
-
-      // 檢查 Service Worker 是否就緒
-      if (!navigator.serviceWorker.controller) {
-        // 如果沒有 controller，嘗試等待
-        console.warn("Service Worker not controlling the page yet.");
       }
 
       const registration = await navigator.serviceWorker.ready;
@@ -69,6 +75,7 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
         return;
       }
       
+      setDebugStatus("正在向 Push Server 註冊...");
       const sub = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
@@ -81,6 +88,7 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
         throw new Error("取得訂閱金鑰失敗 (keys missing)");
       }
       
+      setDebugStatus("正在存入資料庫...");
       await callLiffApi(jwt, {
         action: "upsert_push_subscription",
         endpoint: subJson.endpoint,
@@ -89,10 +97,13 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
         user_agent: navigator.userAgent,
       });
 
+      setDebugStatus("訂閱成功並已存入資料庫");
       alert("通知訂閱成功！");
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDebugStatus(`錯誤: ${msg}`);
       console.error("Failed to subscribe:", err);
-      alert(`訂閱失敗：${err instanceof Error ? err.message : String(err)}`);
+      alert(`訂閱失敗：${msg}`);
     }
   };
 
@@ -104,6 +115,13 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       <p className="mt-1 text-sm text-gray-500">
         開啟通知以獲得訂閱商品的到貨提醒。
       </p>
+      
+      {debugStatus && (
+        <div className="mt-2 p-2 bg-gray-100 text-[10px] font-mono text-gray-600 rounded">
+          狀態: {debugStatus}
+        </div>
+      )}
+
       <div className="mt-4">
         {subscription ? (
           <div className="flex items-center text-green-600 text-sm font-medium">
