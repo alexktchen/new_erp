@@ -16,6 +16,25 @@ function urlBase64ToUint8Array(base64String: string) {
   return outputArray;
 }
 
+// 等到 SW registration 真的有 active worker 才回傳。
+// `getRegistration()` 在 installing/waiting 階段就會回 reg（active=null），
+// pushManager.subscribe() 在這狀態下會丟「subscribing for push requires an active service worker」。
+// 必須等 `.ready`（保證 active 已就緒），並用 timeout 防呆。
+async function getActiveRegistration(timeoutMs: number): Promise<ServiceWorkerRegistration> {
+  const existing = await navigator.serviceWorker.getRegistration();
+  if (existing?.active) return existing;
+
+  return await Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Service Worker 啟用超時（>${Math.round(timeoutMs / 1000)}s），請重開 App`)),
+        timeoutMs,
+      ),
+    ),
+  ]);
+}
+
 export function PushNotificationManager({ jwt }: { jwt: string | null }) {
   const [isSupported, setIsSupported] = useState(false);
   const [permission, setPermission] = useState<NotificationPermission>("default");
@@ -24,36 +43,69 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
   const [isPWA, setIsPWA] = useState(false);
 
   useEffect(() => {
-    // 偵測是否為加入主畫面的 PWA 模式
-    const standalone = (window.navigator as any).standalone || window.matchMedia('(display-mode: standalone)').matches;
+    const standalone =
+      (window.navigator as any).standalone ||
+      window.matchMedia("(display-mode: standalone)").matches;
     setIsPWA(!!standalone);
 
-    if ("serviceWorker" in navigator && "PushManager" in window) {
-      setIsSupported(true);
-      setPermission(Notification.permission);
-      
-      navigator.serviceWorker.ready.then((registration) => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setDebugStatus("不支援 Web Push (iOS 需 16.4+)");
+      return;
+    }
+
+    setIsSupported(true);
+    setPermission(Notification.permission);
+
+    // 顯示先前 SW register 失敗的錯誤（若有）
+    const swErr = (() => {
+      try { return localStorage.getItem("sw_register_error"); } catch { return null; }
+    })();
+    if (swErr) {
+      setDebugStatus(`SW 註冊失敗: ${swErr}`);
+      return;
+    }
+
+    setDebugStatus(standalone ? "等待 Service Worker 啟用..." : "請加入主畫面以啟用通知");
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const registration = await getActiveRegistration(8000);
+        if (cancelled) return;
         setDebugStatus(standalone ? "PWA 已就緒" : "請加入主畫面以啟用通知");
-        registration.pushManager.getSubscription().then((sub) => {
-          setSubscription(sub);
-          if (sub && jwt) {
-            setDebugStatus("發現舊訂閱，同步中...");
-            const subJson = sub.toJSON();
-            callLiffApi(jwt, {
+
+        const sub = await registration.pushManager.getSubscription();
+        if (cancelled) return;
+        setSubscription(sub);
+
+        if (sub && jwt) {
+          setDebugStatus("發現舊訂閱，同步中...");
+          const subJson = sub.toJSON();
+          try {
+            await callLiffApi(jwt, {
               action: "upsert_push_subscription",
               endpoint: subJson.endpoint,
               p256dh: subJson.keys?.p256dh,
               auth: subJson.keys?.auth,
               user_agent: navigator.userAgent,
-            })
-            .then(() => setDebugStatus("同步成功"))
-            .catch(err => setDebugStatus(`同步失敗: ${err.message}`));
+            });
+            if (!cancelled) setDebugStatus("同步成功");
+          } catch (err) {
+            if (cancelled) return;
+            const msg = err instanceof Error ? err.message : String(err);
+            setDebugStatus(`同步失敗: ${msg}`);
           }
-        });
-      });
-    } else {
-      setDebugStatus("不支援 Web Push (iOS 需 16.4+)");
-    }
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        setDebugStatus(`SW 等待失敗: ${msg}`);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [jwt]);
 
   const rebind = () => {
@@ -88,20 +140,7 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       }
 
       setDebugStatus("正在取得 Service Worker...");
-      
-      // 使用更強健的方式取得 registration，避免死等 .ready
-      const getRegistration = async () => {
-        const reg = await navigator.serviceWorker.getRegistration();
-        if (reg) return reg;
-        return await navigator.serviceWorker.ready;
-      };
-
-      const registration = await Promise.race([
-        getRegistration(),
-        new Promise<ServiceWorkerRegistration>((_, reject) => 
-          setTimeout(() => reject(new Error("Service Worker 回應超時，請重開 App")), 5000)
-        )
-      ]);
+      const registration = await getActiveRegistration(15000);
 
       if (!registration.pushManager) {
         setDebugStatus("PushManager 不可用");
