@@ -3,6 +3,24 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
+import {
+  DndContext,
+  closestCorners,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDroppable,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 type CalendarCandidate = {
   id: number;
@@ -89,58 +107,20 @@ export default function CommunityCandidatesCalendarPage() {
     reload();
   }, [reload]);
 
-  const byDate = useMemo(() => {
-    const map = new Map<string, CalendarCandidate[]>();
-    for (const d of days) map.set(formatDate(d), []);
+  // Local mirror of byDate so drag can produce optimistic updates
+  const [localByDate, setLocalByDate] = useState<Record<string, CalendarCandidate[]>>({});
+
+  useEffect(() => {
+    const map: Record<string, CalendarCandidate[]> = {};
+    for (const d of days) map[formatDate(d)] = [];
     for (const r of rows ?? []) {
       if (r.scheduled_open_at) {
         const key = r.scheduled_open_at.slice(0, 10);
-        map.get(key)?.push(r);
+        if (map[key]) map[key].push(r);
       }
     }
-    return map;
-  }, [days, rows]);
-
-  const swapWith = async (a: CalendarCandidate, b: CalendarCandidate) => {
-    setBusy(true);
-    try {
-      const sa = a.scheduled_sort_order ?? 0;
-      const sb = b.scheduled_sort_order ?? 0;
-      const now = new Date().toISOString();
-      const sb1 = getSupabase();
-      const r1 = await sb1
-        .from("community_product_candidates")
-        .update({ scheduled_sort_order: sb, updated_at: now })
-        .eq("id", a.id);
-      if (r1.error) throw r1.error;
-      const r2 = await sb1
-        .from("community_product_candidates")
-        .update({ scheduled_sort_order: sa, updated_at: now })
-        .eq("id", b.id);
-      if (r2.error) throw r2.error;
-      await reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleMoveUp = async (r: CalendarCandidate) => {
-    if (!r.scheduled_open_at) return;
-    const dayCards = byDate.get(r.scheduled_open_at.slice(0, 10)) ?? [];
-    const idx = dayCards.findIndex((c) => c.id === r.id);
-    if (idx <= 0) return;
-    await swapWith(r, dayCards[idx - 1]);
-  };
-
-  const handleMoveDown = async (r: CalendarCandidate) => {
-    if (!r.scheduled_open_at) return;
-    const dayCards = byDate.get(r.scheduled_open_at.slice(0, 10)) ?? [];
-    const idx = dayCards.findIndex((c) => c.id === r.id);
-    if (idx < 0 || idx >= dayCards.length - 1) return;
-    await swapWith(r, dayCards[idx + 1]);
-  };
+    setLocalByDate(map);
+  }, [rows, days]);
 
   const handleReschedule = async (r: CalendarCandidate, newDateStr: string) => {
     if (!newDateStr) return;
@@ -197,6 +177,119 @@ export default function CommunityCandidatesCalendarPage() {
       setBusy(false);
     }
   };
+
+  // ============ DnD ============
+
+  const [activeCard, setActiveCard] = useState<CalendarCandidate | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  function findContainer(id: number | string): string | null {
+    if (typeof id === "string" && days.some((d) => formatDate(d) === id)) return id;
+    const numId = Number(id);
+    for (const [day, cards] of Object.entries(localByDate)) {
+      if (cards.some((c) => c.id === numId)) return day;
+    }
+    return null;
+  }
+
+  const onDragStart = (e: DragStartEvent) => {
+    const id = Number(e.active.id);
+    for (const cards of Object.values(localByDate)) {
+      const c = cards.find((c) => c.id === id);
+      if (c) {
+        setActiveCard(c);
+        break;
+      }
+    }
+  };
+
+  const onDragOver = (e: DragOverEvent) => {
+    const { active, over } = e;
+    if (!over) return;
+    const activeId = Number(active.id);
+    const overContainer = findContainer(over.id as number | string);
+    const activeContainer = findContainer(activeId);
+    if (!activeContainer || !overContainer) return;
+    if (activeContainer === overContainer) return;
+
+    setLocalByDate((prev) => {
+      const src = [...(prev[activeContainer] ?? [])];
+      const dst = [...(prev[overContainer] ?? [])];
+      const idx = src.findIndex((c) => c.id === activeId);
+      if (idx < 0) return prev;
+      const [card] = src.splice(idx, 1);
+      // figure out target index: drop above the over card, or end of list
+      const overIdx =
+        typeof over.id === "number"
+          ? dst.findIndex((c) => c.id === Number(over.id))
+          : dst.length;
+      dst.splice(overIdx >= 0 ? overIdx : dst.length, 0, card);
+      return { ...prev, [activeContainer]: src, [overContainer]: dst };
+    });
+  };
+
+  const onDragEnd = async (e: DragEndEvent) => {
+    const card = activeCard;
+    setActiveCard(null);
+    const { active, over } = e;
+    if (!over || !card) return;
+    const activeId = Number(active.id);
+    const overContainer = findContainer(over.id as number | string);
+    const originalContainer = card.scheduled_open_at?.slice(0, 10) ?? null;
+    if (!overContainer) return;
+
+    // Determine current container after onDragOver moves
+    const currentContainer = findContainer(activeId);
+    if (!currentContainer) return;
+
+    if (currentContainer === originalContainer) {
+      // Same-day reorder: arrayMove + persist
+      const items = localByDate[currentContainer] ?? [];
+      const oldIdx = items.findIndex((c) => c.id === activeId);
+      const newIdx =
+        typeof over.id === "number"
+          ? items.findIndex((c) => c.id === Number(over.id))
+          : items.length - 1;
+      if (oldIdx < 0 || newIdx < 0 || oldIdx === newIdx) return;
+      const newItems = arrayMove(items, oldIdx, newIdx);
+      setLocalByDate((p) => ({ ...p, [currentContainer]: newItems }));
+      await persistDay(currentContainer, newItems);
+      await reload();
+    } else {
+      // Cross-day move: source already updated in onDragOver
+      const srcItems = localByDate[originalContainer ?? ""] ?? [];
+      const dstItems = localByDate[currentContainer] ?? [];
+      setBusy(true);
+      try {
+        await persistDay(currentContainer, dstItems);
+        if (originalContainer) await persistDay(originalContainer, srcItems);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+      }
+      await reload();
+    }
+  };
+
+  async function persistDay(dayKey: string, items: CalendarCandidate[]) {
+    const sb = getSupabase();
+    const now = new Date().toISOString();
+    for (let i = 0; i < items.length; i++) {
+      const { error: err } = await sb
+        .from("community_product_candidates")
+        .update({
+          scheduled_open_at: dayKey,
+          scheduled_sort_order: i + 1,
+          updated_at: now,
+        })
+        .eq("id", items[i].id);
+      if (err) throw new Error(err.message);
+    }
+  }
 
   const todayStr = formatDate(days[0]);
   const selectedDay = days[selectedDayIdx];
@@ -307,7 +400,7 @@ export default function CommunityCandidatesCalendarPage() {
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">選品週曆</h1>
-          <p className="mt-0.5 text-sm text-zinc-500">未來 7 天</p>
+          <p className="mt-0.5 text-sm text-zinc-500">未來 7 天 · 拖拉卡片排序或換日</p>
         </div>
         <Link
           href="/community-candidates"
@@ -326,115 +419,176 @@ export default function CommunityCandidatesCalendarPage() {
       {rows === null ? (
         <div className="text-sm text-zinc-400">載入中…</div>
       ) : (
-        <>
-          {/* Desktop: 7-col grid */}
-          <div className="hidden grid-cols-7 gap-2 overflow-x-auto md:grid">
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCorners}
+          onDragStart={onDragStart}
+          onDragOver={onDragOver}
+          onDragEnd={onDragEnd}
+        >
+          <div className="grid grid-cols-7 gap-2 overflow-x-auto">
             {days.map((d) => {
               const key = formatDate(d);
               const isToday = key === todayStr;
-              const cards = byDate.get(key) ?? [];
+              const cards = localByDate[key] ?? [];
               return (
-                <div key={key} className="flex min-w-[120px] flex-col gap-2">
-                  <div
-                    className={`rounded-md px-2 py-1.5 text-center text-xs font-semibold ${
-                      isToday
-                        ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                    }`}
+                <DayColumn key={key} dayKey={key} day={d} isToday={isToday} cards={cards}>
+                  <SortableContext
+                    id={key}
+                    items={cards.map((c) => c.id)}
+                    strategy={verticalListSortingStrategy}
                   >
-                    <div>{d.getMonth() + 1}/{d.getDate()}</div>
-                    <div className="text-[10px] font-normal opacity-70">週{WEEKDAYS[d.getDay()]}</div>
-                  </div>
-
-                  {cards.length === 0 ? (
-                    <div className="rounded border border-dashed border-zinc-200 px-2 py-4 text-center text-[10px] text-zinc-400 dark:border-zinc-800">
-                      無排程
-                    </div>
-                  ) : (
-                    cards.map((r, idx) => renderCard(r, idx, cards.length))
-                  )}
-                </div>
+                    {cards.length === 0 ? (
+                      <div className="rounded border border-dashed border-zinc-200 px-2 py-4 text-center text-[10px] text-zinc-400 dark:border-zinc-800">
+                        無排程
+                      </div>
+                    ) : (
+                      cards.map((r, idx) => (
+                        <SortableCard
+                          key={r.id}
+                          card={r}
+                          idx={idx}
+                          busy={busy}
+                          onRemove={handleRemove}
+                        />
+                      ))
+                    )}
+                  </SortableContext>
+                </DayColumn>
               );
             })}
           </div>
-
-          {/* Mobile: Google-Calendar-style day view */}
-          <div className="md:hidden">
-            {/* Date strip */}
-            <div className="grid grid-cols-7 gap-1">
-              {days.map((d, i) => {
-                const key = formatDate(d);
-                const count = byDate.get(key)?.length ?? 0;
-                const isSelected = i === selectedDayIdx;
-                const isToday = key === todayStr;
-                return (
-                  <button
-                    key={key}
-                    onClick={() => setSelectedDayIdx(i)}
-                    className={`flex flex-col items-center gap-0.5 rounded-md py-1.5 transition ${
-                      isSelected
-                        ? "bg-zinc-900 text-white shadow-sm dark:bg-zinc-100 dark:text-zinc-900"
-                        : "bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                    }`}
-                  >
-                    <span className="text-[10px] opacity-70">週{WEEKDAYS[d.getDay()]}</span>
-                    <span
-                      className={`text-base font-semibold ${
-                        isToday && !isSelected ? "text-blue-600 dark:text-blue-400" : ""
-                      }`}
-                    >
-                      {d.getDate()}
-                    </span>
-                    <span
-                      aria-hidden
-                      className={`h-1 w-1 rounded-full ${
-                        count > 0
-                          ? isSelected
-                            ? "bg-white dark:bg-zinc-900"
-                            : "bg-amber-500"
-                          : "bg-transparent"
-                      }`}
-                    />
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Selected day header */}
-            <div className="mt-3 flex items-baseline justify-between border-b border-zinc-200 pb-2 dark:border-zinc-800">
-              <div className="flex items-baseline gap-2">
-                <span className="text-base font-semibold">
-                  {selectedDay.getMonth() + 1}/{selectedDay.getDate()}
-                </span>
-                <span className="text-xs text-zinc-500">
-                  週{WEEKDAYS[selectedDay.getDay()]}
-                </span>
-                {selectedDayKey === todayStr && (
-                  <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
-                    今天
-                  </span>
-                )}
-              </div>
-              <span className="text-[11px] text-zinc-400">
-                {selectedDayCards.length} 筆
-              </span>
-            </div>
-
-            {/* Selected day cards */}
-            <div className="mt-3 space-y-2">
-              {selectedDayCards.length === 0 ? (
-                <div className="rounded border border-dashed border-zinc-200 px-2 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
-                  當日無排程
-                </div>
-              ) : (
-                selectedDayCards.map((r, idx) => renderCard(r, idx, selectedDayCards.length))
-              )}
-            </div>
-          </div>
-        </>
+        </DndContext>
       )}
 
       <div className="text-xs text-zinc-400">共 {rows?.length ?? 0} 筆</div>
+    </div>
+  );
+}
+
+function DayColumn({
+  dayKey,
+  day,
+  isToday,
+  cards,
+  children,
+}: {
+  dayKey: string;
+  day: Date;
+  isToday: boolean;
+  cards: CalendarCandidate[];
+  children: React.ReactNode;
+}) {
+  // useDroppable so empty columns can accept drops
+  const { setNodeRef, isOver } = useDroppable({ id: dayKey });
+  return (
+    <div
+      ref={setNodeRef}
+      className={`flex min-w-[120px] flex-col gap-2 rounded-md p-1 transition ${
+        isOver && cards.length === 0
+          ? "bg-amber-50 ring-2 ring-amber-300 dark:bg-amber-950/30 dark:ring-amber-700"
+          : ""
+      }`}
+    >
+      <div
+        className={`rounded-md px-2 py-1.5 text-center text-xs font-semibold ${
+          isToday
+            ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+            : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+        }`}
+      >
+        <div>
+          {day.getMonth() + 1}/{day.getDate()}
+        </div>
+        <div className="text-[10px] font-normal opacity-70">週{WEEKDAYS[day.getDay()]}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SortableCard({
+  card: r,
+  idx,
+  busy,
+  onRemove,
+}: {
+  card: CalendarCandidate;
+  idx: number;
+  busy: boolean;
+  onRemove: (r: CalendarCandidate) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: r.id,
+  });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+  };
+
+  const any = r.adopted_supplier_name || r.adopted_cost !== null || r.adopted_sale_price !== null;
+  const complete = !!(r.adopted_supplier_name && r.adopted_cost !== null && r.adopted_sale_price !== null);
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex flex-col gap-1.5 rounded-md border border-zinc-200 bg-white p-2 text-xs shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+    >
+      <div className="flex items-baseline gap-1.5">
+        <span
+          {...attributes}
+          {...listeners}
+          className="cursor-grab select-none touch-none font-mono text-[10px] font-semibold text-zinc-400 hover:text-zinc-700 active:cursor-grabbing dark:text-zinc-500 dark:hover:text-zinc-200"
+          title="拖拉排序 / 換日"
+        >
+          ⋮⋮ {suggestedTime(idx)}
+        </span>
+        <Link
+          href={`/community-candidates?highlight=${r.id}`}
+          className="font-medium leading-snug hover:underline"
+        >
+          {r.product_name_hint ?? "（無商品名）"}
+        </Link>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        <span
+          className={`inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+            ACTION_COLOR[r.owner_action] ?? ACTION_COLOR.none
+          }`}
+        >
+          {ACTION_LABEL[r.owner_action] ?? r.owner_action}
+        </span>
+        {complete && (
+          <span className="inline-flex rounded-full bg-teal-100 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:bg-teal-900/30 dark:text-teal-300">
+            已補資料
+          </span>
+        )}
+        {any && !complete && (
+          <span className="inline-flex rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+            資料未完整
+          </span>
+        )}
+      </div>
+      {any && (
+        <div className="space-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+          {r.adopted_supplier_name && <div>廠商：{r.adopted_supplier_name}</div>}
+          {r.adopted_cost !== null && <div>成本：{r.adopted_cost}</div>}
+          {r.adopted_sale_price !== null && <div>售價：{r.adopted_sale_price}</div>}
+        </div>
+      )}
+      <div className="flex gap-1 pt-0.5">
+        <button
+          onClick={() => onRemove(r)}
+          disabled={busy}
+          className="ml-auto rounded border border-red-300 px-1.5 py-0.5 text-[10px] text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30 disabled:opacity-50"
+          title="移出排程"
+        >
+          移出
+        </button>
+      </div>
     </div>
   );
 }
