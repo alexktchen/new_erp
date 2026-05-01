@@ -7,12 +7,20 @@ export default function AuthSuccessPage() {
   const [code, setCode] = useState<string | null>(null);
 
   useEffect(() => {
-    // 嘗試從 URL query 抓 code
-    const sp = new URLSearchParams(window.location.search);
-    const c = sp.get("code");
-    if (c) setCode(c);
+    // 1. 先從 Hash 抓 (因為 line-oauth-callback 把它放在 fragment)
+    const hash = window.location.hash.replace(/^#/, "");
+    if (hash) {
+      const hp = new URLSearchParams(hash);
+      const c = hp.get("code");
+      if (c) setCode(c);
+    }
 
-    // 同時處理 fragment token (如果是瀏覽器環境，這會完成登入)
+    // 2. 備援：從 Query 抓
+    const sp = new URLSearchParams(window.location.search);
+    const qc = sp.get("code");
+    if (qc) setCode(qc);
+
+    // 3. 處理登入並清理 Hash (這會清空網址)
     consumeFragmentToSession();
   }, []);
 
