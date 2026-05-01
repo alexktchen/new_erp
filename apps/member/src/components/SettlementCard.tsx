@@ -1,3 +1,5 @@
+import StatusChip from "./StatusChip";
+
 export type SettlementRow = {
   id: number;
   settlement_no: string;
@@ -22,67 +24,76 @@ function fmtAmount(n: number): string {
   return Number(n ?? 0).toLocaleString();
 }
 
+function Row({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-t border-[var(--separator)] py-2.5 first:border-t-0">
+      <span className="text-[13px] text-[var(--secondary-label)]">{label}</span>
+      <span className="max-w-[60%] text-right text-[14px] text-[var(--foreground)]">{value}</span>
+    </div>
+  );
+}
+
 export default function SettlementCard({ settlement: s }: { settlement: SettlementRow }) {
-  const paymentLabel  = s.payment_status === "paid" ? "已付款" : "未付款";
-  const shippingLabel = ["shipping", "completed"].includes(s.status) ? "已出貨" : "未出貨";
+  const paid = s.payment_status === "paid";
+  const shipped = ["shipping", "completed"].includes(s.status);
 
   return (
-    <article className="overflow-hidden rounded-md border border-pink-100 bg-white shadow-sm">
-      <div className="border-b border-pink-100 bg-pink-50 px-4 py-2">
-        <span className="text-sm font-medium text-pink-700"># 結單編號 </span>
-        <span className="font-mono text-sm text-pink-700">{s.settlement_no}</span>
-      </div>
-
-      <div className="space-y-3 px-4 py-3 text-base">
+    <article className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+      <header className="flex items-center justify-between gap-2 px-4 pt-3.5 pb-3">
         <div>
-          <span className="text-zinc-500">狀態：</span>
-          <span className="text-pink-600">{paymentLabel}</span>
-          <span className="mx-1 text-zinc-300">/</span>
-          <span className="text-pink-600">{shippingLabel}</span>
+          <div className="text-[11px] uppercase tracking-wide text-[var(--tertiary-label)]">結單編號</div>
+          <div className="font-mono text-[15px] font-medium text-[var(--foreground)]">{s.settlement_no}</div>
         </div>
+        <div className="flex gap-1.5">
+          <StatusChip tone={paid ? "ok" : "warn"} label={paid ? "已付款" : "未付款"} />
+          <StatusChip tone={shipped ? "ok" : "muted"} label={shipped ? "已出貨" : "未出貨"} />
+        </div>
+      </header>
 
-        <div>
-          <div className="text-pink-600">💳 付款方式</div>
-          <div className="text-zinc-700">{s.payment_method ?? "-"}</div>
-          <div className="text-sm text-zinc-500">匯款金額：{fmtAmount(s.remit_amount)} 元</div>
-          <div className="text-sm text-zinc-500">匯款時間：{s.remit_at ?? "-"}</div>
-          <div className="text-sm text-zinc-500">匯款備註：{s.remit_note ?? "-"}</div>
-          {s.payment_status !== "paid" && (
-            <div className="mt-1 text-lg font-semibold text-zinc-900">未付款</div>
-          )}
-        </div>
+      <section className="border-t border-[var(--separator)] px-4">
+        <div className="py-2 text-[11px] uppercase tracking-wide text-[var(--tertiary-label)]">付款資訊</div>
+        <Row label="付款方式" value={s.payment_method ?? "—"} />
+        <Row label="匯款金額" value={<span className="tabular-nums">{fmtAmount(s.remit_amount)}</span>} />
+        <Row label="匯款時間" value={s.remit_at ?? "—"} />
+        <Row label="匯款備註" value={s.remit_note ?? "—"} />
+      </section>
 
-        <div>
-          <div className="text-pink-600">🚚 出貨方式</div>
-          <div className="text-zinc-700">{s.shipping_method ?? "-"}</div>
-          <div className="text-sm text-zinc-500">{s.shipping_phone ?? "未填寫電話"}</div>
-          {s.shipping_address && (
-            <div className="text-sm text-zinc-500">{s.shipping_address}</div>
-          )}
-          <div className="text-sm text-zinc-500">{s.shipping_note ?? "未填寫備註"}</div>
-        </div>
+      <section className="border-t border-[var(--separator)] px-4">
+        <div className="py-2 text-[11px] uppercase tracking-wide text-[var(--tertiary-label)]">出貨資訊</div>
+        <Row label="出貨方式" value={s.shipping_method ?? "—"} />
+        <Row label="收件電話" value={s.shipping_phone ?? "—"} />
+        {s.shipping_address && <Row label="收件地址" value={s.shipping_address} />}
+        <Row label="出貨備註" value={s.shipping_note ?? "—"} />
+      </section>
 
-        <div className="space-y-1 border-t border-zinc-100 pt-3">
-          <div className="flex justify-between text-sm text-zinc-500">
-            <span>總金額</span>
-            <span>{fmtAmount(s.items_total)}</span>
-          </div>
-          <div className="flex justify-between text-sm text-zinc-500">
-            <span>運費</span>
-            <span>{fmtAmount(s.shipping_fee)}</span>
-          </div>
-          <div className="flex justify-between text-sm text-zinc-500">
-            <span>促銷活動</span>
-            <span>
-              {s.discount_amount > 0 ? `-${fmtAmount(s.discount_amount)}` : "0.00"}
-            </span>
-          </div>
-          <div className="flex justify-between border-t border-zinc-100 pt-1 text-lg font-semibold text-pink-600">
-            <span>應付金額</span>
-            <span>{fmtAmount(s.payable_amount)}</span>
-          </div>
+      <section className="border-t border-[var(--separator)] space-y-1 px-4 py-3 text-[13px]">
+        <div className="flex justify-between text-[var(--secondary-label)]">
+          <span>商品總額</span>
+          <span className="tabular-nums">{fmtAmount(s.items_total)}</span>
         </div>
-      </div>
+        <div className="flex justify-between text-[var(--secondary-label)]">
+          <span>運費</span>
+          <span className="tabular-nums">{fmtAmount(s.shipping_fee)}</span>
+        </div>
+        <div className="flex justify-between text-[var(--secondary-label)]">
+          <span>促銷折扣</span>
+          <span className="tabular-nums">
+            {s.discount_amount > 0 ? `−${fmtAmount(s.discount_amount)}` : "0"}
+          </span>
+        </div>
+        <div className="flex items-baseline justify-between pt-2">
+          <span className="text-[15px] text-[var(--foreground)]">應付金額</span>
+          <span className="text-[20px] font-semibold tabular-nums text-[var(--brand-strong)]">
+            ${fmtAmount(s.payable_amount)}
+          </span>
+        </div>
+      </section>
     </article>
   );
 }

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
-import MemberTabBar from "@/components/MemberTabBar";
+import PageShell from "@/components/PageShell";
 
 type MemberData = {
   member_id: number;
@@ -27,7 +27,6 @@ export default function MePage() {
   const [lineUserId, setLineUserId] = useState<string | null>(null);
   const [storeId, setStoreId] = useState<string | null>(null);
 
-  // edit mode
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ name: "", phone: "", birthday: "", email: "" });
@@ -50,10 +49,10 @@ export default function MePage() {
         const data = await callLiffApi<MemberData>(s.token, { action: "get_me" });
         setMe(data);
         setForm({
-          name:     data.name     ?? "",
-          phone:    data.phone    ?? "",
+          name: data.name ?? "",
+          phone: data.phone ?? "",
           birthday: data.birthday ?? "",
-          email:    data.email    ?? "",
+          email: data.email ?? "",
         });
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -71,12 +70,11 @@ export default function MePage() {
     try {
       await callLiffApi(s.token, {
         action: "update_me",
-        name:     form.name,
-        phone:    form.phone,
+        name: form.name,
+        phone: form.phone,
         birthday: form.birthday,
-        email:    form.email,
+        email: form.email,
       });
-      // reload
       const data = await callLiffApi<MemberData>(s.token, { action: "get_me" });
       setMe(data);
       setEditing(false);
@@ -89,177 +87,219 @@ export default function MePage() {
 
   if (loading) {
     return (
-      <main className="mx-auto w-full max-w-md">
-        <MemberTabBar />
-        <div className="p-6 pt-16 text-center">
-          <p className="text-base text-zinc-500">載入中…</p>
-        </div>
-      </main>
+      <PageShell title="會員中心">
+        <p className="px-5 pt-4 text-[15px] text-[var(--tertiary-label)]">載入中…</p>
+      </PageShell>
     );
   }
 
   if (!me) {
     return (
-      <main className="mx-auto w-full max-w-md">
-        <MemberTabBar />
-        <div className="p-6 pt-16 text-center">
-          <p className="text-base text-zinc-500">{error ?? "尚未登入，請回首頁。"}</p>
-          <a href="/" className="mt-4 inline-block text-base text-blue-600 hover:underline">回首頁</a>
+      <PageShell title="會員中心">
+        <div className="px-5 pt-6 text-center">
+          <p className="text-[15px] text-[var(--secondary-label)]">{error ?? "尚未登入，請回首頁。"}</p>
+          <a href="/" className="mt-4 inline-block text-[15px] text-[var(--ios-blue)]">回首頁</a>
         </div>
-      </main>
+      </PageShell>
     );
   }
 
   const avatarSrc = me.avatar_url ?? linePicture;
   const displayName = me.name ?? lineName ?? "(未提供)";
 
+  const rightAction = !editing ? (
+    <button
+      onClick={() => setEditing(true)}
+      className="text-[17px] text-[var(--ios-blue)] active:opacity-60"
+    >
+      編輯
+    </button>
+  ) : null;
+
   return (
-    <main className="mx-auto w-full max-w-md">
-      <MemberTabBar />
-      <div className="flex flex-col gap-5 p-6 pt-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">會員中心</h1>
-        {!editing && (
-          <button
-            onClick={() => setEditing(true)}
-            className="text-base text-blue-600 hover:underline"
-          >
-            編輯
-          </button>
+    <PageShell title="會員中心" rightAction={rightAction}>
+      <div className="space-y-4 px-4 pt-2 pb-6">
+        {error && (
+          <div className="rounded-2xl bg-[#ff3b30]/10 p-3 text-[14px] text-[#c4271d]">
+            {error}
+          </div>
         )}
-      </div>
 
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-base text-red-800">
-          {error}
-        </div>
-      )}
-
-      <div className="rounded-md border border-[#06C755]/30 bg-[#06C755]/5 p-4">
-        <div className="flex items-center gap-3">
-          {avatarSrc ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={avatarSrc} alt="" className="h-14 w-14 rounded-full object-cover" />
-          ) : (
-            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-zinc-200 text-2xl text-zinc-500">
-              {displayName[0]}
+        {/* LINE 綁定卡片 */}
+        <section className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+          <div className="flex items-center gap-3 px-4 py-4">
+            {avatarSrc ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={avatarSrc} alt="" className="h-16 w-16 rounded-full object-cover" />
+            ) : (
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#7676801a] text-2xl text-[var(--secondary-label)]">
+                {displayName[0]}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-[19px] font-semibold text-[var(--foreground)]">{displayName}</div>
+              <div className="font-mono text-[12px] text-[var(--secondary-label)]">{me.member_no}</div>
+              <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-[#06C755]/15 px-2 py-[2px] text-[11px] font-medium text-[#067a37]">
+                ✓ 已綁定 LINE
+              </div>
             </div>
-          )}
-          <div className="flex-1">
-            <div className="text-sm text-zinc-500">✓ 已綁定 LINE</div>
-            <div className="text-xl font-semibold">{displayName}</div>
-            <div className="font-mono text-sm text-zinc-400">{me.member_no}</div>
           </div>
+        </section>
+
+        {!editing ? (
+          /* 檢視模式 — iOS settings-style */
+          <section>
+            <div className="px-4 pb-1 pt-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">
+              個人資料
+            </div>
+            <div className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+              <InfoRow label="手機" value={me.phone ?? null} mono />
+              <InfoRow label="生日" value={me.birthday ?? null} />
+              <InfoRow label="Email" value={me.email ?? null} breakAll />
+              <InfoRow label="門市" value={storeId ?? null} />
+              {lineUserId && (
+                <InfoRow label="LINE ID" value={lineUserId} mono breakAll small />
+              )}
+            </div>
+          </section>
+        ) : (
+          /* 編輯模式 */
+          <form
+            onSubmit={(e) => { e.preventDefault(); onSave(); }}
+            className="space-y-4"
+          >
+            <section>
+              <div className="px-4 pb-1 pt-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">
+                個人資料
+              </div>
+              <div className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                <FormField label="姓名" required>
+                  <input
+                    type="text"
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    className="w-full bg-transparent text-right text-[15px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
+                    placeholder="請輸入"
+                    required
+                  />
+                </FormField>
+                <FormField label="手機" hint="台灣 09xxxxxxxx">
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    value={form.phone}
+                    onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                    placeholder="0912345678"
+                    className="w-full bg-transparent text-right font-mono text-[15px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
+                  />
+                </FormField>
+                <FormField label="生日">
+                  <input
+                    type="date"
+                    value={form.birthday}
+                    onChange={(e) => setForm({ ...form, birthday: e.target.value })}
+                    className="w-full bg-transparent text-right text-[15px] text-[var(--foreground)] outline-none"
+                  />
+                </FormField>
+                <FormField label="Email">
+                  <input
+                    type="email"
+                    value={form.email}
+                    onChange={(e) => setForm({ ...form, email: e.target.value })}
+                    placeholder="you@example.com"
+                    className="w-full bg-transparent text-right text-[15px] text-[var(--foreground)] outline-none placeholder:text-[var(--tertiary-label)]"
+                  />
+                </FormField>
+              </div>
+            </section>
+
+            <div className="flex gap-2 px-1 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditing(false);
+                  setError(null);
+                  setForm({
+                    name: me.name ?? "",
+                    phone: me.phone ?? "",
+                    birthday: me.birthday ?? "",
+                    email: me.email ?? "",
+                  });
+                }}
+                disabled={saving}
+                className="flex-1 rounded-xl bg-[#7676801f] py-3 text-[16px] font-medium text-[var(--foreground)] active:bg-[#76768033] disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="flex-1 rounded-xl bg-[var(--ios-blue)] py-3 text-[16px] font-semibold text-white active:opacity-80 disabled:opacity-50"
+              >
+                {saving ? "儲存中…" : "儲存"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        <p className="px-4 pt-2 text-[12px] text-[var(--tertiary-label)]">
+          會員卡 QR、點數、訂單等功能尚未上線（MVP-1 開發中）。
+        </p>
+      </div>
+    </PageShell>
+  );
+}
+
+function InfoRow({
+  label,
+  value,
+  mono,
+  breakAll,
+  small,
+}: {
+  label: string;
+  value: string | null;
+  mono?: boolean;
+  breakAll?: boolean;
+  small?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-[var(--separator)] px-4 py-3 first:border-t-0">
+      <span className="text-[15px] text-[var(--foreground)]">{label}</span>
+      <span
+        className={`max-w-[60%] text-right ${small ? "text-[13px]" : "text-[15px]"} ${
+          mono ? "font-mono" : ""
+        } ${breakAll ? "break-all" : ""} ${
+          value ? "text-[var(--secondary-label)]" : "text-[var(--tertiary-label)]"
+        }`}
+      >
+        {value ?? "未填"}
+      </span>
+    </div>
+  );
+}
+
+function FormField({
+  label,
+  hint,
+  required,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  required?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="flex items-center gap-3 border-t border-[var(--separator)] px-4 py-2.5 first:border-t-0">
+      <div className="w-[88px] flex-shrink-0">
+        <div className="text-[15px] text-[var(--foreground)]">
+          {label}
+          {required && <span className="ml-0.5 text-[var(--ios-red)]">*</span>}
         </div>
+        {hint && <div className="text-[11px] text-[var(--tertiary-label)]">{hint}</div>}
       </div>
-
-      {!editing ? (
-        // 檢視模式
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-base">
-          <dt className="text-zinc-500">手機</dt>
-          <dd className="font-mono">{me.phone ?? <span className="text-zinc-400">未填</span>}</dd>
-
-          <dt className="text-zinc-500">生日</dt>
-          <dd>{me.birthday ?? <span className="text-zinc-400">未填</span>}</dd>
-
-          <dt className="text-zinc-500">Email</dt>
-          <dd className="break-all">{me.email ?? <span className="text-zinc-400">未填</span>}</dd>
-
-          <dt className="text-zinc-500">門市</dt>
-          <dd>{storeId ?? "—"}</dd>
-
-          {lineUserId && (
-            <>
-              <dt className="text-zinc-500">LINE ID</dt>
-              <dd className="break-all font-mono text-sm">{lineUserId}</dd>
-            </>
-          )}
-        </dl>
-      ) : (
-        // 編輯模式
-        <form
-          onSubmit={(e) => { e.preventDefault(); onSave(); }}
-          className="flex flex-col gap-4"
-        >
-          <label className="flex flex-col gap-1">
-            <span className="text-base font-medium">姓名</span>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              className="rounded-md border border-zinc-300 px-3 py-2 text-base"
-              required
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-base font-medium">
-              手機號碼 <span className="text-sm text-zinc-400">（台灣手機 09xxxxxxxx）</span>
-            </span>
-            <input
-              type="tel"
-              inputMode="numeric"
-              value={form.phone}
-              onChange={(e) => setForm({ ...form, phone: e.target.value })}
-              placeholder="0912345678"
-              className="rounded-md border border-zinc-300 px-3 py-2 text-base"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-base font-medium">生日</span>
-            <input
-              type="date"
-              value={form.birthday}
-              onChange={(e) => setForm({ ...form, birthday: e.target.value })}
-              className="rounded-md border border-zinc-300 px-3 py-2 text-base"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-base font-medium">Email</span>
-            <input
-              type="email"
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-              placeholder="you@example.com"
-              className="rounded-md border border-zinc-300 px-3 py-2 text-base"
-            />
-          </label>
-
-          <div className="flex gap-2 pt-2">
-            <button
-              type="button"
-              onClick={() => {
-                setEditing(false);
-                setError(null);
-                setForm({
-                  name:     me.name     ?? "",
-                  phone:    me.phone    ?? "",
-                  birthday: me.birthday ?? "",
-                  email:    me.email    ?? "",
-                });
-              }}
-              disabled={saving}
-              className="flex-1 rounded-md border border-zinc-300 px-4 py-2.5 text-base disabled:opacity-50"
-            >
-              取消
-            </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="flex-1 rounded-md bg-[#06C755] px-4 py-2.5 text-base font-medium text-white shadow disabled:opacity-50"
-            >
-              {saving ? "儲存中…" : "儲存"}
-            </button>
-          </div>
-        </form>
-      )}
-
-      <p className="text-sm text-zinc-400">
-        會員卡 QR、點數、訂單等功能尚未上線（MVP-1 開發中）。
-      </p>
-      </div>
-    </main>
+      <div className="flex-1">{children}</div>
+    </label>
   );
 }

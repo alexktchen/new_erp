@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
-import MemberTabBar from "@/components/MemberTabBar";
+import PageShell from "@/components/PageShell";
 import SubTabs from "@/components/SubTabs";
 import OrderCard, { type OrderRow } from "@/components/OrderCard";
 
@@ -42,36 +42,40 @@ export default function OrdersPage() {
   }, [tab, router]);
 
   return (
-    <main className="mx-auto w-full max-w-md">
-      <MemberTabBar />
+    <PageShell title="我的訂單">
       <SubTabs
         value={tab}
         onChange={(v) => setTab(v as Tab)}
         options={[
-          { value: "active",  label: "未完成" },
+          { value: "active", label: "未完成" },
           { value: "history", label: "訂單紀錄" },
         ]}
       />
 
-      <div className="space-y-3 p-4">
-        {loading && <p className="text-base text-zinc-400">載入中…</p>}
+      <div className="space-y-3 px-4 pt-3 pb-6">
+        {loading && (
+          <p className="px-1 text-[15px] text-[var(--tertiary-label)]">載入中…</p>
+        )}
 
         {err && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-base text-red-800">
+          <div className="rounded-2xl bg-[#ff3b30]/10 p-3 text-[14px] text-[#c4271d]">
             {err}
           </div>
         )}
 
         {!loading && !err && orders.length === 0 && (
-          <p className="py-12 text-center text-base text-zinc-400">
-            目前沒有{tab === "active" ? "未完成" : "已完成"}訂單
-          </p>
+          <div className="py-16 text-center">
+            <div className="text-3xl">📦</div>
+            <p className="mt-2 text-[15px] text-[var(--tertiary-label)]">
+              目前沒有{tab === "active" ? "未完成" : "已完成"}訂單
+            </p>
+          </div>
         )}
 
         {orders.map((o) => (
           <OrderCard key={o.id} order={o} />
         ))}
       </div>
-    </main>
+    </PageShell>
   );
 }

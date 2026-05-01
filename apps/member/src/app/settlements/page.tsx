@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
-import MemberTabBar from "@/components/MemberTabBar";
+import PageShell from "@/components/PageShell";
 import SubTabs from "@/components/SubTabs";
 import SettlementCard, { type SettlementRow } from "@/components/SettlementCard";
 
@@ -42,36 +42,40 @@ export default function SettlementsPage() {
   }, [tab, router]);
 
   return (
-    <main className="mx-auto w-full max-w-md">
-      <MemberTabBar />
+    <PageShell title="我的結單">
       <SubTabs
         value={tab}
         onChange={(v) => setTab(v as Tab)}
         options={[
-          { value: "unpaid",  label: "待付款" },
+          { value: "unpaid", label: "待付款" },
           { value: "shipped", label: "已寄出" },
         ]}
       />
 
-      <div className="space-y-3 p-4">
-        {loading && <p className="text-base text-zinc-400">載入中…</p>}
+      <div className="space-y-3 px-4 pt-3 pb-6">
+        {loading && (
+          <p className="px-1 text-[15px] text-[var(--tertiary-label)]">載入中…</p>
+        )}
 
         {err && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-base text-red-800">
+          <div className="rounded-2xl bg-[#ff3b30]/10 p-3 text-[14px] text-[#c4271d]">
             {err}
           </div>
         )}
 
         {!loading && !err && list.length === 0 && (
-          <p className="py-12 text-center text-base text-zinc-400">
-            目前沒有{tab === "unpaid" ? "待付款" : "已寄出"}結單
-          </p>
+          <div className="py-16 text-center">
+            <div className="text-3xl">🧾</div>
+            <p className="mt-2 text-[15px] text-[var(--tertiary-label)]">
+              目前沒有{tab === "unpaid" ? "待付款" : "已寄出"}結單
+            </p>
+          </div>
         )}
 
         {list.map((s) => (
           <SettlementCard key={s.id} settlement={s} />
         ))}
       </div>
-    </main>
+    </PageShell>
   );
 }

@@ -2,6 +2,10 @@
 
 type Option = { value: string; label: string; count?: number };
 
+/**
+ * iOS-style segmented control。
+ * 整體放在 #767680 ~12% alpha 的灰色 track 上，選中項是白色帶 shadow。
+ */
 export default function SubTabs({
   value,
   onChange,
@@ -12,29 +16,30 @@ export default function SubTabs({
   options: Option[];
 }) {
   return (
-    <div className="flex gap-2 border-b border-zinc-200 px-2">
-      {options.map((o) => {
-        const active = value === o.value;
-        return (
-          <button
-            key={o.value}
-            onClick={() => onChange(o.value)}
-            className={`relative px-3 py-2.5 text-base transition-colors ${
-              active
-                ? "font-medium text-pink-600"
-                : "text-zinc-500 hover:text-zinc-700"
-            }`}
-          >
-            {o.label}
-            {o.count !== undefined && (
-              <span className="ml-1 text-sm text-zinc-400">({o.count})</span>
-            )}
-            {active && (
-              <span className="absolute inset-x-3 -bottom-px h-0.5 bg-pink-600" />
-            )}
-          </button>
-        );
-      })}
+    <div className="px-4 pt-3">
+      <div className="flex rounded-[10px] bg-[#7676801f] p-[2px]">
+        {options.map((o) => {
+          const active = value === o.value;
+          return (
+            <button
+              key={o.value}
+              onClick={() => onChange(o.value)}
+              className={`flex-1 rounded-[8px] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                active
+                  ? "bg-white text-[var(--foreground)] shadow-[0_3px_8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)]"
+                  : "bg-transparent text-[var(--ios-gray)]"
+              }`}
+            >
+              {o.label}
+              {o.count !== undefined && (
+                <span className={`ml-1 ${active ? "text-[var(--ios-gray)]" : "text-[var(--ios-gray)]/70"}`}>
+                  ({o.count})
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

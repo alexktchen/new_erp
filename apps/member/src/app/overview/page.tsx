@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
-import MemberTabBar from "@/components/MemberTabBar";
+import PageShell from "@/components/PageShell";
 import { PushNotificationManager } from "@/components/PushNotificationManager";
 
 type Overview = {
@@ -47,14 +47,14 @@ export default function OverviewPage() {
   }, [router]);
 
   return (
-    <main className="mx-auto w-full max-w-md">
-      <MemberTabBar />
-
-      <div className="space-y-4 p-4">
-        {loading && <p className="text-base text-zinc-400">載入中…</p>}
+    <PageShell title={data?.store.name ?? "總覽"}>
+      <div className="space-y-4 px-4 pt-2 pb-6">
+        {loading && (
+          <p className="px-1 text-[15px] text-[var(--tertiary-label)]">載入中…</p>
+        )}
 
         {err && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-base text-red-800">
+          <div className="rounded-2xl bg-[#ff3b30]/10 p-3 text-[14px] text-[#c4271d]">
             {err}
           </div>
         )}
@@ -66,63 +66,77 @@ export default function OverviewPage() {
               <img
                 src={data.store.banner_url}
                 alt=""
-                className="h-40 w-full rounded-md object-cover"
+                className="h-44 w-full rounded-2xl object-cover"
               />
-            ) : (
-              <div className="flex h-32 items-center justify-center rounded-md bg-pink-100 text-pink-700">
-                <span className="text-xl font-medium">{data.store.name}</span>
-              </div>
-            )}
+            ) : null}
 
-            <h1 className="text-2xl font-semibold text-pink-600">{data.store.name}</h1>
-
-            {data.store.description && (
-              <section>
-                <h2 className="text-base font-medium text-pink-600">📢 賣場介紹</h2>
-                <p className="mt-1 whitespace-pre-wrap text-base text-zinc-600">
-                  {data.store.description}
-                </p>
-              </section>
-            )}
-
-            {(data.store.payment_methods_text || data.store.shipping_methods_text) && (
-              <section>
-                <h2 className="text-base font-medium text-pink-600">🛒 付款、出貨方式</h2>
-                {data.store.payment_methods_text && (
-                  <p className="mt-1 whitespace-pre-wrap text-base text-zinc-600">
-                    {data.store.payment_methods_text}
-                  </p>
-                )}
-                {data.store.shipping_methods_text && (
-                  <p className="mt-1 whitespace-pre-wrap text-base text-zinc-600">
-                    {data.store.shipping_methods_text}
-                  </p>
-                )}
-              </section>
-            )}
-
-            <section>
-              <h2 className="text-base text-pink-600">未結單金額</h2>
-              <div className="mt-2 rounded-md border border-pink-100 bg-white p-6 text-center">
-                <span className="text-3xl font-semibold text-pink-600">
-                  {Number(data.receivable_amount).toLocaleString()}元
+            {/* 未結金額卡 */}
+            <section className="rounded-2xl bg-[var(--card-bg)] px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+              <div className="text-[13px] text-[var(--secondary-label)]">未結單金額</div>
+              <div className="mt-1 flex items-baseline gap-1">
+                <span className="text-[34px] font-semibold tabular-nums text-[var(--brand-strong)] leading-none">
+                  ${Number(data.receivable_amount).toLocaleString()}
                 </span>
               </div>
+              {data.active_orders_count > 0 && (
+                <button
+                  onClick={() => router.push("/orders")}
+                  className="mt-3 flex w-full items-center justify-between rounded-xl bg-[#7676801a] px-3 py-2.5 text-[14px] text-[var(--foreground)] active:bg-[#76768033]"
+                >
+                  <span>進行中訂單 {data.active_orders_count} 筆</span>
+                  <span className="text-[var(--ios-gray)]">›</span>
+                </button>
+              )}
             </section>
 
-            <PushNotificationManager jwt={getSession()?.token ?? null} />
-
-            {data.active_orders_count > 0 && (
-              <button
-                onClick={() => router.push("/orders")}
-                className="w-full rounded-md border border-pink-200 bg-pink-50 p-3 text-base text-pink-700 hover:bg-pink-100"
-              >
-                你有 {data.active_orders_count} 筆進行中訂單 →
-              </button>
+            {/* 賣場介紹 */}
+            {data.store.description && (
+              <Section title="賣場介紹">
+                <p className="whitespace-pre-wrap px-4 py-3 text-[14px] leading-relaxed text-[var(--foreground)]">
+                  {data.store.description}
+                </p>
+              </Section>
             )}
+
+            {/* 付款 / 出貨 */}
+            {(data.store.payment_methods_text || data.store.shipping_methods_text) && (
+              <Section title="付款・出貨方式">
+                {data.store.payment_methods_text && (
+                  <div className="border-b border-[var(--separator)] px-4 py-3">
+                    <div className="text-[13px] text-[var(--secondary-label)]">付款</div>
+                    <p className="mt-0.5 whitespace-pre-wrap text-[14px] text-[var(--foreground)]">
+                      {data.store.payment_methods_text}
+                    </p>
+                  </div>
+                )}
+                {data.store.shipping_methods_text && (
+                  <div className="px-4 py-3">
+                    <div className="text-[13px] text-[var(--secondary-label)]">出貨</div>
+                    <p className="mt-0.5 whitespace-pre-wrap text-[14px] text-[var(--foreground)]">
+                      {data.store.shipping_methods_text}
+                    </p>
+                  </div>
+                )}
+              </Section>
+            )}
+
+            <PushNotificationManager jwt={getSession()?.token ?? null} />
           </>
         )}
       </div>
-    </main>
+    </PageShell>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section>
+      <div className="px-4 pb-1 pt-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">
+        {title}
+      </div>
+      <div className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+        {children}
+      </div>
+    </section>
   );
 }

@@ -183,46 +183,54 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
   if (!isSupported) return null;
 
   return (
-    <div className="p-4 bg-white shadow rounded-lg mb-4">
-      <div className="flex justify-between items-start">
-        <div>
-          <h3 className="text-lg font-medium text-gray-900">通知與身分設定</h3>
-          <p className="mt-1 text-sm text-gray-500">
-            開啟通知以獲得訂閱商品提醒。
-          </p>
-        </div>
-        <button 
-          onClick={rebind}
-          className="text-xs text-indigo-600 hover:text-indigo-500 font-medium"
-        >
-          重新連動 LINE
-        </button>
+    <section>
+      <div className="px-4 pb-1 pt-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">
+        通知設定
       </div>
-      
-      {debugStatus && (
-        <div className="mt-2 p-2 bg-gray-100 text-[10px] font-mono text-gray-600 rounded">
-          狀態: {debugStatus} {isPWA ? " (PWA)" : " (Browser)"}
-        </div>
-      )}
-
-      <div className="mt-4">
-        {subscription ? (
-          <div className="flex items-center text-green-600 text-sm font-medium">
-            <svg className="h-5 w-5 mr-1" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-            </svg>
-            已啟用通知
+      <div className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+        <div className="flex items-start justify-between gap-3 border-b border-[var(--separator)] px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[15px] text-[var(--foreground)]">推播通知</div>
+            <p className="mt-0.5 text-[13px] text-[var(--secondary-label)]">
+              開啟以獲得訂閱商品提醒。
+            </p>
           </div>
-        ) : (
           <button
-            onClick={subscribe}
-            disabled={!jwt}
-            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+            onClick={rebind}
+            className="flex-shrink-0 text-[13px] text-[var(--ios-blue)] active:opacity-60"
           >
-            開啟通知
+            重新連動 LINE
           </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 px-4 py-3">
+          {subscription ? (
+            <div className="flex items-center gap-1.5 text-[15px] font-medium text-[#1f8a3c]">
+              <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              </svg>
+              已啟用通知
+            </div>
+          ) : (
+            <>
+              <span className="text-[15px] text-[var(--secondary-label)]">尚未啟用</span>
+              <button
+                onClick={subscribe}
+                disabled={!jwt}
+                className="rounded-full bg-[var(--ios-blue)] px-4 py-1.5 text-[14px] font-medium text-white active:opacity-80 disabled:opacity-50"
+              >
+                開啟通知
+              </button>
+            </>
+          )}
+        </div>
+
+        {debugStatus && (
+          <div className="border-t border-[var(--separator)] bg-[#7676800a] px-4 py-2 font-mono text-[10px] text-[var(--secondary-label)]">
+            {debugStatus} {isPWA ? " · PWA" : " · Browser"}
+          </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }
