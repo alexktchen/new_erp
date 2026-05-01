@@ -10,17 +10,17 @@ declare global {
   }
 }
 
-const sw = self as unknown as ServiceWorkerGlobalScope;
-
 const serwist = new Serwist({
-  precacheEntries: sw.__SW_MANIFEST,
+  // @ts-ignore
+  precacheEntries: self.__SW_MANIFEST,
   skipWaiting: true,
   clientsClaim: true,
   navigationPreload: true,
   runtimeCaching: defaultCache,
 });
 
-sw.addEventListener("push", (event: PushEvent) => {
+// @ts-ignore
+self.addEventListener("push", (event: PushEvent) => {
   const data = event.data?.json();
   if (!data) return;
 
@@ -32,13 +32,16 @@ sw.addEventListener("push", (event: PushEvent) => {
     data: data.url || "/",
   };
 
-  event.waitUntil(sw.registration.showNotification(title, options));
+  // @ts-ignore
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
-sw.addEventListener("notificationclick", (event: NotificationEvent) => {
+// @ts-ignore
+self.addEventListener("notificationclick", (event: NotificationEvent) => {
   event.notification.close();
   event.waitUntil(
-    sw.clients.openWindow(event.notification.data)
+    // @ts-ignore
+    self.clients.openWindow(event.notification.data)
   );
 });
 
