@@ -29,10 +29,21 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       navigator.serviceWorker.ready.then((registration) => {
         registration.pushManager.getSubscription().then((sub) => {
           setSubscription(sub);
+          if (sub && jwt) {
+            // 自動同步已存在的訂閱到資料庫 (避免 DB 被 reset 後瀏覽器仍有訂閱但 DB 沒資料)
+            const subJson = sub.toJSON();
+            callLiffApi(jwt, {
+              action: "upsert_push_subscription",
+              endpoint: subJson.endpoint,
+              p256dh: subJson.keys?.p256dh,
+              auth: subJson.keys?.auth,
+              user_agent: navigator.userAgent,
+            }).catch(err => console.error("Failed to sync existing subscription:", err));
+          }
         });
       });
     }
-  }, []);
+  }, [jwt]);
 
   const subscribe = async () => {
     if (!jwt) return;
@@ -53,6 +64,10 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       }
 
       const registration = await navigator.serviceWorker.ready;
+      if (!registration.pushManager) {
+        alert("瀏覽器支援 Service Worker 但不支援 PushManager (請檢查是否已加入主畫面)");
+        return;
+      }
       
       const sub = await registration.pushManager.subscribe({
         userVisibleOnly: true,
@@ -61,6 +76,10 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
 
       setSubscription(sub);
       const subJson = sub.toJSON();
+      
+      if (!subJson.keys || !subJson.keys.p256dh || !subJson.keys.auth) {
+        throw new Error("取得訂閱金鑰失敗 (keys missing)");
+      }
       
       await callLiffApi(jwt, {
         action: "upsert_push_subscription",

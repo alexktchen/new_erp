@@ -211,16 +211,24 @@ async function listMySettlements(sb: any, tenantId: string, storeId: number, mem
 
 async function upsertPushSubscription(sb: any, tenantId: string, memberId: number, p: any) {
   if (!p.endpoint) return json({ error: "endpoint required" }, 400);
-  const { error } = await sb.rpc("rpc_upsert_push_subscription", {
+  
+  const rpcParams = {
     p_endpoint: p.endpoint,
     p_p256dh: p.p256dh,
     p_auth: p.auth,
-    p_user_agent: p.user_agent, // Align with body property name
+    p_user_agent: p.user_agent || p.userAgent, 
     p_member_id: memberId,
     p_tenant_id: tenantId,
-  });
-  if (error) return json({ error: error.message }, 500);
-  return json({ ok: true });
+  };
+
+  const { data: insertedId, error } = await sb.rpc("rpc_upsert_push_subscription", rpcParams);
+  
+  if (error) {
+    console.error("rpc_upsert_push_subscription error:", error);
+    return json({ error: error.message, details: error }, 500);
+  }
+  
+  return json({ ok: true, id: insertedId, debug: rpcParams });
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
