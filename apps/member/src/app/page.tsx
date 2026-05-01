@@ -107,7 +107,7 @@ export default function LandingPage() {
     setSyncing(true);
     setError(null);
     try {
-      const data = await callLiffApi<any>("PUBLIC", {
+      const data = await callLiffApi<any>("", {
         action: "claim_pwa_auth_code",
         code: syncCode,
       });
