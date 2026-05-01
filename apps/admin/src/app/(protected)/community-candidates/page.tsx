@@ -382,11 +382,10 @@ export default function CommunityCandidatesPage() {
             ))}
           </div>
           <div className="flex flex-wrap items-center gap-1">
-            <input
-              type="date"
+            <DatePicker
               value={scheduleDate}
-              onChange={(e) => setScheduleDate(e.target.value)}
-              className="rounded border border-zinc-300 px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+              onChange={setScheduleDate}
+              className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
             />
             <button
               onClick={() => handleSchedule(r.id)}
@@ -612,170 +611,7 @@ export default function CommunityCandidatesPage() {
                   <td className="whitespace-nowrap px-3 py-3 text-zinc-500">
                     {r.scheduled_open_at ?? "—"}
                   </td>
-<<<<<<< claude/datepicker
-                  <td className="px-3 py-3">
-                    {editingInfo === r.id ? (
-                      <div className="flex flex-col gap-2">
-                        <input
-                          autoFocus
-                          placeholder="廠商（選填）"
-                          value={adoptSupplier}
-                          onChange={(e) => setAdoptSupplier(e.target.value)}
-                          className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
-                        />
-                        <input
-                          type="number"
-                          min={0}
-                          step="1"
-                          placeholder="成本（選填）"
-                          value={adoptCost}
-                          onChange={(e) => setAdoptCost(e.target.value)}
-                          className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
-                        />
-                        <input
-                          type="number"
-                          min={0}
-                          step="1"
-                          placeholder="售價（選填）"
-                          value={adoptSalePrice}
-                          onChange={(e) => setAdoptSalePrice(e.target.value)}
-                          className="rounded border border-zinc-300 px-2 py-1 text-xs focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
-                        />
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => handleFillSubmit(r.id)}
-                            disabled={busy}
-                            className="rounded bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
-                          >
-                            {busy ? "儲存中…" : "儲存"}
-                          </button>
-                          <button
-                            onClick={() => { setEditingInfo(null); setAdoptSupplier(""); setAdoptCost(""); setAdoptSalePrice(""); }}
-                            disabled={busy}
-                            className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 disabled:opacity-50"
-                          >
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    ) : scheduling === r.id ? (
-                      <div className="flex flex-col gap-1.5">
-                        <div className="flex gap-1">
-                          {[
-                            { label: "明天", date: localDateStr(1) },
-                            { label: "後天", date: localDateStr(2) },
-                            { label: "下週一", date: nextWeekMonday() },
-                          ].map(({ label, date }) => (
-                            <button
-                              key={label}
-                              onClick={() => handleQuickSchedule(r.id, date)}
-                              disabled={busy}
-                              className="rounded bg-amber-500 px-2 py-0.5 text-xs text-white hover:bg-amber-600 disabled:opacity-50"
-                            >
-                              {label}
-                            </button>
-                          ))}
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <DatePicker
-                            value={scheduleDate}
-                            onChange={setScheduleDate}
-                            className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                          />
-                          <button
-                            onClick={() => handleSchedule(r.id)}
-                            disabled={!scheduleDate || busy}
-                            className="rounded bg-amber-500 px-2 py-0.5 text-xs text-white hover:bg-amber-600 disabled:opacity-50"
-                          >
-                            確定
-                          </button>
-                          <button
-                            onClick={() => {
-                              setScheduling(null);
-                              setScheduleDate("");
-                            }}
-                            disabled={busy}
-                            className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 disabled:opacity-50"
-                          >
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex flex-wrap items-center gap-1">
-                        <button
-                          onClick={() => {
-                            setEditingInfo(r.id);
-                            setAdoptSupplier(r.adopted_supplier_name ?? "");
-                            setAdoptCost(r.adopted_cost !== null ? String(r.adopted_cost) : "");
-                            setAdoptSalePrice(r.adopted_sale_price !== null ? String(r.adopted_sale_price) : extractPrice(r.raw_text));
-                            setScheduling(null);
-                          }}
-                          disabled={busy}
-                          className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 disabled:opacity-50"
-                        >
-                          {r.adopted_supplier_name || r.adopted_cost !== null || r.adopted_sale_price !== null ? "修改資料" : "補資料"}
-                        </button>
-                        {r.owner_action !== "adopted" && (
-                          <button
-                            onClick={() => {
-                              const complete = !!(r.adopted_supplier_name && r.adopted_cost !== null && r.adopted_sale_price !== null);
-                              if (!complete && !window.confirm("廠商、成本、售價尚未完整，確定要採用嗎？")) return;
-                              handleAdopt(r.id);
-                            }}
-                            disabled={busy}
-                            className="rounded border border-green-400 px-2 py-0.5 text-xs text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/30 disabled:opacity-50"
-                          >
-                            採用
-                          </button>
-                        )}
-                        {r.owner_action !== "collected" && r.owner_action !== "adopted" && (
-                          <button
-                            onClick={() => handleCollect(r.id)}
-                            disabled={busy}
-                            className="rounded border border-blue-300 px-2 py-0.5 text-xs text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 disabled:opacity-50"
-                          >
-                            收藏
-                          </button>
-                        )}
-                        {r.owner_action !== "scheduled" && r.owner_action !== "adopted" && (
-                          <button
-                            onClick={() => {
-                              setScheduling(r.id);
-                              setScheduleDate("");
-                            }}
-                            disabled={busy}
-                            className="rounded border border-amber-300 px-2 py-0.5 text-xs text-amber-600 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 disabled:opacity-50"
-                          >
-                            排日期
-                          </button>
-                        )}
-                        {r.owner_action !== "ignored" && r.owner_action !== "adopted" && (
-                          <button
-                            onClick={() => handleIgnore(r.id)}
-                            disabled={busy}
-                            className="rounded border border-zinc-300 px-2 py-0.5 text-xs text-zinc-500 hover:bg-zinc-50 dark:border-zinc-700 disabled:opacity-50"
-                          >
-                            忽略
-                          </button>
-                        )}
-                        {(r.owner_action === "collected" ||
-                          r.owner_action === "scheduled" ||
-                          r.owner_action === "ignored") && (
-                          <button
-                            onClick={() => handleRestore(r.id)}
-                            disabled={busy}
-                            className="rounded border border-zinc-200 px-2 py-0.5 text-xs text-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 disabled:opacity-50"
-                          >
-                            還原
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </td>
-=======
                   <td className="px-3 py-3">{renderActions(r)}</td>
->>>>>>> main
                 </tr>
               ))}
             </tbody>

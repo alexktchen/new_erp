@@ -87,6 +87,14 @@ Deno.serve(async (req) => {
       case "list_my_settlements":
         if (!memberId) return json({ error: "no member_id in token" }, 401);
         return await listMySettlements(sb, tenantId, storeId, memberId, String(body.tab ?? ""));
+      case "upsert_push_subscription":
+        if (!memberId) return json({ error: "no member_id in token" }, 401);
+        return await upsertPushSubscription(sb, tenantId, memberId, {
+          endpoint:  String(body.endpoint  ?? ""),
+          p256dh:    String(body.p256dh    ?? ""),
+          auth:      String(body.auth      ?? ""),
+          userAgent: String(body.user_agent ?? ""),
+        });
       default:
         return json({ error: `unknown action: ${action}` }, 400);
     }
@@ -526,4 +534,28 @@ function maskName(name: string | null): string | null {
   if (!name) return null;
   if (name.length <= 1) return name;
   return name[0] + "*".repeat(name.length - 1);
+}
+
+async function upsertPushSubscription(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+  memberId: number,
+  p: {
+    endpoint:  string;
+    p256dh:    string;
+    auth:      string;
+    userAgent: string;
+  },
+) {
+  if (!p.endpoint) return json({ error: "endpoint required" }, 400);
+
+  const { error } = await sb.rpc("rpc_upsert_push_subscription", {
+    p_endpoint:   p.endpoint,
+    p_p256dh:     p.p256dh,
+    p_auth:       p.auth,
+    p_user_agent: p.userAgent,
+  });
+
+  if (error) return json({ error: error.message }, 500);
+  return json({ ok: true });
 }

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
 import MemberTabBar from "@/components/MemberTabBar";
+import { PushNotificationManager } from "@/components/PushNotificationManager";
 
 type Overview = {
   store: {
@@ -108,6 +109,8 @@ export default function OverviewPage() {
                 </span>
               </div>
             </section>
+
+            <PushNotificationManager jwt={getSession()?.token ?? null} />
 
             {data.active_orders_count > 0 && (
               <button
