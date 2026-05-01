@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
+import { DatePicker } from "@/components/DatePicker";
 
 type Candidate = {
   id: number;
@@ -504,11 +505,10 @@ export default function CommunityCandidatesPage() {
                           ))}
                         </div>
                         <div className="flex items-center gap-1">
-                          <input
-                            type="date"
+                          <DatePicker
                             value={scheduleDate}
-                            onChange={(e) => setScheduleDate(e.target.value)}
-                            className="rounded border border-zinc-300 px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                            onChange={setScheduleDate}
+                            className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                           />
                           <button
                             onClick={() => handleSchedule(r.id)}
