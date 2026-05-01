@@ -78,7 +78,6 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
     
     try {
       setDebugStatus("請求通知權限...");
-      // 某些 iOS 版本需要放在最前面確保手勢有效
       const result = await Notification.requestPermission();
       setPermission(result);
       
@@ -88,10 +87,29 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
         return;
       }
 
-      setDebugStatus("Service Worker 準備中...");
-      const registration = await navigator.serviceWorker.ready;
+      setDebugStatus("正在取得 Service Worker...");
       
-      setDebugStatus("正在註冊 Push Server...");
+      // 使用更強健的方式取得 registration，避免死等 .ready
+      const getRegistration = async () => {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) return reg;
+        return await navigator.serviceWorker.ready;
+      };
+
+      const registration = await Promise.race([
+        getRegistration(),
+        new Promise<ServiceWorkerRegistration>((_, reject) => 
+          setTimeout(() => reject(new Error("Service Worker 回應超時，請重開 App")), 5000)
+        )
+      ]);
+
+      if (!registration.pushManager) {
+        setDebugStatus("PushManager 不可用");
+        alert("此裝置不支援 PushManager (或需重開 App)");
+        return;
+      }
+      
+      setDebugStatus("正在向 Push Server 註冊...");
       const sub = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
@@ -115,6 +133,11 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       const msg = err instanceof Error ? err.message : String(err);
       setDebugStatus(`錯誤: ${msg}`);
       alert(`訂閱失敗：${msg}`);
+      
+      // 如果失敗，嘗試強制註冊一次
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      }
     }
   };
 
