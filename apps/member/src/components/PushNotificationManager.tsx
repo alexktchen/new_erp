@@ -38,16 +38,30 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
     if (!jwt) return;
     
     try {
+      // 在 iOS 上，權限請求必須由使用者動作直接觸發，儘量放前面
+      const result = await Notification.requestPermission();
+      setPermission(result);
+      if (result !== "granted") {
+        alert("未獲得通知權限，無法開啟。");
+        return;
+      }
+
+      // 檢查 Service Worker 是否就緒
+      if (!navigator.serviceWorker.controller) {
+        // 如果沒有 controller，嘗試等待
+        console.warn("Service Worker not controlling the page yet.");
+      }
+
       const registration = await navigator.serviceWorker.ready;
+      
       const sub = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
       });
 
       setSubscription(sub);
-      setPermission(Notification.permission);
-
       const subJson = sub.toJSON();
+      
       await callLiffApi(jwt, {
         action: "upsert_push_subscription",
         endpoint: subJson.endpoint,
@@ -59,7 +73,7 @@ export function PushNotificationManager({ jwt }: { jwt: string | null }) {
       alert("通知訂閱成功！");
     } catch (err) {
       console.error("Failed to subscribe:", err);
-      alert("訂閱失敗，請檢查權限設定。");
+      alert(`訂閱失敗：${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
