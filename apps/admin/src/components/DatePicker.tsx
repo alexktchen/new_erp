@@ -46,7 +46,7 @@ export function DatePicker({
   const minDate = min ? parseLocal(min) : undefined;
   const maxDate = max ? parseLocal(max) : undefined;
 
-  const disabledMatchers: Array<{ before?: Date; after?: Date }> = [];
+  const disabledMatchers: any[] = [];
   if (minDate) disabledMatchers.push({ before: minDate });
   if (maxDate) disabledMatchers.push({ after: maxDate });
 
