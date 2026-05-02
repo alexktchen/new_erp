@@ -27,8 +27,8 @@ self.addEventListener("push", (event: PushEvent) => {
   const title = data.title || "新訊息";
   const options = {
     body: data.body || "您有一則新通知",
-    icon: "/icons/icon-192x192.png",
-    badge: "/icons/icon-192x192.png",
+    icon: "/icons/android/launchericon-192x192.png",
+    badge: "/icons/android/launchericon-192x192.png",
     data: data.url || "/",
   };
 

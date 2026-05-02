@@ -264,7 +264,7 @@ export default function LandingPage() {
 
   return (
     <main className="mx-auto flex w-full max-w-md flex-col items-center gap-6 p-6 pt-16">
-      <h1 className="text-3xl font-semibold">團購店會員</h1>
+      <h1 className="text-3xl font-semibold">包子媽生鮮小舖</h1>
 
       {status === "loading" && <p className="text-base text-zinc-400">載入中…</p>}
 
@@ -373,8 +373,8 @@ export default function LandingPage() {
       )}
 
       <div className="mt-8 text-center text-xs text-zinc-400 space-y-1">
-        <p>New ERP 會員系統</p>
-        <p>Version 0.2.0 (PWA Pairing)</p>
+        <p>包子媽生鮮小舖</p>
+        <p>Baozi Ma Group Buying</p>
       </div>
     </main>
   );
