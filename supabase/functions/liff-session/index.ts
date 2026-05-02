@@ -19,7 +19,7 @@ import { signJwtHs256 } from "../_shared/jwt.ts";
 import { verifyIdToken } from "../_shared/line.ts";
 import { autoRegister } from "../_shared/auto-register.ts";
 
-const SESSION_TTL_SEC = 60 * 60;
+const SESSION_TTL_SEC = 60 * 60 * 24 * 30; // 30 天
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
