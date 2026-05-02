@@ -119,7 +119,11 @@ export default function InstallPage() {
         </Card>
       )}
 
-      {env === "ios-safari" && <IosSafariSteps />}
+      {/* iOS 三步圖示 — 任何 iOS 路徑都顯示,讓 LINE / Chrome 內的 user
+          看完「請用 Safari 打開」之後也知道接下來要做什麼 */}
+      {(env === "ios-safari" || env === "ios-line" || env === "ios-other") && (
+        <IosSafariSteps />
+      )}
 
       {(env === "ios-line" || env === "ios-other") && (
         <Card>
@@ -236,6 +240,9 @@ export default function InstallPage() {
           </p>
         </Card>
       )}
+
+      {/* 桌機也讓你看一眼 iPhone 安裝步驟 — 方便預覽 / 截圖貼海報 */}
+      {env === "desktop" && <IosSafariSteps />}
     </main>
   );
 }
