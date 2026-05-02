@@ -300,7 +300,7 @@ function HeroCarousel({ images }: { images: string[] }) {
       <div
         ref={ref}
         className="hide-scrollbar flex aspect-[4/3] w-full snap-x snap-mandatory overflow-x-auto scroll-smooth"
-        style={{ scrollbarWidth: "none" }}
+        style={{ scrollbarWidth: "none", touchAction: "pan-x" }}
       >
         {images.map((url, i) => (
           <div
