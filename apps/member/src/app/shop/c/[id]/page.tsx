@@ -131,12 +131,12 @@ export default function CampaignDetailPage() {
 
         {campaign && (
           <>
-            {/* 封面 */}
+            {/* 封面 — 優先用第一個商品項目的圖,沒有再退到開團 cover */}
             <div className="relative aspect-[4/3] w-full bg-[#7676801a]">
-              {campaign.cover_image_url ? (
+              {(items[0]?.image_url ?? campaign.cover_image_url) ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={campaign.cover_image_url}
+                  src={items[0]?.image_url ?? campaign.cover_image_url ?? ""}
                   alt=""
                   className="h-full w-full object-cover"
                 />
