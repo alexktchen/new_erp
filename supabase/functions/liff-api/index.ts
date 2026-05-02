@@ -38,7 +38,8 @@ async function claimPwaAuthCode(
   sb: any,
   code: string,
 ) {
-  if (!code || code.length !== 6) {
+  // 接受 6 碼人工驗證碼或 8–64 碼 pairing token（PWA → LIFF 自動配對用）
+  if (!code || (code.length !== 6 && (code.length < 8 || code.length > 64))) {
     return json({ error: "invalid code format" }, 400);
   }
   const { data: row, error: fetchErr } = await sb

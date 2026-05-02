@@ -5,30 +5,111 @@ import { lineOauthStartUrl, callLiffApi } from "@/lib/supabase";
 import { loadLiff } from "@/lib/liff";
 import { getSession, listenForSession } from "@/lib/session";
 
-type Status = "loading" | "idle" | "liff_auth" | "error";
+type Status = "loading" | "idle" | "liff_auth" | "pair_done" | "error";
+
+const PAIR_TOKEN_KEY = "pwa_pair_token";
+
+function isStandalone(): boolean {
+  if (typeof window === "undefined") return false;
+  return (
+    (window.navigator as { standalone?: boolean }).standalone === true ||
+    window.matchMedia("(display-mode: standalone)").matches
+  );
+}
+
+function genPairToken(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return Array.from({ length: 32 }, () =>
+    Math.floor(Math.random() * 16).toString(16),
+  ).join("");
+}
+
+function readPairFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  const sp = new URLSearchParams(window.location.search);
+  const direct = sp.get("pair");
+  if (direct) return direct;
+  // LIFF 把 query 包進 liff.state
+  const ls = sp.get("liff.state");
+  if (ls) {
+    const inner = new URLSearchParams(ls.startsWith("?") ? ls.slice(1) : ls);
+    return inner.get("pair");
+  }
+  return null;
+}
+
+/**
+ * 嘗試用 localStorage 內的 pair token 拿回 session。
+ * 成功 → 把 session 寫進 fragment 然後跳 /me。
+ * 還沒準備好 → silent fail（等下次 visibilitychange 再試）。
+ */
+async function tryClaimPairToken(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  const token = localStorage.getItem(PAIR_TOKEN_KEY);
+  if (!token) return false;
+
+  try {
+    const data = await callLiffApi<{
+      token: string;
+      store: string;
+      member_id: number;
+      line_user_id: string;
+      line_name: string | null;
+      line_picture: string | null;
+    }>("", { action: "claim_pwa_auth_code", code: token });
+
+    const frag = new URLSearchParams({
+      token: data.token,
+      store: data.store,
+      bound: "1",
+      member_id: String(data.member_id),
+      line_user_id: data.line_user_id,
+      line_name: data.line_name ?? "",
+      line_picture: data.line_picture ?? "",
+    });
+    localStorage.removeItem(PAIR_TOKEN_KEY);
+    window.location.href = `/me#${frag.toString()}`;
+    return true;
+  } catch {
+    // 沒到期或還沒寫入 → 等下次
+    return false;
+  }
+}
 
 export default function LandingPage() {
   const [storeId, setStoreId] = useState<string | null>(null);
   const [inputStoreId, setInputStoreId] = useState("");
   const [status, setStatus] = useState<Status>("loading");
   const [error, setError] = useState<string | null>(null);
+  const [standalone, setStandalone] = useState(false);
 
-  // PWA Sync Code
+  // 6 位數驗證碼 fallback
   const [syncCode, setSyncCode] = useState("");
   const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
-    // 1. 檢查是否已有 Session (自動登入)
+    setStandalone(isStandalone());
+
+    // 1. 已有 Session → 自動跳 /me
     const existing = getSession();
     if (existing) {
       window.location.href = "/me";
       return;
     }
 
-    // 2. 監聽跨視窗登入 (BroadcastChannel)
+    // 2. 監聽跨視窗登入（同 origin BroadcastChannel，桌機瀏覽器有用）
     const unlisten = listenForSession(() => {
       window.location.href = "/me";
     });
+
+    // 3. 從 LIFF 配對流程切回 PWA 時，自動 claim
+    void tryClaimPairToken();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void tryClaimPairToken();
+    };
+    document.addEventListener("visibilitychange", onVis);
 
     (async () => {
       const errInUrl = new URLSearchParams(window.location.search).get("error");
@@ -36,18 +117,17 @@ export default function LandingPage() {
 
       const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
 
-      // 1. 讀取門市 (URL > localStorage)
+      // 讀門市
       let s = readStore();
       if (!s && typeof window !== "undefined") {
         s = localStorage.getItem("last_store_id");
       }
-      
       if (s) {
         setStoreId(s);
         localStorage.setItem("last_store_id", s);
       }
 
-      // 2. LIFF 初始化與自動登入
+      // LIFF 初始化
       if (liffId) {
         try {
           const liff = await loadLiff();
@@ -73,7 +153,16 @@ export default function LandingPage() {
             }
             const idToken = liff.getIDToken();
             if (!idToken) throw new Error("LIFF getIDToken returned null");
-            await runLiffSession(idToken, s);
+
+            const pairCode = readPairFromUrl();
+            await runLiffSession(idToken, s, pairCode);
+
+            if (pairCode) {
+              setStatus("pair_done");
+              // 嘗試關掉 LINE webview（iOS 通常只是關掉 webview,使用者要自己回桌面）
+              try { liff.closeWindow(); } catch { /* noop */ }
+              return;
+            }
             return;
           }
         } catch (e) {
@@ -84,11 +173,39 @@ export default function LandingPage() {
       setStatus("idle");
     })();
 
-    return unlisten;
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      unlisten();
+    };
   }, []);
 
+  /**
+   * PWA standalone → 走 pair-token + LIFF（生 token，存 localStorage，開 LIFF URL）
+   * 一般瀏覽器 → 走 OAuth（既有路徑）
+   */
   const start = () => {
     if (!storeId) return;
+
+    const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
+    if (standalone && liffId) {
+      const token = genPairToken();
+      localStorage.setItem(PAIR_TOKEN_KEY, token);
+      const liffUrl =
+        `https://liff.line.me/${encodeURIComponent(liffId)}` +
+        `?store=${encodeURIComponent(storeId)}` +
+        `&pair=${encodeURIComponent(token)}`;
+      // 用 anchor + target=_blank,讓 LINE app 透過 universal link 接管,
+      // PWA 本身留在 standalone(背景),回來時 visibilitychange 會 claim
+      const a = document.createElement("a");
+      a.href = liffUrl;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return;
+    }
+
     window.location.href = lineOauthStartUrl(storeId);
   };
 
@@ -103,23 +220,26 @@ export default function LandingPage() {
   const handleSyncSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (syncCode.length !== 6 || syncing) return;
-    
+
     setSyncing(true);
     setError(null);
     try {
-      const data = await callLiffApi<any>("", {
-        action: "claim_pwa_auth_code",
-        code: syncCode,
-      });
+      const data = await callLiffApi<{
+        token: string;
+        store: string;
+        member_id: number;
+        line_user_id: string;
+        line_name: string | null;
+        line_picture: string | null;
+      }>("", { action: "claim_pwa_auth_code", code: syncCode });
 
-      // 模擬 consumeFragmentToSession 的行為，手動存入 localStorage
       const frag = new URLSearchParams({
-        token:        data.token,
-        store:        data.store,
-        bound:        "1",
-        member_id:    String(data.member_id),
+        token: data.token,
+        store: data.store,
+        bound: "1",
+        member_id: String(data.member_id),
         line_user_id: data.line_user_id,
-        line_name:    data.line_name ?? "",
+        line_name: data.line_name ?? "",
         line_picture: data.line_picture ?? "",
       });
       window.location.href = `/me#${frag.toString()}`;
@@ -133,10 +253,22 @@ export default function LandingPage() {
   return (
     <main className="mx-auto flex w-full max-w-md flex-col items-center gap-6 p-6 pt-16">
       <h1 className="text-3xl font-semibold">團購店會員</h1>
-      
+
       {status === "loading" && <p className="text-base text-zinc-400">載入中…</p>}
 
-      {status === "liff_auth" && <p className="text-base text-zinc-500">LINE 驗證中…請稍候</p>}
+      {status === "liff_auth" && (
+        <p className="text-base text-zinc-500">LINE 驗證中…請稍候</p>
+      )}
+
+      {status === "pair_done" && (
+        <div className="w-full rounded-2xl bg-[#06C755]/10 p-5 text-center">
+          <div className="text-3xl">✓</div>
+          <p className="mt-2 text-base font-medium text-[#067a37]">登入完成</p>
+          <p className="mt-1 text-sm text-zinc-600">
+            請關閉 LINE 視窗，回到桌面點擊 PWA 圖示。
+          </p>
+        </div>
+      )}
 
       {status === "idle" && (
         <div className="w-full space-y-6 text-center">
@@ -169,18 +301,29 @@ export default function LandingPage() {
           ) : (
             <div className="space-y-8">
               <div className="space-y-4">
-                <p className="text-base text-zinc-500">您目前位於 <span className="font-bold text-zinc-900 dark:text-zinc-100">{storeId}</span> 門市</p>
+                <p className="text-base text-zinc-500">
+                  您目前位於 <span className="font-bold text-zinc-900 dark:text-zinc-100">{storeId}</span> 門市
+                </p>
                 <button
                   onClick={start}
                   className="w-full rounded-md bg-[#06C755] px-4 py-3 text-base font-medium text-white shadow hover:bg-[#05b04c] transition"
                 >
-                  用 LINE 註冊 / 登入
+                  {standalone ? "用 LINE 登入" : "用 LINE 註冊 / 登入"}
                 </button>
+                {standalone && (
+                  <p className="text-xs text-zinc-400">
+                    將在 LINE app 中完成登入，再回到此 PWA App。
+                  </p>
+                )}
               </div>
 
               <div className="relative py-4">
-                <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-zinc-200"></span></div>
-                <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-zinc-400 dark:bg-zinc-950">或者</span></div>
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t border-zinc-200"></span>
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-white px-2 text-zinc-400 dark:bg-zinc-950">或者</span>
+                </div>
               </div>
 
               <div className="space-y-4 rounded-xl border border-zinc-200 p-4 bg-zinc-50/50">
@@ -219,7 +362,7 @@ export default function LandingPage() {
 
       <div className="mt-8 text-center text-xs text-zinc-400 space-y-1">
         <p>New ERP 會員系統</p>
-        <p>Version 0.1.0 (PWA Ready)</p>
+        <p>Version 0.2.0 (PWA Pairing)</p>
       </div>
     </main>
   );
@@ -237,23 +380,37 @@ function readStore(): string | null {
   return null;
 }
 
-async function runLiffSession(idToken: string, storeId: string) {
+async function runLiffSession(
+  idToken: string,
+  storeId: string,
+  pairCode: string | null,
+) {
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
   if (!base) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
+
+  const body: Record<string, string> = {
+    id_token: idToken,
+    store: storeId,
+  };
+  if (pairCode) body.pair_code = pairCode;
 
   const resp = await fetch(`${base}/functions/v1/liff-session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id_token: idToken, store: storeId }),
+    body: JSON.stringify(body),
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     throw new Error(
       (data as { error?: string; detail?: string }).detail
-      ?? (data as { error?: string }).error
-      ?? `liff-session ${resp.status}`,
+        ?? (data as { error?: string }).error
+        ?? `liff-session ${resp.status}`,
     );
   }
+
+  // 若是 PWA pairing 流程,session 已經寫進 pwa_auth_codes,
+  // 這裡 LIFF 端不需要也不應該跳到 /me（user 應該回 PWA）。
+  if (pairCode) return;
 
   const frag = new URLSearchParams({
     token:        String(data.token),
