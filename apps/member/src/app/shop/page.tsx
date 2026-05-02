@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
 import PageShell from "@/components/PageShell";
+import PullToRefresh from "@/components/PullToRefresh";
 import CampaignCard, { type CampaignSummary } from "@/components/CampaignCard";
 import Countdown from "@/components/Countdown";
 
@@ -15,32 +16,37 @@ export default function ShopPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    consumeFragmentToSession();
+  const fetchCampaigns = useCallback(async () => {
     const s = getSession();
     if (!s || !s.memberId) {
       router.replace("/");
       return;
     }
-    (async () => {
-      try {
-        const d = await callLiffApi<{ campaigns: CampaignSummary[] }>(s.token, {
-          action: "list_active_campaigns",
-        });
-        setCampaigns(d.campaigns);
-      } catch (e) {
-        setErr(e instanceof Error ? e.message : String(e));
-      } finally {
-        setLoading(false);
-      }
-    })();
+    setErr(null);
+    try {
+      const d = await callLiffApi<{ campaigns: CampaignSummary[] }>(s.token, {
+        action: "list_active_campaigns",
+      });
+      setCampaigns(d.campaigns);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
   }, [router]);
+
+  useEffect(() => {
+    consumeFragmentToSession();
+    (async () => {
+      await fetchCampaigns();
+      setLoading(false);
+    })();
+  }, [fetchCampaigns]);
 
   // 結單最近的那張當 hero(限時專區封面)
   const hero = campaigns[0];
 
   return (
     <PageShell title="商品">
+      <PullToRefresh onRefresh={fetchCampaigns}>
       <div className="space-y-5 px-4 pt-2 pb-6">
         {loading && (
           <p className="px-1 text-[16px] text-[var(--tertiary-label)]">載入中…</p>
@@ -109,6 +115,7 @@ export default function ShopPage() {
           </section>
         )}
       </div>
+      </PullToRefresh>
     </PageShell>
   );
 }
