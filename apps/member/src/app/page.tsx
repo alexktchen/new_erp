@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { lineOauthStartUrl, callLiffApi } from "@/lib/supabase";
 import { loadLiff } from "@/lib/liff";
-import { getSession, listenForSession } from "@/lib/session";
+import { clearSession, getSession, listenForSession } from "@/lib/session";
 
 type Status = "loading" | "idle" | "liff_auth" | "pair_done" | "error";
 
@@ -151,6 +151,9 @@ export default function LandingPage() {
               liff.login();
               return;
             }
+            // LIFF 走自動登入,先把 webview 內任何殘留的舊 session 清掉,
+            // 避免 fragment 寫入後跟舊 key 撞
+            clearSession();
             const idToken = liff.getIDToken();
             if (!idToken) throw new Error("LIFF getIDToken returned null");
 
@@ -193,6 +196,8 @@ export default function LandingPage() {
     const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
 
     if (standalone) {
+      // 點下登入 = 明確要重新登,清掉所有舊 session 避免「看到舊 token 就跳 /me」
+      clearSession();
       const token = genPairToken();
       localStorage.setItem(PAIR_TOKEN_KEY, token);
 
@@ -212,6 +217,7 @@ export default function LandingPage() {
       return;
     }
 
+    clearSession();
     window.location.href = lineOauthStartUrl(storeId);
   };
 

@@ -66,11 +66,34 @@ export function consumeFragmentToSession(): Session | null {
   return session;
 }
 
+/** 解 JWT payload 的 exp(秒)。失敗或沒 exp → null。不驗簽,只是給 client 判過期用 */
+function jwtExpSeconds(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const padded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = atob(padded + "==".slice(0, (4 - padded.length % 4) % 4));
+    const claims = JSON.parse(json) as { exp?: number };
+    return typeof claims.exp === "number" ? claims.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getSession(): Session | null {
   if (typeof window === "undefined") return null;
   const token = localStorage.getItem(TOKEN_KEY);
   const storeId = localStorage.getItem(STORE_KEY);
   if (!token || !storeId) return null;
+
+  // 過期 / 解不出 exp 一律當沒登入,順手清掉避免下一輪又進來
+  const exp = jwtExpSeconds(token);
+  const now = Math.floor(Date.now() / 1000);
+  if (exp === null || exp <= now) {
+    clearSession();
+    return null;
+  }
+
   const mid = localStorage.getItem(MEMBER_KEY);
   return {
     token,
