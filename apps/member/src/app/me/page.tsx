@@ -207,13 +207,17 @@ export default function MePage() {
                 ✓ 已綁定 LINE
               </div>
             </div>
-            <button
-              onClick={generatePwaCode}
-              disabled={generating}
-              className="flex-shrink-0 rounded-full bg-[var(--ios-blue)] px-3 py-1.5 text-[13px] font-medium text-white active:opacity-80 disabled:opacity-50"
-            >
-              {generating ? "..." : "PWA 碼"}
-            </button>
+            {/* 「PWA 碼」只在 LINE / 一般瀏覽器才出現,
+                 用來把當前 session 帶到尚未登入的 PWA。在 PWA 內已登入,沒意義 */}
+            {!isPWA && (
+              <button
+                onClick={generatePwaCode}
+                disabled={generating}
+                className="flex-shrink-0 rounded-full bg-[var(--ios-blue)] px-3 py-1.5 text-[13px] font-medium text-white active:opacity-80 disabled:opacity-50"
+              >
+                {generating ? "..." : "PWA 碼"}
+              </button>
+            )}
           </div>
 
           {pwaCode && (
