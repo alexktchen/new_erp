@@ -72,7 +72,7 @@ Deno.serve(async (req) => {
     const tenantId      = requireEnv("DEFAULT_TENANT_ID"); // v1 單 tenant
 
     // 1) state
-    const { store_id: storeId } = await verifyStateToken(state, stateSecret);
+    const { store_id: storeId, pair_code: pairCode } = await verifyStateToken(state, stateSecret);
 
     // 2) code → token
     const tokens = await exchangeCode({
@@ -155,26 +155,45 @@ Deno.serve(async (req) => {
     const sb = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false },
     });
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+    // 永遠寫一份 6 位數驗證碼（fallback，使用者手動輸入用）
     const { error: codeErr } = await sb
       .from("pwa_auth_codes")
       .insert({
         code: code6,
         session_data: sessionData,
         tenant_id: tenantId,
-        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5分鐘有效
+        expires_at: expiresAt,
       });
     if (codeErr) console.error("failed to save pwa code:", codeErr);
 
-    // 8) redirect 回前端 /auth/success（顯示驗證碼）
-    // 同時保留 fragment token，讓一般瀏覽器能直接進入
+    // 若 PWA 主動帶 pair_code 進來,額外寫一份 keyed by pair_code,
+    // PWA 切回桌面後 visibilitychange 會 silently claim,使用者不用手動輸入碼
+    if (pairCode) {
+      const { error: pairErr } = await sb
+        .from("pwa_auth_codes")
+        .insert({
+          code: pairCode,
+          session_data: sessionData,
+          tenant_id: tenantId,
+          expires_at: expiresAt,
+        });
+      if (pairErr) console.error("failed to save pair code:", pairErr);
+    }
+
+    // 8) redirect 回前端 /auth/success
+    // - 有 pair_code → 顯示「請回到 PWA」(不秀 6 碼,避免使用者誤打)
+    // - 沒有 → 顯示 6 碼 + token fragment(同舊行為)
     const params = new URLSearchParams({
       code: code6,
       bound: "1",
       store: storeId,
     });
+    if (pairCode) params.set("paired", "1");
     return redirectFrontWithFragment(
       "/auth/success",
-      params.toString() + `&token=${encodeURIComponent(jwt)}`
+      params.toString() + `&token=${encodeURIComponent(jwt)}`,
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

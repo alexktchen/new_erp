@@ -19,10 +19,13 @@ export function getSupabase(jwt: string | null): SupabaseClient {
   });
 }
 
-export function lineOauthStartUrl(storeId: string): string {
+export function lineOauthStartUrl(storeId: string, pairCode?: string): string {
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
   if (!base) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
-  return `${base}/functions/v1/line-oauth-start?store=${encodeURIComponent(storeId)}`;
+  const url = new URL(`${base}/functions/v1/line-oauth-start`);
+  url.searchParams.set("store", storeId);
+  if (pairCode) url.searchParams.set("pair", pairCode);
+  return url.toString();
 }
 
 /**

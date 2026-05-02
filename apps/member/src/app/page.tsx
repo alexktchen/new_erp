@@ -180,24 +180,30 @@ export default function LandingPage() {
   }, []);
 
   /**
-   * PWA standalone → 走 pair-token + LIFF（生 token，存 localStorage，開 LIFF URL）
-   * 一般瀏覽器 → 走 OAuth（既有路徑）
+   * standalone PWA：一律生 pair token,本地存好,
+   *   - 有 LIFF_ID  → 開 LIFF URL(LINE app 內自動登入)
+   *   - 沒 LIFF_ID  → 開 OAuth URL 帶 pair(callback 寫 pwa_auth_codes)
+   *   兩條都用 anchor target=_blank 讓 PWA 留在 standalone 背景,
+   *   visibilitychange 切回時自動 claim。
+   * 一般瀏覽器(非 standalone)：原本 OAuth 流程。
    */
   const start = () => {
     if (!storeId) return;
 
     const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
-    if (standalone && liffId) {
+
+    if (standalone) {
       const token = genPairToken();
       localStorage.setItem(PAIR_TOKEN_KEY, token);
-      const liffUrl =
-        `https://liff.line.me/${encodeURIComponent(liffId)}` +
-        `?store=${encodeURIComponent(storeId)}` +
-        `&pair=${encodeURIComponent(token)}`;
-      // 用 anchor + target=_blank,讓 LINE app 透過 universal link 接管,
-      // PWA 本身留在 standalone(背景),回來時 visibilitychange 會 claim
+
+      const targetUrl = liffId
+        ? `https://liff.line.me/${encodeURIComponent(liffId)}` +
+          `?store=${encodeURIComponent(storeId)}` +
+          `&pair=${encodeURIComponent(token)}`
+        : lineOauthStartUrl(storeId, token);
+
       const a = document.createElement("a");
-      a.href = liffUrl;
+      a.href = targetUrl;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       document.body.appendChild(a);

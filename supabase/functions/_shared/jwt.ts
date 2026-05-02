@@ -82,29 +82,30 @@ export async function verifyJwtHs256(
 
 /**
  * Sign a short-lived state token for OAuth CSRF protection.
- * Payload: { nonce, store_id, iat, exp }
+ * Payload: { nonce, store_id, pair_code?, iat, exp }
  */
 export async function signStateToken(
   storeId: string,
   secret: string,
   ttlSeconds = 600,
+  pairCode?: string,
 ): Promise<string> {
   const nonce = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
-  return await signJwtHs256(
-    { nonce, store_id: storeId, exp: now + ttlSeconds },
-    secret,
-  );
+  const claims: JwtClaims = { nonce, store_id: storeId, exp: now + ttlSeconds };
+  if (pairCode) claims.pair_code = pairCode;
+  return await signJwtHs256(claims, secret);
 }
 
 export async function verifyStateToken(
   token: string,
   secret: string,
-): Promise<{ nonce: string; store_id: string }> {
+): Promise<{ nonce: string; store_id: string; pair_code?: string }> {
   const claims = await verifyJwtHs256(token, secret);
   if (!claims.store_id || !claims.nonce) throw new Error("invalid state");
   return {
     nonce: String(claims.nonce),
     store_id: String(claims.store_id),
+    pair_code: claims.pair_code ? String(claims.pair_code) : undefined,
   };
 }

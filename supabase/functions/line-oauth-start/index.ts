@@ -20,12 +20,16 @@ Deno.serve(async (req) => {
     if (!storeId) {
       return json({ error: "missing 'store' query param" }, 400);
     }
+    const pairRaw = url.searchParams.get("pair");
+    const pairCode = pairRaw && pairRaw.length >= 8 && pairRaw.length <= 64
+      ? pairRaw
+      : undefined;
 
     const channelId  = requireEnv("LINE_CHANNEL_ID");
     const callbackUrl = requireEnv("LINE_CALLBACK_URL");
     const stateSecret = requireEnv("LINE_STATE_SECRET");
 
-    const state = await signStateToken(storeId, stateSecret);
+    const state = await signStateToken(storeId, stateSecret, 600, pairCode);
 
     const authorize = new URL(LINE_AUTHORIZE_URL);
     authorize.searchParams.set("response_type", "code");
