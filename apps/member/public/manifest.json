@@ -6,7 +6,7 @@
   "scope": "/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#db2777",
+  "theme_color": "#c44464",
   "icons": [
     {
       "src": "/icons/android/launchericon-48x48.png",

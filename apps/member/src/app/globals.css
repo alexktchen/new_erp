@@ -16,9 +16,9 @@
   --ios-red: #ff3b30;
   --ios-gray: #8e8e93;
 
-  /* 品牌粉（accent / 標題用） */
-  --brand: #ec4899;               /* tailwind pink-500 */
-  --brand-strong: #db2777;        /* tailwind pink-600 */
+  /* 品牌粉(暖粉色,呼應「包子媽」logo 中央愛心 + 水彩花圈) */
+  --brand: #ec6b8c;               /* 暖玫瑰粉 — 一般 accent / 副標 */
+  --brand-strong: #c44464;        /* 較深玫瑰 — CTA、金額強調 */
 }
 
 @theme inline {
