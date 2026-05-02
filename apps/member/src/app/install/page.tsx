@@ -264,55 +264,209 @@ function IosSafariSteps() {
   return (
     <Card>
       <h2 className="text-[18px] font-bold text-zinc-900">把 App 加到主畫面</h2>
-      <p className="mt-2 text-[15px] text-zinc-600">
-        三步驟,大約 10 秒鐘。
-      </p>
+      <p className="mt-1 text-[14px] text-zinc-500">三步驟、約 10 秒鐘。</p>
 
-      <div className="mt-5 space-y-5">
-        <div className="flex items-start gap-3">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#007aff] text-[15px] font-bold text-white">
-            1
-          </div>
-          <div className="flex-1">
-            <div className="text-[16px] font-medium text-zinc-900">點下方分享按鈕</div>
-            <div className="mt-2 inline-flex items-center gap-2 rounded-xl bg-zinc-100 px-3 py-2">
-              {/* iOS Share icon SVG */}
-              <svg viewBox="0 0 24 24" fill="none" stroke="#007aff" strokeWidth="2" className="h-6 w-6">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v13M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" />
-              </svg>
-              <span className="text-[14px] text-zinc-600">畫面下方那個</span>
-            </div>
-          </div>
-        </div>
+      <div className="mt-5 space-y-6">
+        <StepIllustration
+          n={1}
+          title="點下方分享按鈕"
+          hint="iPhone Safari 螢幕底部那個"
+        >
+          <PhoneStep1 />
+        </StepIllustration>
 
-        <div className="flex items-start gap-3">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#007aff] text-[15px] font-bold text-white">
-            2
-          </div>
-          <div className="flex-1">
-            <div className="text-[16px] font-medium text-zinc-900">向下捲動找「加入主畫面」</div>
-            <div className="mt-2 flex items-center gap-2 rounded-xl bg-zinc-100 px-3 py-2">
-              <span className="text-[14px] text-zinc-600">加入主畫面</span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="#3c3c43" strokeWidth="2" className="h-5 w-5">
-                <rect x="4" y="4" width="16" height="16" rx="2" />
-                <path strokeLinecap="round" d="M12 8v8M8 12h8" />
-              </svg>
-            </div>
-          </div>
-        </div>
+        <StepIllustration
+          n={2}
+          title="找「加入主畫面」"
+          hint="出現選單後往下捲動"
+        >
+          <PhoneStep2 />
+        </StepIllustration>
 
-        <div className="flex items-start gap-3">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#007aff] text-[15px] font-bold text-white">
-            3
-          </div>
-          <div className="flex-1">
-            <div className="text-[16px] font-medium text-zinc-900">右上角點「新增」</div>
-            <p className="mt-1 text-[13px] text-zinc-500">
-              桌面就會多一顆「包子媽生鮮小舖」圖示,以後從那裡開就能下單。
-            </p>
-          </div>
-        </div>
+        <StepIllustration
+          n={3}
+          title="完成！從桌面圖示開"
+          hint="從現在起點包子媽圖示就能下單"
+        >
+          <PhoneStep3 />
+        </StepIllustration>
       </div>
     </Card>
+  );
+}
+
+function StepIllustration({
+  n,
+  title,
+  hint,
+  children,
+}: {
+  n: number;
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-4">
+      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#007aff] text-[15px] font-bold text-white">
+        {n}
+      </div>
+      <div className="flex-1">
+        <div className="text-[16px] font-medium text-zinc-900">{title}</div>
+        <p className="mt-0.5 text-[13px] text-zinc-500">{hint}</p>
+      </div>
+      <div className="flex-shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** Phone 外殼 — 共用框 */
+function PhoneShell({ children }: { children: React.ReactNode }) {
+  return (
+    <svg viewBox="0 0 110 200" className="h-[140px] w-[78px]">
+      {/* bezel */}
+      <rect x="0.5" y="0.5" width="109" height="199" rx="14" fill="#1c1c1e" />
+      <rect x="3" y="3" width="104" height="194" rx="11" fill="#ffffff" />
+      {/* notch */}
+      <rect x="42" y="3" width="26" height="6" rx="3" fill="#1c1c1e" />
+      {children}
+    </svg>
+  );
+}
+
+/** Step 1: Safari 畫面 + 高亮分享按鈕 */
+function PhoneStep1() {
+  return (
+    <PhoneShell>
+      {/* 網址列 */}
+      <rect x="10" y="14" width="90" height="10" rx="3" fill="#f2f2f7" />
+      <rect x="14" y="17" width="60" height="4" rx="1" fill="#c6c6c8" />
+      {/* 內容 — 用品牌色塊 + 標題佔位 */}
+      <rect x="10" y="30" width="90" height="50" rx="6" fill="#ec6b8c" opacity="0.18" />
+      <circle cx="55" cy="55" r="14" fill="#c44464" opacity="0.85" />
+      <rect x="20" y="86" width="70" height="4" rx="1" fill="#c6c6c8" />
+      <rect x="28" y="94" width="54" height="3" rx="1" fill="#d8d8da" />
+      {/* Safari toolbar */}
+      <rect x="3" y="170" width="104" height="27" fill="#f7f7f8" />
+      <line x1="3" y1="170" x2="107" y2="170" stroke="#d8d8da" strokeWidth="0.5" />
+      {/* 4 顆 icon */}
+      <g fill="none" stroke="#8e8e93" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M16 178 L20 184 L16 190" />
+        <path d="M36 184 L40 178 L40 190 L32 190 Z" />
+        {/* Share - highlight */}
+        <g stroke="#007aff" strokeWidth="1.6">
+          <rect x="50" y="178" width="14" height="14" rx="6" fill="#007aff" fillOpacity="0.12" />
+          <path d="M57 181 L57 189" />
+          <path d="M53 184 L57 180 L61 184" />
+        </g>
+        <rect x="74" y="178" width="10" height="14" rx="1" />
+        <circle cx="94" cy="184" r="4" />
+      </g>
+      {/* 箭頭指向分享 */}
+      <g fill="#c44464">
+        <path d="M77 184 L66 184 L70 180 M66 184 L70 188" stroke="#c44464" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      </g>
+    </PhoneShell>
+  );
+}
+
+/** Step 2: 分享 sheet + 加入主畫面 highlight */
+function PhoneStep2() {
+  return (
+    <PhoneShell>
+      {/* 後方頁面變淡 */}
+      <rect x="3" y="3" width="104" height="194" rx="11" fill="#000" opacity="0.18" />
+      {/* sheet */}
+      <rect x="6" y="60" width="98" height="138" rx="9" fill="#ffffff" />
+      {/* drag handle */}
+      <rect x="48" y="65" width="14" height="2" rx="1" fill="#d8d8da" />
+      {/* 第一排 app icons */}
+      <g>
+        <rect x="14" y="76" width="20" height="20" rx="4" fill="#06c755" opacity="0.85" />
+        <rect x="40" y="76" width="20" height="20" rx="4" fill="#3b5998" opacity="0.85" />
+        <rect x="66" y="76" width="20" height="20" rx="4" fill="#1d9bf0" opacity="0.85" />
+        <rect x="92" y="76" width="14" height="20" rx="4" fill="#ec6b8c" opacity="0.85" />
+      </g>
+      <line x1="10" y1="106" x2="100" y2="106" stroke="#e5e5ea" strokeWidth="0.5" />
+      {/* action 列表 */}
+      <g fill="#1c1c1e">
+        <rect x="14" y="112" width="48" height="3" rx="1" />
+        <rect x="14" y="124" width="40" height="3" rx="1" />
+        <rect x="14" y="136" width="56" height="3" rx="1" />
+      </g>
+      {/* Add to Home Screen — highlight */}
+      <rect x="6" y="146" width="98" height="14" fill="#007aff" fillOpacity="0.1" />
+      <rect x="14" y="151" width="55" height="4" rx="1" fill="#1c1c1e" />
+      <g stroke="#1c1c1e" strokeWidth="1" fill="none" strokeLinecap="round">
+        <rect x="92" y="149" width="8" height="8" rx="1.5" />
+        <path d="M96 151 L96 155 M94 153 L98 153" />
+      </g>
+      {/* 箭頭 */}
+      <g stroke="#c44464" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2 153 L9 153 M6 150 L9 153 L6 156" />
+      </g>
+      <g fill="#1c1c1e">
+        <rect x="14" y="170" width="36" height="3" rx="1" />
+      </g>
+    </PhoneShell>
+  );
+}
+
+/** Step 3: 桌面圖示 + 包子媽 icon 高亮 */
+function PhoneStep3() {
+  return (
+    <PhoneShell>
+      {/* 漸層底 */}
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#fde2e9" />
+          <stop offset="100%" stopColor="#fce8d6" />
+        </linearGradient>
+      </defs>
+      <rect x="3" y="3" width="104" height="194" rx="11" fill="url(#sky)" />
+      {/* 時間 */}
+      <text x="55" y="30" textAnchor="middle" fontSize="12" fontWeight="700" fill="#1c1c1e">9:41</text>
+      {/* 第一排 app — 普通 */}
+      <g>
+        <rect x="14" y="55" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+        <rect x="36" y="55" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+        <rect x="58" y="55" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+        <rect x="80" y="55" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+      </g>
+      {/* 第二排 — 包子媽 icon highlight */}
+      <g>
+        <rect x="14" y="83" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+        {/* Real logo embed */}
+        <image
+          href="/icons/ios/180.png"
+          x="35"
+          y="80"
+          width="22"
+          height="22"
+          clipPath="inset(0 round 5)"
+        />
+        {/* 高亮環 */}
+        <rect x="33" y="78" width="26" height="26" rx="6" fill="none" stroke="#c44464" strokeWidth="1.4" strokeDasharray="3 2" />
+        <rect x="62" y="83" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+        <rect x="84" y="83" width="16" height="16" rx="4" fill="#fff" stroke="#0001" strokeWidth="0.5" />
+      </g>
+      {/* 包子媽 label */}
+      <text x="46" y="111" textAnchor="middle" fontSize="5.5" fill="#1c1c1e" fontWeight="600">包子媽</text>
+      {/* 第三排 + 第四排 */}
+      <g>
+        <rect x="14" y="118" width="16" height="16" rx="4" fill="#fff" opacity="0.7" />
+        <rect x="36" y="118" width="16" height="16" rx="4" fill="#fff" opacity="0.7" />
+        <rect x="58" y="118" width="16" height="16" rx="4" fill="#fff" opacity="0.7" />
+        <rect x="80" y="118" width="16" height="16" rx="4" fill="#fff" opacity="0.7" />
+      </g>
+      {/* dock */}
+      <rect x="10" y="167" width="90" height="22" rx="8" fill="#ffffff" opacity="0.55" />
+      <g>
+        <rect x="18" y="172" width="14" height="14" rx="3.5" fill="#fff" />
+        <rect x="36" y="172" width="14" height="14" rx="3.5" fill="#fff" />
+        <rect x="54" y="172" width="14" height="14" rx="3.5" fill="#fff" />
+        <rect x="72" y="172" width="14" height="14" rx="3.5" fill="#fff" />
+      </g>
+    </PhoneShell>
   );
 }
