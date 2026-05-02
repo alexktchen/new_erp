@@ -31,6 +31,40 @@ export default function MePage() {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ name: "", phone: "", birthday: "", email: "" });
 
+  // PWA share code
+  const [pwaCode, setPwaCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [generating, setGenerating] = useState(false);
+
+  async function generatePwaCode() {
+    const s = getSession();
+    if (!s) {
+      setError("session 失效，請重新登入");
+      return;
+    }
+    setGenerating(true);
+    setError(null);
+    setCopied(false);
+    try {
+      const data = await callLiffApi<{ code: string }>(s.token, {
+        action: "generate_pwa_auth_code",
+        line_name: lineName,
+        line_picture: linePicture,
+      });
+      setPwaCode(data.code);
+      try {
+        await navigator.clipboard.writeText(data.code);
+        setCopied(true);
+      } catch {
+        // 部分情境（非 https / 沒 user gesture）會失敗，碼仍會顯示給使用者手動複製
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   useEffect(() => {
     consumeFragmentToSession();
     const s = getSession();
@@ -143,7 +177,28 @@ export default function MePage() {
                 ✓ 已綁定 LINE
               </div>
             </div>
+            <button
+              onClick={generatePwaCode}
+              disabled={generating}
+              className="flex-shrink-0 rounded-full bg-[var(--ios-blue)] px-3 py-1.5 text-[13px] font-medium text-white active:opacity-80 disabled:opacity-50"
+            >
+              {generating ? "..." : "PWA 碼"}
+            </button>
           </div>
+
+          {pwaCode && (
+            <div className="border-t border-[var(--separator)] bg-[#7676800a] px-4 py-3 text-center">
+              <div className="text-[12px] text-[var(--secondary-label)]">
+                {copied ? "✓ 已複製到剪貼簿" : "請手動複製"}　·　5 分鐘內有效
+              </div>
+              <div className="mt-1 select-all font-mono text-[28px] font-bold tracking-[0.4em] text-[var(--foreground)]">
+                {pwaCode}
+              </div>
+              <p className="mt-1 text-[11px] text-[var(--tertiary-label)]">
+                到 PWA App 首頁的「6 位數驗證碼」欄位貼上
+              </p>
+            </div>
+          )}
         </section>
 
         {!editing ? (

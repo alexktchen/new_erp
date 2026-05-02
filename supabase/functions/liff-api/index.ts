@@ -210,6 +210,36 @@ async function listMySettlements(sb: any, tenantId: string, storeId: number, mem
   return json({ settlements: data ?? [] });
 }
 
+async function generatePwaAuthCode(
+  sb: any,
+  tenantId: string,
+  memberId: number,
+  claims: any,
+  jwt: string,
+  p: any,
+) {
+  const code6 = Math.floor(100000 + Math.random() * 900000).toString();
+  const sessionData = {
+    token: jwt,
+    store: String(claims.store_id ?? ""),
+    member_id: memberId,
+    line_user_id: String(claims.line_user_id ?? ""),
+    line_name: typeof p.line_name === "string" ? p.line_name : null,
+    line_picture: typeof p.line_picture === "string" ? p.line_picture : null,
+  };
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+  const { error } = await sb.from("pwa_auth_codes").insert({
+    code: code6,
+    session_data: sessionData,
+    tenant_id: tenantId,
+    expires_at: expiresAt,
+  });
+  if (error) return json({ error: error.message }, 500);
+
+  return json({ code: code6, expires_in_sec: 300 });
+}
+
 async function upsertPushSubscription(sb: any, tenantId: string, memberId: number, p: any) {
   if (!p.endpoint) return json({ error: "endpoint required" }, 400);
   
@@ -268,6 +298,7 @@ Deno.serve(async (req) => {
       case "list_my_orders": if (!memberId) return json({ error: "no member_id" }, 401); return await listMyOrders(sb, tenantId, storeId, memberId, String(body.tab ?? ""));
       case "list_my_settlements": if (!memberId) return json({ error: "no member_id" }, 401); return await listMySettlements(sb, tenantId, storeId, memberId, String(body.tab ?? ""));
       case "upsert_push_subscription": if (!memberId) return json({ error: "no member_id" }, 401); return await upsertPushSubscription(sb, tenantId, memberId, body);
+      case "generate_pwa_auth_code": if (!memberId) return json({ error: "no member_id" }, 401); return await generatePwaAuthCode(sb, tenantId, memberId, claims, token, body);
       default: return json({ error: `unknown action: ${action}` }, 400);
     }
   } catch (e) {
