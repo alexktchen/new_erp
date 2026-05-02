@@ -228,7 +228,7 @@ async function listMySettlements(sb: any, tenantId: string, storeId: number, mem
 async function listActiveCampaigns(sb: any, tenantId: string) {
   const { data, error } = await sb
     .from("group_buy_campaigns")
-    .select("id, campaign_no, name, description, cover_image_url, end_at, pickup_deadline, campaign_items(unit_price)")
+    .select("id, campaign_no, name, description, cover_image_url, end_at, pickup_deadline, campaign_items(unit_price, sort_order, sku:skus(product:products(images)))")
     .eq("tenant_id", tenantId)
     .eq("status", "open")
     .gt("end_at", new Date().toISOString())
@@ -238,15 +238,28 @@ async function listActiveCampaigns(sb: any, tenantId: string) {
 
   const supabaseUrl = requireEnv("SUPABASE_URL");
   const campaigns = (data ?? []).map((c: any) => {
-    const prices: number[] = (c.campaign_items ?? [])
+    const items = c.campaign_items ?? [];
+    const prices: number[] = items
       .map((i: any) => Number(i.unit_price))
       .filter((n: number) => Number.isFinite(n));
+
+    // 封面回退鏈:campaign.cover_image_url > 第一個 SKU 的第一張產品圖
+    const sortedItems = [...items].sort(
+      (a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0),
+    );
+    const fallbackImgs = sortedItems[0]?.sku?.product?.images;
+    const fallbackPath = Array.isArray(fallbackImgs) && fallbackImgs.length > 0
+      ? (typeof fallbackImgs[0] === "string" ? fallbackImgs[0] : fallbackImgs[0]?.url ?? null)
+      : null;
+    const cover = toPublicUrl(supabaseUrl, "products", c.cover_image_url)
+      ?? toPublicUrl(supabaseUrl, "products", fallbackPath);
+
     return {
       id: c.id,
       campaign_no: c.campaign_no,
       name: c.name,
       description: c.description,
-      cover_image_url: toPublicUrl(supabaseUrl, "products", c.cover_image_url),
+      cover_image_url: cover,
       end_at: c.end_at,
       pickup_deadline: c.pickup_deadline,
       item_count: prices.length,
@@ -276,6 +289,21 @@ async function getCampaignDetail(sb: any, tenantId: string, campaignId: number) 
 
   const supabaseUrl = requireEnv("SUPABASE_URL");
   c.cover_image_url = toPublicUrl(supabaseUrl, "products", c.cover_image_url);
+
+  // hero carousel:campaign cover + 所有 SKU 全部圖,去重
+  const heroPaths: string[] = [];
+  if (c.cover_image_url) heroPaths.push(c.cover_image_url);
+  for (const it of items ?? []) {
+    const imgs = it.sku?.product?.images;
+    if (!Array.isArray(imgs)) continue;
+    for (const img of imgs) {
+      const path = typeof img === "string" ? img : img?.url ?? null;
+      if (!path) continue;
+      const fullUrl = toPublicUrl(supabaseUrl, "products", path);
+      if (fullUrl && !heroPaths.includes(fullUrl)) heroPaths.push(fullUrl);
+    }
+  }
+
   const flat = (items ?? []).map((it: any) => {
     const imgs = it.sku?.product?.images;
     const rawImg = Array.isArray(imgs) && imgs.length > 0
@@ -293,7 +321,7 @@ async function getCampaignDetail(sb: any, tenantId: string, campaignId: number) 
       cap_qty: it.cap_qty != null ? Number(it.cap_qty) : null,
     };
   });
-  return json({ campaign: c, items: flat });
+  return json({ campaign: c, items: flat, hero_images: heroPaths });
 }
 
 async function placeMemberOrder(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
@@ -36,6 +36,7 @@ export default function CampaignDetailPage() {
 
   const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
   const [items, setItems] = useState<Item[]>([]);
+  const [heroImages, setHeroImages] = useState<string[]>([]);
   const [qtyMap, setQtyMap] = useState<Record<number, number>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -56,12 +57,17 @@ export default function CampaignDetailPage() {
     if (!id) return;
     (async () => {
       try {
-        const d = await callLiffApi<{ campaign: CampaignDetail; items: Item[] }>(s.token, {
+        const d = await callLiffApi<{
+          campaign: CampaignDetail;
+          items: Item[];
+          hero_images?: string[];
+        }>(s.token, {
           action: "get_campaign_detail",
           campaign_id: id,
         });
         setCampaign(d.campaign);
         setItems(d.items);
+        setHeroImages(d.hero_images ?? []);
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       } finally {
@@ -131,18 +137,19 @@ export default function CampaignDetailPage() {
 
         {campaign && (
           <>
-            {/* 封面 — 優先用第一個商品項目的圖,沒有再退到開團 cover */}
-            <div className="relative aspect-[4/3] w-full bg-[#7676801a]">
-              {(items[0]?.image_url ?? campaign.cover_image_url) ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={items[0]?.image_url ?? campaign.cover_image_url ?? ""}
-                  alt=""
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full items-center justify-center text-6xl">📦</div>
-              )}
+            {/* 封面 carousel — 顯示 campaign cover + 所有 SKU 商品圖 */}
+            <div className="relative">
+              <HeroCarousel
+                images={
+                  heroImages.length > 0
+                    ? heroImages
+                    : items[0]?.image_url
+                      ? [items[0].image_url]
+                      : campaign.cover_image_url
+                        ? [campaign.cover_image_url]
+                        : []
+                }
+              />
               {campaign.end_at && (
                 <div className="absolute right-3 top-3 rounded-full bg-black/70 px-3 py-1 text-[14px] font-medium text-white backdrop-blur">
                   剩 <Countdown target={campaign.end_at} compact className="text-white" />
@@ -262,6 +269,67 @@ export default function CampaignDetailPage() {
         </div>
       )}
     </PageShell>
+  );
+}
+
+function HeroCarousel({ images }: { images: string[] }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [idx, setIdx] = useState(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const handler = () => {
+      const w = el.clientWidth;
+      if (w > 0) setIdx(Math.round(el.scrollLeft / w));
+    };
+    el.addEventListener("scroll", handler, { passive: true });
+    return () => el.removeEventListener("scroll", handler);
+  }, []);
+
+  if (images.length === 0) {
+    return (
+      <div className="flex aspect-[4/3] w-full items-center justify-center bg-[#7676801a] text-6xl">
+        📦
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div
+        ref={ref}
+        className="hide-scrollbar flex aspect-[4/3] w-full snap-x snap-mandatory overflow-x-auto scroll-smooth"
+        style={{ scrollbarWidth: "none" }}
+      >
+        {images.map((url, i) => (
+          <div
+            key={`${url}-${i}`}
+            className="relative h-full w-full flex-shrink-0 snap-center bg-[#7676801a]"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={url}
+              alt=""
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+          </div>
+        ))}
+      </div>
+      {images.length > 1 && (
+        <div className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/35 px-2.5 py-1 backdrop-blur-sm">
+          {images.map((_, i) => (
+            <span
+              key={i}
+              aria-hidden
+              className={`h-1.5 rounded-full transition-all ${
+                i === idx ? "w-4 bg-white" : "w-1.5 bg-white/60"
+              }`}
+            />
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

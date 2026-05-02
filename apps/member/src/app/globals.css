@@ -51,3 +51,12 @@ body {
 button, a {
   -webkit-tap-highlight-color: transparent;
 }
+
+/* 隱藏 scrollbar（用於水平 carousel）*/
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
