@@ -32,6 +32,20 @@ function maskName(name: string | null): string | null {
   return name[0] + "*".repeat(name.length - 1);
 }
 
+/**
+ * 把 storage 內的 path 轉成完整 public URL。
+ * 已經是完整 URL(http/https)就原樣回傳。null/空值回 null。
+ */
+function toPublicUrl(
+  supabaseUrl: string,
+  bucket: string,
+  pathOrUrl: string | null | undefined,
+): string | null {
+  if (!pathOrUrl) return null;
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  return `${supabaseUrl}/storage/v1/object/public/${bucket}/${pathOrUrl}`;
+}
+
 // ─── actions ─────────────────────────────────────────────────────────────────
 
 async function claimPwaAuthCode(
@@ -184,6 +198,7 @@ async function updateMe(sb: any, tenantId: string, memberId: number, p: any) {
 async function getOverview(sb: any, tenantId: string, storeId: number, memberId: number) {
   const { data: storeRow, error: sErr } = await sb.from("stores").select("id, code, name, banner_url, description, payment_methods_text, shipping_methods_text").eq("tenant_id", tenantId).eq("id", storeId).single();
   if (sErr || !storeRow) return json({ error: "store not found" }, 404);
+  storeRow.banner_url = toPublicUrl(requireEnv("SUPABASE_URL"), "products", storeRow.banner_url);
   const { data: unpaidRows } = await sb.from("v_customer_order_summary").select("payable_amount").eq("tenant_id", tenantId).eq("member_id", memberId).eq("store_id", storeId).eq("payment_status", "unpaid").not("status", "in", "(cancelled,expired)");
   const receivable = (unpaidRows ?? []).reduce((s: number, r: any) => s + Number(r.payable_amount ?? 0), 0);
   const { count: activeCount } = await sb.from("v_customer_order_summary").select("*", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("member_id", memberId).eq("store_id", storeId).not("status", "in", "(completed,cancelled,expired)");
@@ -221,6 +236,7 @@ async function listActiveCampaigns(sb: any, tenantId: string) {
     .limit(50);
   if (error) return json({ error: error.message }, 500);
 
+  const supabaseUrl = requireEnv("SUPABASE_URL");
   const campaigns = (data ?? []).map((c: any) => {
     const prices: number[] = (c.campaign_items ?? [])
       .map((i: any) => Number(i.unit_price))
@@ -230,7 +246,7 @@ async function listActiveCampaigns(sb: any, tenantId: string) {
       campaign_no: c.campaign_no,
       name: c.name,
       description: c.description,
-      cover_image_url: c.cover_image_url,
+      cover_image_url: toPublicUrl(supabaseUrl, "products", c.cover_image_url),
       end_at: c.end_at,
       pickup_deadline: c.pickup_deadline,
       item_count: prices.length,
@@ -258,11 +274,14 @@ async function getCampaignDetail(sb: any, tenantId: string, campaignId: number) 
     .order("sort_order", { ascending: true });
   if (iErr) return json({ error: iErr.message }, 500);
 
+  const supabaseUrl = requireEnv("SUPABASE_URL");
+  c.cover_image_url = toPublicUrl(supabaseUrl, "products", c.cover_image_url);
   const flat = (items ?? []).map((it: any) => {
     const imgs = it.sku?.product?.images;
-    const firstImg = Array.isArray(imgs) && imgs.length > 0
+    const rawImg = Array.isArray(imgs) && imgs.length > 0
       ? (typeof imgs[0] === "string" ? imgs[0] : imgs[0]?.url ?? null)
       : null;
+    const firstImg = toPublicUrl(supabaseUrl, "products", rawImg);
     return {
       campaign_item_id: it.id,
       sku_id: it.sku?.id,
