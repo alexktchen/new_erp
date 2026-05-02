@@ -422,10 +422,8 @@ export default function MePage() {
           </form>
         )}
 
-        {/* 推播設定 — 只在 PWA standalone 才有意義(LINE webview 推不了) */}
-        {isPWA && (
-          <PushNotificationManager jwt={getSession()?.token ?? null} />
-        )}
+        {/* 推播設定 — 永遠顯示;在 LINE webview 內使用者會看到「需加入主畫面」提示 */}
+        <PushNotificationManager jwt={getSession()?.token ?? null} />
 
         <p className="px-4 pt-2 text-[12px] text-[var(--tertiary-label)]">
           會員卡 QR、點數等更多功能持續開發中。
