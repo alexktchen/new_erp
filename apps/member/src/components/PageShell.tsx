@@ -21,7 +21,7 @@ export default function PageShell({
   return (
     <div
       className="min-h-[100dvh] bg-[var(--background)]"
-      style={{ paddingBottom: "calc(80px + env(safe-area-inset-bottom))" }}
+      style={{ paddingBottom: "calc(92px + env(safe-area-inset-bottom))" }}
     >
       <main className="mx-auto w-full max-w-md">
         {title !== undefined && (

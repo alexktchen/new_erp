@@ -70,7 +70,7 @@ async function tryClaimPairToken(): Promise<boolean> {
       line_picture: data.line_picture ?? "",
     });
     localStorage.removeItem(PAIR_TOKEN_KEY);
-    window.location.href = `/me#${frag.toString()}`;
+    window.location.href = `/shop#${frag.toString()}`;
     return true;
   } catch {
     // 沒到期或還沒寫入 → 等下次
@@ -95,13 +95,13 @@ export default function LandingPage() {
     // 1. 已有 Session → 自動跳 /me
     const existing = getSession();
     if (existing) {
-      window.location.href = "/me";
+      window.location.href = "/shop";
       return;
     }
 
     // 2. 監聽跨視窗登入（同 origin BroadcastChannel，桌機瀏覽器有用）
     const unlisten = listenForSession(() => {
-      window.location.href = "/me";
+      window.location.href = "/shop";
     });
 
     // 3. 從 LIFF 配對流程切回 PWA 時，自動 claim
@@ -254,7 +254,7 @@ export default function LandingPage() {
         line_name: data.line_name ?? "",
         line_picture: data.line_picture ?? "",
       });
-      window.location.href = `/me#${frag.toString()}`;
+      window.location.href = `/shop#${frag.toString()}`;
     } catch (e) {
       setError(e instanceof Error ? e.message : "驗證碼無效或已過期");
     } finally {
@@ -433,5 +433,5 @@ async function runLiffSession(
   });
   if (data.line_name)    frag.set("line_name",    String(data.line_name));
   if (data.line_picture) frag.set("line_picture", String(data.line_picture));
-  window.location.href = `/me#${frag.toString()}`;
+  window.location.href = `/shop#${frag.toString()}`;
 }

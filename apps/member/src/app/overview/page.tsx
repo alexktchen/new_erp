@@ -70,6 +70,21 @@ export default function OverviewPage() {
               />
             ) : null}
 
+            {/* 逛商品入口 */}
+            <button
+              onClick={() => router.push("/shop")}
+              className="block w-full overflow-hidden rounded-2xl bg-gradient-to-r from-[var(--brand-strong)] to-[#ff9500] p-5 text-left text-white shadow-[0_2px_8px_rgba(0,0,0,0.08)] active:opacity-90"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[14px] font-medium opacity-90">立即下單</div>
+                  <div className="mt-0.5 text-[24px] font-bold leading-tight">逛商品 →</div>
+                  <div className="mt-1 text-[13px] opacity-85">看本店進行中的團購活動</div>
+                </div>
+                <div className="text-5xl">🛒</div>
+              </div>
+            </button>
+
             {/* 未結金額卡 */}
             <section className="rounded-2xl bg-[var(--card-bg)] px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
               <div className="text-[14px] text-[var(--secondary-label)]">未結單金額</div>

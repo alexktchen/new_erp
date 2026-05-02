@@ -36,7 +36,7 @@ export default function RegisterPage() {
       return;
     }
     if (s.bound) {
-      window.location.href = "/me";
+      window.location.href = "/shop";
       return;
     }
     if (s.lineName) setName(s.lineName);
@@ -88,7 +88,7 @@ export default function RegisterPage() {
         name: lookup ? "" : name.trim(),
         birthday: lookup ? "" : birthday,
       });
-      window.location.href = `/me?member_id=${resp.member_id}`;
+      window.location.href = `/shop?member_id=${resp.member_id}`;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

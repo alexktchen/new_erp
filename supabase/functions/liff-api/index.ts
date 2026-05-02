@@ -210,6 +210,216 @@ async function listMySettlements(sb: any, tenantId: string, storeId: number, mem
   return json({ settlements: data ?? [] });
 }
 
+async function listActiveCampaigns(sb: any, tenantId: string) {
+  const { data, error } = await sb
+    .from("group_buy_campaigns")
+    .select("id, campaign_no, name, description, cover_image_url, end_at, pickup_deadline, campaign_items(unit_price)")
+    .eq("tenant_id", tenantId)
+    .eq("status", "open")
+    .gt("end_at", new Date().toISOString())
+    .order("end_at", { ascending: true })
+    .limit(50);
+  if (error) return json({ error: error.message }, 500);
+
+  const campaigns = (data ?? []).map((c: any) => {
+    const prices: number[] = (c.campaign_items ?? [])
+      .map((i: any) => Number(i.unit_price))
+      .filter((n: number) => Number.isFinite(n));
+    return {
+      id: c.id,
+      campaign_no: c.campaign_no,
+      name: c.name,
+      description: c.description,
+      cover_image_url: c.cover_image_url,
+      end_at: c.end_at,
+      pickup_deadline: c.pickup_deadline,
+      item_count: prices.length,
+      min_price: prices.length > 0 ? Math.min(...prices) : 0,
+      max_price: prices.length > 0 ? Math.max(...prices) : 0,
+    };
+  });
+  return json({ campaigns });
+}
+
+async function getCampaignDetail(sb: any, tenantId: string, campaignId: number) {
+  const { data: c, error: cErr } = await sb
+    .from("group_buy_campaigns")
+    .select("id, campaign_no, name, description, cover_image_url, status, end_at, pickup_deadline")
+    .eq("tenant_id", tenantId)
+    .eq("id", campaignId)
+    .single();
+  if (cErr || !c) return json({ error: "campaign not found" }, 404);
+
+  const { data: items, error: iErr } = await sb
+    .from("campaign_items")
+    .select("id, unit_price, cap_qty, sort_order, sku:skus(id, sku_code, product_name, variant_name, product:products(name, images))")
+    .eq("tenant_id", tenantId)
+    .eq("campaign_id", campaignId)
+    .order("sort_order", { ascending: true });
+  if (iErr) return json({ error: iErr.message }, 500);
+
+  const flat = (items ?? []).map((it: any) => {
+    const imgs = it.sku?.product?.images;
+    const firstImg = Array.isArray(imgs) && imgs.length > 0
+      ? (typeof imgs[0] === "string" ? imgs[0] : imgs[0]?.url ?? null)
+      : null;
+    return {
+      campaign_item_id: it.id,
+      sku_id: it.sku?.id,
+      sku_code: it.sku?.sku_code,
+      product_name: it.sku?.product_name ?? it.sku?.product?.name ?? null,
+      variant_name: it.sku?.variant_name ?? null,
+      image_url: firstImg,
+      unit_price: Number(it.unit_price),
+      cap_qty: it.cap_qty != null ? Number(it.cap_qty) : null,
+    };
+  });
+  return json({ campaign: c, items: flat });
+}
+
+async function placeMemberOrder(
+  sb: any,
+  tenantId: string,
+  memberId: number,
+  p: any,
+) {
+  const campaignId = Number(p.campaign_id);
+  const items = Array.isArray(p.items) ? p.items : [];
+  const notes = typeof p.notes === "string" ? p.notes.trim() : null;
+
+  if (!campaignId) return json({ error: "campaign_id required" }, 400);
+  if (items.length === 0) return json({ error: "items required" }, 400);
+
+  // 取得 member + home_store
+  const { data: member, error: mErr } = await sb
+    .from("members")
+    .select("id, name, home_store_id")
+    .eq("tenant_id", tenantId)
+    .eq("id", memberId)
+    .single();
+  if (mErr || !member) return json({ error: "member not found" }, 404);
+
+  const pickupStoreId = Number(p.pickup_store_id ?? member.home_store_id ?? 0);
+  if (!pickupStoreId) return json({ error: "pickup_store_id required" }, 400);
+
+  // 確認活動 open + 還沒過期
+  const { data: campaign, error: cErr } = await sb
+    .from("group_buy_campaigns")
+    .select("id, status, campaign_no, end_at")
+    .eq("tenant_id", tenantId)
+    .eq("id", campaignId)
+    .single();
+  if (cErr || !campaign) return json({ error: "campaign not found" }, 404);
+  if (campaign.status !== "open") return json({ error: "campaign not open" }, 400);
+  if (campaign.end_at && new Date(campaign.end_at).getTime() <= Date.now()) {
+    return json({ error: "campaign already ended" }, 400);
+  }
+
+  // 找 pickup store 對應的 channel(取第一個 active 的)
+  const { data: channel } = await sb
+    .from("line_channels")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("home_store_id", pickupStoreId)
+    .eq("is_active", true)
+    .order("id", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (!channel) return json({ error: "no active channel for pickup store" }, 400);
+
+  // 找既有訂單 or 新建(unique: tenant+campaign+channel+member)
+  const { data: existing } = await sb
+    .from("customer_orders")
+    .select("id, order_no")
+    .eq("tenant_id", tenantId)
+    .eq("campaign_id", campaignId)
+    .eq("channel_id", channel.id)
+    .eq("member_id", memberId)
+    .maybeSingle();
+
+  let orderId: number;
+  let orderNo: string;
+
+  if (existing) {
+    orderId = existing.id;
+    orderNo = existing.order_no;
+    await sb.from("customer_orders").update({
+      pickup_store_id: pickupStoreId,
+      notes: notes ?? null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", orderId);
+  } else {
+    const { count } = await sb
+      .from("customer_orders")
+      .select("*", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("campaign_id", campaignId);
+    orderNo = `${campaign.campaign_no}-${String((count ?? 0) + 1).padStart(4, "0")}`;
+    const { data: inserted, error: insErr } = await sb
+      .from("customer_orders")
+      .insert({
+        tenant_id: tenantId,
+        order_no: orderNo,
+        campaign_id: campaignId,
+        channel_id: channel.id,
+        member_id: memberId,
+        nickname_snapshot: member.name,
+        pickup_store_id: pickupStoreId,
+        status: "pending",
+        notes: notes ?? null,
+      })
+      .select("id")
+      .single();
+    if (insErr || !inserted) {
+      return json({ error: "failed to create order", detail: insErr?.message }, 500);
+    }
+    orderId = inserted.id;
+  }
+
+  // items: 同 campaign_item_id 累加,否則新增
+  for (const it of items) {
+    const ciId = Number(it.campaign_item_id);
+    const qty = Number(it.qty);
+    if (!ciId || !qty || qty <= 0) continue;
+
+    const { data: ci } = await sb
+      .from("campaign_items")
+      .select("unit_price, sku_id")
+      .eq("id", ciId)
+      .eq("tenant_id", tenantId)
+      .eq("campaign_id", campaignId)
+      .maybeSingle();
+    if (!ci) continue;
+
+    const { data: existingItem } = await sb
+      .from("customer_order_items")
+      .select("id, qty")
+      .eq("order_id", orderId)
+      .eq("campaign_item_id", ciId)
+      .maybeSingle();
+
+    if (existingItem) {
+      await sb.from("customer_order_items").update({
+        qty: Number(existingItem.qty) + qty,
+        updated_at: new Date().toISOString(),
+      }).eq("id", existingItem.id);
+    } else {
+      await sb.from("customer_order_items").insert({
+        tenant_id: tenantId,
+        order_id: orderId,
+        campaign_item_id: ciId,
+        sku_id: ci.sku_id,
+        qty: qty,
+        unit_price: ci.unit_price,
+        status: "pending",
+        source: "liff",
+      });
+    }
+  }
+
+  return json({ ok: true, order_id: orderId, order_no: orderNo });
+}
+
 async function generatePwaAuthCode(
   sb: any,
   tenantId: string,
@@ -299,6 +509,9 @@ Deno.serve(async (req) => {
       case "list_my_settlements": if (!memberId) return json({ error: "no member_id" }, 401); return await listMySettlements(sb, tenantId, storeId, memberId, String(body.tab ?? ""));
       case "upsert_push_subscription": if (!memberId) return json({ error: "no member_id" }, 401); return await upsertPushSubscription(sb, tenantId, memberId, body);
       case "generate_pwa_auth_code": if (!memberId) return json({ error: "no member_id" }, 401); return await generatePwaAuthCode(sb, tenantId, memberId, claims, token, body);
+      case "list_active_campaigns": return await listActiveCampaigns(sb, tenantId);
+      case "get_campaign_detail": return await getCampaignDetail(sb, tenantId, Number(body.campaign_id ?? 0));
+      case "place_member_order": if (!memberId) return json({ error: "no member_id" }, 401); return await placeMemberOrder(sb, tenantId, memberId, body);
       default: return json({ error: `unknown action: ${action}` }, 400);
     }
   } catch (e) {

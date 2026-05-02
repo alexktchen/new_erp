@@ -49,7 +49,7 @@ export default function AuthSuccessPage() {
               如果您是從桌面瀏覽器登入，請直接點擊下方按鈕：
             </p>
             <a
-              href="/me"
+              href="/shop"
               className="inline-block rounded-md bg-[#06C755] px-6 py-2.5 text-base font-medium text-white shadow"
             >
               進入會員中心
