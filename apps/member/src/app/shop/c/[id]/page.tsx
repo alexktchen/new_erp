@@ -287,6 +287,39 @@ function HeroCarousel({ images }: { images: string[] }) {
     return () => el.removeEventListener("scroll", handler);
   }, []);
 
+  // 鎖死成只能水平。一摸到 carousel 就判定方向,
+  // 垂直壓倒水平 → preventDefault 阻擋頁面滾動。
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let startX = 0;
+    let startY = 0;
+    let dir: "h" | "v" | null = null;
+
+    const onStart = (e: TouchEvent) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      dir = null;
+    };
+    const onMove = (e: TouchEvent) => {
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (dir === null) {
+        if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
+          dir = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
+        }
+      }
+      if (dir === "v" && e.cancelable) e.preventDefault();
+    };
+
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+    };
+  }, []);
+
   if (images.length === 0) {
     return (
       <div className="flex aspect-[4/3] w-full items-center justify-center bg-[#7676801a] text-6xl">
