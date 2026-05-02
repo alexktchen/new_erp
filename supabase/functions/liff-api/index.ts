@@ -48,6 +48,17 @@ function toPublicUrl(
 
 // ─── actions ─────────────────────────────────────────────────────────────────
 
+async function listStores(sb: any, tenantId: string) {
+  const { data, error } = await sb
+    .from("stores")
+    .select("id, code, name")
+    .eq("tenant_id", tenantId)
+    .eq("is_active", true)
+    .order("code", { ascending: true });
+  if (error) return json({ error: error.message }, 500);
+  return json({ stores: data ?? [] });
+}
+
 async function claimPwaAuthCode(
   sb: any,
   code: string,
@@ -530,8 +541,9 @@ Deno.serve(async (req) => {
     const action = String(body.action ?? "");
     const sb = createClient(requireEnv("SUPABASE_URL"), requireEnv("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false, autoRefreshToken: false } });
 
-    // ── [NEW] 特殊 action：領取 PWA 驗證碼 (完全不需要 Token) ──
+    // ── 不需要 Token 的 actions ──
     if (action === "claim_pwa_auth_code") return await claimPwaAuthCode(sb, String(body.code ?? ""));
+    if (action === "list_stores") return await listStores(sb, requireEnv("DEFAULT_TENANT_ID"));
 
     const auth = req.headers.get("authorization");
     if (!auth) return json({ error: "missing authorization" }, 401);

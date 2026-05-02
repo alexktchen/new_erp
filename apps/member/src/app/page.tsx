@@ -78,9 +78,12 @@ async function tryClaimPairToken(): Promise<boolean> {
   }
 }
 
+type StoreOption = { id: number; code: string; name: string };
+
 export default function LandingPage() {
   const [storeId, setStoreId] = useState<string | null>(null);
   const [inputStoreId, setInputStoreId] = useState("");
+  const [stores, setStores] = useState<StoreOption[]>([]);
   const [status, setStatus] = useState<Status>("loading");
   const [error, setError] = useState<string | null>(null);
   const [standalone, setStandalone] = useState(false);
@@ -107,6 +110,11 @@ export default function LandingPage() {
     const unlisten = listenForSession((s) => {
       if (s.memberId) window.location.href = landing;
     });
+
+    // 抓門市清單給下拉選用(免 token,公開資訊)
+    callLiffApi<{ stores: StoreOption[] }>("", { action: "list_stores" })
+      .then((r) => setStores(r.stores ?? []))
+      .catch(() => { /* 抓不到就退回手動輸入 */ });
 
     // 3. 從 LIFF 配對流程切回 PWA 時，自動 claim
     void tryClaimPairToken();
@@ -296,19 +304,37 @@ export default function LandingPage() {
 
           {!storeId ? (
             <div className="space-y-4">
-              <p className="text-base text-zinc-500">歡迎！請輸入您的門市代號以開始：</p>
+              <p className="text-base text-zinc-500">歡迎！請選擇您的門市以開始：</p>
               <form onSubmit={handleManualStoreSubmit} className="flex flex-col gap-3">
-                <input
-                  type="text"
-                  placeholder="例如: S001"
-                  value={inputStoreId}
-                  onChange={(e) => setInputStoreId(e.target.value)}
-                  className="w-full rounded-md border border-zinc-300 px-4 py-3 text-lg focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800"
-                  autoFocus
-                />
+                {stores.length > 0 ? (
+                  <select
+                    value={inputStoreId}
+                    onChange={(e) => setInputStoreId(e.target.value)}
+                    className="w-full appearance-none rounded-md border border-zinc-300 bg-white px-4 py-3 text-lg text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    required
+                    autoFocus
+                  >
+                    <option value="" disabled>請選擇門市…</option>
+                    {stores.map((s) => (
+                      <option key={s.id} value={s.code}>
+                        {s.name}（{s.code}）
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder="例如: S001"
+                    value={inputStoreId}
+                    onChange={(e) => setInputStoreId(e.target.value)}
+                    className="w-full rounded-md border border-zinc-300 px-4 py-3 text-lg focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800"
+                    autoFocus
+                  />
+                )}
                 <button
                   type="submit"
-                  className="w-full rounded-md bg-indigo-600 px-4 py-3 text-base font-medium text-white shadow hover:bg-indigo-700 transition"
+                  disabled={!inputStoreId}
+                  className="w-full rounded-md bg-indigo-600 px-4 py-3 text-base font-medium text-white shadow transition hover:bg-indigo-700 disabled:opacity-50"
                 >
                   進入門市
                 </button>
