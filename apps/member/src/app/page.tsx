@@ -90,18 +90,22 @@ export default function LandingPage() {
   const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
-    setStandalone(isStandalone());
+    const sa = isStandalone();
+    setStandalone(sa);
 
-    // 1. 已有 Session → 自動跳 /me
+    // 已綁(有 memberId)才跳走;只有 token 沒 member_id 不跳,避免跟 /shop 互推產生
+    // redirect loop。PWA standalone → /shop;LINE / 一般瀏覽器 → /me
+    const landing = sa ? "/shop" : "/me";
+
     const existing = getSession();
-    if (existing) {
-      window.location.href = "/shop";
+    if (existing && existing.memberId) {
+      window.location.href = landing;
       return;
     }
 
-    // 2. 監聽跨視窗登入（同 origin BroadcastChannel，桌機瀏覽器有用）
-    const unlisten = listenForSession(() => {
-      window.location.href = "/shop";
+    // 監聽跨視窗登入(同 origin BroadcastChannel,桌機瀏覽器有用)
+    const unlisten = listenForSession((s) => {
+      if (s.memberId) window.location.href = landing;
     });
 
     // 3. 從 LIFF 配對流程切回 PWA 時，自動 claim
