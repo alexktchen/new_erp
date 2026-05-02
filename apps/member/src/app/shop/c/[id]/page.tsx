@@ -348,14 +348,6 @@ function SkuRow({
     <div
       className={`flex items-center gap-3 px-4 py-3.5 ${isLast ? "" : "border-b border-[var(--separator)]"}`}
     >
-      <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl bg-[#7676801a]">
-        {item.image_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.image_url} alt="" className="absolute inset-0 h-full w-full object-cover" />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-2xl">📦</div>
-        )}
-      </div>
       <div className="min-w-0 flex-1">
         <div className="line-clamp-2 text-[16px] font-medium leading-tight text-[var(--foreground)]">
           {item.product_name ?? `SKU#${item.sku_id}`}
