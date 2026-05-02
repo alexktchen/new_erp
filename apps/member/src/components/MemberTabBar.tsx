@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -55,6 +56,21 @@ const tabs: Tab[] = [
 
 export default function MemberTabBar() {
   const pathname = usePathname() ?? "";
+  const [hide, setHide] = useState(false);
+
+  // 從 LINE app 的 LIFF webview 進來,不顯示 tab bar(整個 PWA 導航體驗只屬於
+  // 加入主畫面後的 standalone 模式)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const ua = navigator.userAgent;
+    const isLine = /Line\//i.test(ua);
+    const isStandalone =
+      (window.navigator as { standalone?: boolean }).standalone === true ||
+      window.matchMedia("(display-mode: standalone)").matches;
+    setHide(isLine && !isStandalone);
+  }, []);
+
+  if (hide) return null;
 
   return (
     <nav

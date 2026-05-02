@@ -433,5 +433,7 @@ async function runLiffSession(
   });
   if (data.line_name)    frag.set("line_name",    String(data.line_name));
   if (data.line_picture) frag.set("line_picture", String(data.line_picture));
-  window.location.href = `/shop#${frag.toString()}`;
+  // LIFF 自然登入(沒帶 pair) = 在 LINE webview 內,只停在 /me 會員中心。
+  // PWA 端的完整商店體驗在 standalone 才開放。
+  window.location.href = `/me#${frag.toString()}`;
 }

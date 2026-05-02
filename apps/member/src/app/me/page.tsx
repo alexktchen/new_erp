@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
 import PageShell from "@/components/PageShell";
+import { PushNotificationManager } from "@/components/PushNotificationManager";
 
 type MemberData = {
   member_id: number;
@@ -18,9 +20,26 @@ type MemberData = {
   status: string;
 };
 
+type Overview = {
+  store: {
+    id: number;
+    code: string;
+    name: string;
+    banner_url: string | null;
+    description: string | null;
+    payment_methods_text: string | null;
+    shipping_methods_text: string | null;
+  };
+  receivable_amount: number;
+  active_orders_count: number;
+};
+
 export default function MePage() {
+  const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [me, setMe] = useState<MemberData | null>(null);
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [isPWA, setIsPWA] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lineName, setLineName] = useState<string | null>(null);
   const [linePicture, setLinePicture] = useState<string | null>(null);
@@ -66,6 +85,13 @@ export default function MePage() {
   }
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      setIsPWA(
+        (window.navigator as { standalone?: boolean }).standalone === true ||
+        window.matchMedia("(display-mode: standalone)").matches,
+      );
+    }
+
     consumeFragmentToSession();
     const s = getSession();
     if (!s) {
@@ -80,13 +106,17 @@ export default function MePage() {
 
     (async () => {
       try {
-        const data = await callLiffApi<MemberData>(s.token, { action: "get_me" });
-        setMe(data);
+        const [meData, ovData] = await Promise.all([
+          callLiffApi<MemberData>(s.token, { action: "get_me" }),
+          callLiffApi<Overview>(s.token, { action: "get_overview" }).catch(() => null),
+        ]);
+        setMe(meData);
+        if (ovData) setOverview(ovData);
         setForm({
-          name: data.name ?? "",
-          phone: data.phone ?? "",
-          birthday: data.birthday ?? "",
-          email: data.email ?? "",
+          name: meData.name ?? "",
+          phone: meData.phone ?? "",
+          birthday: meData.birthday ?? "",
+          email: meData.email ?? "",
         });
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -201,6 +231,101 @@ export default function MePage() {
           )}
         </section>
 
+        {/* 在 LINE 內 → 引導去裝 PWA;在 PWA 內 → 引導去逛商品 */}
+        {!isPWA ? (
+          <a
+            href="/install"
+            className="block overflow-hidden rounded-2xl bg-gradient-to-r from-[var(--brand-strong)] to-[#ff9500] p-5 text-left text-white shadow-[0_2px_8px_rgba(0,0,0,0.08)] active:opacity-90"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[14px] font-medium opacity-90">行動下單更方便</div>
+                <div className="mt-0.5 text-[22px] font-bold leading-tight">安裝 App →</div>
+                <div className="mt-1 text-[13px] opacity-85">加入主畫面後可離線、推播、一鍵下單</div>
+              </div>
+              <div className="text-5xl">📱</div>
+            </div>
+          </a>
+        ) : (
+          <button
+            onClick={() => router.push("/shop")}
+            className="block w-full overflow-hidden rounded-2xl bg-gradient-to-r from-[var(--brand-strong)] to-[#ff9500] p-5 text-left text-white shadow-[0_2px_8px_rgba(0,0,0,0.08)] active:opacity-90"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[14px] font-medium opacity-90">立即下單</div>
+                <div className="mt-0.5 text-[22px] font-bold leading-tight">逛商品 →</div>
+                <div className="mt-1 text-[13px] opacity-85">看本店進行中的團購活動</div>
+              </div>
+              <div className="text-5xl">🛒</div>
+            </div>
+          </button>
+        )}
+
+        {/* 未結金額 + 進行中訂單 */}
+        {overview && (
+          <section className="rounded-2xl bg-[var(--card-bg)] px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+            <div className="text-[14px] text-[var(--secondary-label)]">未結單金額</div>
+            <div className="mt-1 flex items-baseline gap-1">
+              <span className="text-[34px] font-semibold tabular-nums text-[var(--brand-strong)] leading-none">
+                ${Number(overview.receivable_amount).toLocaleString()}
+              </span>
+            </div>
+            {overview.active_orders_count > 0 && (
+              <a
+                href="/orders"
+                className="mt-3 flex w-full items-center justify-between rounded-xl bg-[#7676801a] px-3 py-3 text-[16px] text-[var(--foreground)] active:bg-[#76768033]"
+              >
+                <span>進行中訂單 {overview.active_orders_count} 筆</span>
+                <span className="text-[var(--ios-gray)]">›</span>
+              </a>
+            )}
+          </section>
+        )}
+
+        {/* 店家資訊 */}
+        {overview && (
+          <section>
+            <div className="px-4 pb-1 pt-2 text-[12px] uppercase tracking-wide text-[var(--tertiary-label)]">
+              {overview.store.name}
+            </div>
+            <div className="overflow-hidden rounded-2xl bg-[var(--card-bg)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+              {overview.store.banner_url && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={overview.store.banner_url}
+                  alt=""
+                  className="h-36 w-full object-cover"
+                />
+              )}
+              {overview.store.description && (
+                <div className="border-b border-[var(--separator)] px-4 py-3.5">
+                  <div className="text-[13px] text-[var(--secondary-label)]">賣場介紹</div>
+                  <p className="mt-0.5 whitespace-pre-wrap text-[15px] text-[var(--foreground)]">
+                    {overview.store.description}
+                  </p>
+                </div>
+              )}
+              {overview.store.payment_methods_text && (
+                <div className="border-b border-[var(--separator)] px-4 py-3.5">
+                  <div className="text-[13px] text-[var(--secondary-label)]">付款</div>
+                  <p className="mt-0.5 whitespace-pre-wrap text-[15px] text-[var(--foreground)]">
+                    {overview.store.payment_methods_text}
+                  </p>
+                </div>
+              )}
+              {overview.store.shipping_methods_text && (
+                <div className="px-4 py-3.5">
+                  <div className="text-[13px] text-[var(--secondary-label)]">出貨</div>
+                  <p className="mt-0.5 whitespace-pre-wrap text-[15px] text-[var(--foreground)]">
+                    {overview.store.shipping_methods_text}
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
         {!editing ? (
           /* 檢視模式 — iOS settings-style */
           <section>
@@ -297,8 +422,13 @@ export default function MePage() {
           </form>
         )}
 
+        {/* 推播設定 — 只在 PWA standalone 才有意義(LINE webview 推不了) */}
+        {isPWA && (
+          <PushNotificationManager jwt={getSession()?.token ?? null} />
+        )}
+
         <p className="px-4 pt-2 text-[12px] text-[var(--tertiary-label)]">
-          會員卡 QR、點數、訂單等功能尚未上線（MVP-1 開發中）。
+          會員卡 QR、點數等更多功能持續開發中。
         </p>
       </div>
     </PageShell>

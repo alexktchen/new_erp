@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import MemberTabBar from "./MemberTabBar";
 
 /**
@@ -18,10 +19,24 @@ export default function PageShell({
   rightAction?: React.ReactNode;
   children: React.ReactNode;
 }) {
+  const [tabBarHidden, setTabBarHidden] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const isLine = /Line\//i.test(navigator.userAgent);
+    const isStandalone =
+      (window.navigator as { standalone?: boolean }).standalone === true ||
+      window.matchMedia("(display-mode: standalone)").matches;
+    setTabBarHidden(isLine && !isStandalone);
+  }, []);
+
   return (
     <div
       className="min-h-[100dvh] bg-[var(--background)]"
-      style={{ paddingBottom: "calc(92px + env(safe-area-inset-bottom))" }}
+      style={{
+        paddingBottom: tabBarHidden
+          ? "env(safe-area-inset-bottom)"
+          : "calc(92px + env(safe-area-inset-bottom))",
+      }}
     >
       <main className="mx-auto w-full max-w-md">
         {title !== undefined && (
