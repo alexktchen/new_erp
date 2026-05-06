@@ -12,6 +12,9 @@ type Member = {
   member_no: string;
   name: string | null;
   phone: string | null;
+  admin_note: string | null;
+  no_notify_pickup: boolean;
+  no_new_order: boolean;
 };
 
 type OpenOrder = {
@@ -21,6 +24,9 @@ type OpenOrder = {
   pickup_deadline: string | null;
   pickup_store_id: number | null;
   discount_amount: number;
+  ready_at: string | null;       // 到貨時間 (shipping → ready 自動寫入)
+  last_notify_pickup_at: string | null;
+  notify_pickup_count: number;
   pickup_ready?: boolean; // 從 v_order_pickup_ready merge 進來
   campaign: { id: number; campaign_no: string; name: string } | null;
   store: { id: number; name: string } | null;
@@ -90,7 +96,7 @@ function PickupPageContent() {
       const safe = q.replace(/[%,()]/g, " ");
       const { data: ms, error: e1 } = await sb
         .from("members")
-        .select("id, member_no, name, phone")
+        .select("id, member_no, name, phone, admin_note, no_notify_pickup, no_new_order")
         .or(`name.ilike.%${safe}%,phone.ilike.%${safe}%,member_no.ilike.%${safe}%`)
         .neq("status", "deleted")
         .order("last_visit_at", { ascending: false, nullsFirst: false })
@@ -103,13 +109,15 @@ function PickupPageContent() {
       const { data: ords, error: e2 } = await sb
         .from("customer_orders")
         .select(
-          `id, order_no, status, pickup_deadline, pickup_store_id, discount_amount, member_id,
+          `id, order_no, status, pickup_deadline, pickup_store_id, discount_amount, ready_at, last_notify_pickup_at, notify_pickup_count, member_id,
            campaign:group_buy_campaigns(id, campaign_no, name),
            store:stores!customer_orders_pickup_store_id_fkey(id, name),
            items:customer_order_items(id, qty, unit_price, status, sku:skus(variant_name, product_name, product:products(images)))`,
         )
         .in("member_id", list.map((m) => m.id))
         .in("status", ACTIVE_STATUSES)
+        // 到貨時間早 (久) 的排前面（催客人取貨優先）；尚未到貨的擺後面
+        .order("ready_at", { ascending: true, nullsFirst: false })
         .order("updated_at", { ascending: false });
       if (e2) { setError(e2.message); return; }
 
@@ -130,6 +138,17 @@ function PickupPageContent() {
         const arr = m.get(r.member_id) ?? [];
         arr.push(r);
         m.set(r.member_id, arr);
+      }
+      // 依「可取貨」優先 + 到貨時間久的優先（催客人取貨）
+      // pickup_ready=true 在前；group 內 ready_at ASC NULLS LAST；末層 updated_at DESC
+      for (const arr of m.values()) {
+        arr.sort((a, b) => {
+          if (a.pickup_ready !== b.pickup_ready) return a.pickup_ready ? -1 : 1;
+          const aT = a.ready_at ? Date.parse(a.ready_at) : Number.POSITIVE_INFINITY;
+          const bT = b.ready_at ? Date.parse(b.ready_at) : Number.POSITIVE_INFINITY;
+          if (aT !== bT) return aT - bT;
+          return 0;
+        });
       }
       setOrders(m);
     } finally {
@@ -202,6 +221,58 @@ function PickupPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadTick]);
 
+  // 通知個別客人來取貨：寫 in-app + push（admin-notify edge fn）+ 更新 last_notify_pickup_at
+  const [notifyingId, setNotifyingId] = useState<number | null>(null);
+  async function notifyPickup(member: Member, order: OpenOrder) {
+    if (member.no_notify_pickup) {
+      alert(`${member.name ?? member.member_no} 已設「不通知」，無法發送取貨通知。`);
+      return;
+    }
+    if (!order.pickup_ready) {
+      alert("此訂單尚未到貨，無法通知");
+      return;
+    }
+    if (notifyingId != null) return;
+    const since = order.last_notify_pickup_at
+      ? `（已通知 ${order.notify_pickup_count} 次，上次 ${new Date(order.last_notify_pickup_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}）`
+      : "";
+    if (!confirm(`要通知 ${member.name ?? member.member_no} 來取「${order.campaign?.name ?? "—"}」嗎？${since}`)) return;
+    setNotifyingId(order.id);
+    setError(null);
+    try {
+      const sb = getSupabase();
+      const { data: sess } = await sb.auth.getSession();
+      const token = sess.session?.access_token;
+      const operator = sess.session?.user?.id;
+      if (!token || !operator) { setError("尚未登入"); return; }
+
+      const resp = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/admin-notify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          member_id: member.id,
+          title: "您的訂單已到貨可取",
+          message: `「${order.campaign?.name ?? ""}」已在 ${order.store?.name ?? ""} 等候您取貨，請儘速前來。`,
+          url: "/orders",
+          category: "order_arrived",
+        }),
+      });
+      const result = await resp.json();
+      if (!resp.ok) { alert(`推播失敗：${result.error || resp.status}`); return; }
+
+      const { error: rpcErr } = await sb.rpc("rpc_mark_pickup_notified", {
+        p_order_id: order.id,
+        p_operator: operator,
+      });
+      if (rpcErr) { alert(`記錄失敗：${rpcErr.message}`); return; }
+
+      alert(`已通知（推播 ${result.sent ?? 0} 個裝置）`);
+      setReloadTick((n) => n + 1);
+    } finally {
+      setNotifyingId(null);
+    }
+  }
+
   // 從 /members 點「查訂單」帶 ?q= 進來,首次自動觸發搜尋
   useEffect(() => {
     if (!autoSearchedRef.current && initialQuery.trim().length >= 2) {
@@ -265,8 +336,19 @@ function PickupPageContent() {
               const memberOrders = orders.get(m.id) ?? [];
               return (
                 <div key={m.id} className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-                  <div className="mb-2 flex items-baseline gap-3">
+                  <div className="mb-2 flex flex-wrap items-baseline gap-2">
                     <h2 className="text-base font-semibold">{m.name ?? "—"}</h2>
+                    {m.admin_note && (
+                      <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300" title="管理員備註（不對外顯示）">
+                        🔒 {m.admin_note}
+                      </span>
+                    )}
+                    {m.no_notify_pickup && (
+                      <span className="rounded bg-zinc-200 px-2 py-0.5 text-[10px] font-medium text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200">🔕 不通知</span>
+                    )}
+                    {m.no_new_order && (
+                      <span className="rounded bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-800 dark:bg-red-950 dark:text-red-300">🚫 禁加單</span>
+                    )}
                     <span className="font-mono text-xs text-zinc-500">{m.member_no}</span>
                     <span className="font-mono text-sm text-zinc-700 dark:text-zinc-300">{m.phone ?? "—"}</span>
                     {memberOrders.length > 0 && (() => {
@@ -310,17 +392,11 @@ function PickupPageContent() {
                             <div className="flex-1 text-sm">
                               <div className="flex items-baseline gap-2">
                                 <span>{o.campaign?.name ?? "(未知活動)"}</span>
-                                <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-                                  o.status === "ready" ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" :
-                                  o.status === "partially_completed" ? "bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300" :
-                                  o.status === "shipping" ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" :
-                                  "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                                }`}>
-                                  {o.status === "shipping" ? "運送中" :
-                                   o.status === "ready" ? "可取貨" :
-                                   o.status === "partially_completed" ? "部分已取" :
-                                   o.status}
-                                </span>
+                                {o.status === "partially_completed" && (
+                                  <span className="rounded bg-teal-100 px-2 py-0.5 text-[10px] font-medium text-teal-800 dark:bg-teal-950 dark:text-teal-300">
+                                    部分已取
+                                  </span>
+                                )}
                               </div>
                               <ul className="mt-0.5 space-y-0.5 text-xs text-zinc-700 dark:text-zinc-300">
                                 {activeItems(o).map((it) => (
@@ -332,6 +408,17 @@ function PickupPageContent() {
                               </ul>
                               <div className="mt-1 text-xs text-zinc-500">
                                 取貨店：{o.store?.name ?? "—"}
+                                {o.ready_at ? (
+                                  <span className="ml-2 font-semibold text-emerald-700 dark:text-emerald-400">
+                                    到貨：{new Date(o.ready_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}
+                                  </span>
+                                ) : canPickup ? (
+                                  <span className="ml-2 font-semibold text-emerald-700 dark:text-emerald-400">
+                                    ✅ 已到貨
+                                  </span>
+                                ) : (
+                                  <span className="ml-2 text-zinc-400">⏳ 未到貨</span>
+                                )}
                                 {o.pickup_deadline && <span className="ml-2">截止：{o.pickup_deadline}</span>}
                                 {canPickup ? (
                                   <>
@@ -346,8 +433,21 @@ function PickupPageContent() {
                                 ) : (
                                   <span className="ml-2 text-amber-600 dark:text-amber-400">⏳ 分店尚未收貨，無法取貨</span>
                                 )}
+                                {o.last_notify_pickup_at && (
+                                  <span className="ml-2 text-[11px] text-blue-700 dark:text-blue-300" title={`已通知 ${o.notify_pickup_count} 次`}>
+                                    📨 上次通知 {new Date(o.last_notify_pickup_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}
+                                  </span>
+                                )}
                               </div>
                             </div>
+                            <button
+                              onClick={() => notifyPickup(m, o)}
+                              disabled={!canPickup || notifyingId === o.id || m.no_notify_pickup}
+                              title={m.no_notify_pickup ? "此會員已設「不通知」" : !canPickup ? "尚未到貨無法通知" : "通知顧客來取貨（推播 + 站內訊息）"}
+                              className="rounded-md border border-blue-300 px-2 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950"
+                            >
+                              {notifyingId === o.id ? "⌛" : "🔔 通知"}
+                            </button>
                             <button
                               onClick={() => setPickup({ orderId: o.id, orderNo: o.order_no })}
                               disabled={!canPickup || pickableCount === 0}
