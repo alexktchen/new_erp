@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { useDefaultStoreFromUser } from "@/lib/useDefaultStoreFromUser";
 import { Modal } from "@/components/Modal";
@@ -35,6 +36,17 @@ type Store = { id: number; code: string; name: string };
 const PAGE_SIZE = 50;
 
 export default function MembersListPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-zinc-500">載入中…</div>}>
+      <MembersListBody />
+    </Suspense>
+  );
+}
+
+function MembersListBody() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const idFromUrl = searchParams.get("id");
   const [rows, setRows] = useState<MemberRow[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +58,7 @@ export default function MembersListPage() {
   const [sortBy, setSortBy] = useState<SortKey>("updated_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [page, setPage] = useState(1);
+  const [showMerged, setShowMerged] = useState(false);
 
   const [stores, setStores] = useState<Store[]>([]);
   useDefaultStoreFromUser(stores, storeId, setStoreId);
@@ -58,6 +71,18 @@ export default function MembersListPage() {
     | null
   >(null);
 
+  // URL ?id=N → 自動開 detail modal（讓外部 link 進來能直接看 detail）
+  useEffect(() => {
+    if (!idFromUrl) return;
+    const idNum = Number(idFromUrl);
+    if (!Number.isFinite(idNum) || idNum <= 0) return;
+    setModal((cur) =>
+      cur && cur.mode === "detail" && cur.memberId === idNum
+        ? cur
+        : { mode: "detail", memberId: idNum, memberNo: "" }
+    );
+  }, [idFromUrl]);
+
   useEffect(() => {
     const t = setTimeout(() => {
       setQuery(queryDraft);
@@ -68,7 +93,7 @@ export default function MembersListPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [storeId, sortBy, sortDir]);
+  }, [storeId, sortBy, sortDir, showMerged]);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,6 +131,7 @@ export default function MembersListPage() {
           q = q.or(`name.ilike.%${safe}%,phone.ilike.%${safe}%,member_no.ilike.%${safe}%`);
         }
         if (storeId) q = q.eq("home_store_id", Number(storeId));
+        if (!showMerged) q = q.not("status", "in", "(merged,deleted)");
 
         const { data, count, error } = await q;
         if (cancelled) return;
@@ -146,7 +172,7 @@ export default function MembersListPage() {
     return () => {
       cancelled = true;
     };
-  }, [query, storeId, sortBy, sortDir, page, reloadTick]);
+  }, [query, storeId, sortBy, sortDir, page, reloadTick, showMerged]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const fromIdx = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
@@ -199,6 +225,16 @@ export default function MembersListPage() {
         </select>
       </div>
 
+      <label className="flex items-center gap-2 text-xs text-zinc-500">
+        <input
+          type="checkbox"
+          checked={showMerged}
+          onChange={(e) => setShowMerged(e.target.checked)}
+          className="h-3.5 w-3.5"
+        />
+        <span>顯示已合併 / 已刪除（預設只看活躍會員）</span>
+      </label>
+
       {error && (
         <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
           <p className="font-medium">讀取失敗</p>
@@ -238,10 +274,16 @@ export default function MembersListPage() {
                     <Td className="font-mono">
                       <button
                         onClick={() => setModal({ mode: "detail", memberId: r.id, memberNo: r.member_no })}
-                        className="hover:underline"
+                        className={r.status === "merged" || r.status === "deleted" ? "text-zinc-400 hover:underline" : "hover:underline"}
                       >
                         {r.member_no}
                       </button>
+                      {r.status === "merged" && (
+                        <span className="ml-2 rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-normal text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300">已合併</span>
+                      )}
+                      {r.status === "deleted" && (
+                        <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-normal text-red-700 dark:bg-red-950 dark:text-red-300">已刪除</span>
+                      )}
                     </Td>
                     <Td>
                       <div className="flex items-center gap-2">
@@ -301,10 +343,16 @@ export default function MembersListPage() {
 
       <Modal
         open={!!modal}
-        onClose={() => setModal(null)}
+        onClose={() => {
+          setModal(null);
+          // 從 URL ?id= 進來開的 detail modal，關閉同步清 URL，避免 back 又自動打開
+          if (modal?.mode === "detail" && idFromUrl) {
+            router.replace("/members");
+          }
+        }}
         title={
           modal?.mode === "edit"   ? `編輯會員 #${modal.values.member_no}` :
-          modal?.mode === "detail" ? `會員明細 #${modal.memberNo}` :
+          modal?.mode === "detail" ? `會員明細${modal.memberNo ? ` #${modal.memberNo}` : ""}` :
           "新增會員"
         }
         maxWidth={modal?.mode === "detail" ? "max-w-4xl" : "max-w-3xl"}
