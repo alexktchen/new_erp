@@ -6,10 +6,12 @@ import { OrderTransferModal } from "@/components/OrderTransferModal";
 import { PickupDialog } from "@/components/PickupDialog";
 import { AidOrderTimeline } from "@/components/AidOrderTimeline";
 import { OrderAuditDrawer } from "@/components/OrderAuditDrawer";
+import { WalletPayOrderModal } from "@/components/WalletPayOrderModal";
 import { EditableNumber, EditableText } from "@/components/EditableCell";
 import { EditableDiscount, deriveDiscount, type DiscountValue } from "@/components/EditableDiscount";
 import { useAuth } from "@/components/AuthProvider";
 import { useRole } from "@/lib/role";
+import { orderStatusLabel as statusLabel, canPayWithWallet } from "@/lib/orderStatus";
 import { withBasePath } from "@/lib/basePath";
 import { translateRpcError } from "@/lib/rpcError";
 
@@ -27,6 +29,9 @@ type OrderHead = {
   is_air_transfer: boolean | null;
   discount_amount: number;
   discount_percent: number;
+  wallet_paid_amount: number;
+  payment_status: string | null;
+  paid_at: string | null;
   notes: string | null;
   member: { id: number; name: string | null; phone: string | null; member_no: string } | null;
   campaign: { id: number; campaign_no: string; name: string } | null;
@@ -60,10 +65,11 @@ function computeLineSubtotal(qty: number, unitPrice: number, d: DiscountValue): 
 function applyOrderDiscount(subtotal: number, d: DiscountValue): { deduction: number; payable: number } {
   const pct = d.kind === "percent" ? Number(d.value) : 0;
   const amt = d.kind === "amount" ? Number(d.value) : 0;
-  const pctDed = Math.round(subtotal * pct) / 100;
+  // 應收四捨五入到整數 NTD（對齊 v_customer_order_summary + rpc_wallet_pay_order）
+  const payable = Math.max(0, Math.round(subtotal * (1 - pct / 100) - amt));
   return {
-    deduction: pctDed + amt,
-    payable: Math.max(0, subtotal - pctDed - amt),
+    deduction: subtotal - payable,
+    payable,
   };
 }
 
@@ -90,13 +96,7 @@ type TimelineStep = {
   detailOnClick?: () => void;
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  pending: "待確認", confirmed: "已確認", reserved: "已保留", shipping: "派貨中",
-  ready: "可取貨", partially_ready: "部分可取", partially_completed: "部分取貨",
-  completed: "已完成", expired: "逾期", cancelled: "已取消",
-  transferred_out: "已轉出", picked_up: "已取貨",
-};
-const statusLabel = (s: string) => STATUS_LABEL[s] ?? s;
+// STATUS_LABEL / statusLabel imported from @/lib/orderStatus
 
 function staffLabel(uid: string | null, names: Map<string, string>): string {
   if (!uid) return "—";
@@ -123,6 +123,7 @@ export function OrderDetail({
   const [reloadTick, setReloadTick] = useState(0);
   const [transferOpen, setTransferOpen] = useState(false);
   const [pickupOpen, setPickupOpen] = useState(false);
+  const [walletPayOpen, setWalletPayOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [draft, setDraft] = useState<OrderDraft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
@@ -157,7 +158,7 @@ export function OrderDetail({
       const sb = getSupabase();
       const [hRes, iRes] = await Promise.all([
         sb.from("customer_orders")
-          .select("id, order_no, status, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, transferred_from_order_id, is_air_transfer, discount_amount, discount_percent, notes, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
+          .select("id, order_no, status, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, transferred_from_order_id, is_air_transfer, discount_amount, discount_percent, wallet_paid_amount, payment_status, paid_at, notes, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
           .eq("id", orderId).maybeSingle(),
         sb.from("customer_order_items")
           .select("id, qty, unit_price, status, source, notes, discount_amount, discount_percent, created_at, updated_at, created_by, updated_by, sku:skus(id, sku_code, product_name, variant_name)")
@@ -533,6 +534,30 @@ export function OrderDetail({
               </span>
             )}
             <span className="text-base">= 應收 <span className="font-semibold">${payableAmount}</span></span>
+            {Number(head.wallet_paid_amount) > 0 && (
+              <span className="text-zinc-500">− 已用儲值金 ${Number(head.wallet_paid_amount)}</span>
+            )}
+            {(() => {
+              const balDue = Math.max(0, payableAmount - Number(head.wallet_paid_amount ?? 0));
+              const isPaid = head.payment_status === "paid";
+              const canPay = !!head.member && balDue > 0 && canPayWithWallet(head.status, head.payment_status);
+              return (
+                <>
+                  {Number(head.wallet_paid_amount) > 0 && (
+                    <span className="text-base">= 應付剩餘 <span className={`font-semibold ${balDue === 0 ? "text-emerald-700 dark:text-emerald-400" : ""}`}>${balDue}</span></span>
+                  )}
+                  {isPaid && (
+                    <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">✅ 已付清</span>
+                  )}
+                  {canPay && (
+                    <button
+                      onClick={() => setWalletPayOpen(true)}
+                      className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
+                    >💳 用儲值金結帳</button>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -640,6 +665,18 @@ export function OrderDetail({
         onClose={() => setAuditOpen(false)}
         orderId={head.id}
       />
+      {head.member && (
+        <WalletPayOrderModal
+          open={walletPayOpen}
+          onClose={() => setWalletPayOpen(false)}
+          onSuccess={() => setReloadTick((n) => n + 1)}
+          orderId={head.id}
+          orderNo={head.order_no}
+          memberId={head.member.id}
+          memberName={head.member.name}
+          balanceDue={Math.max(0, payableAmount - Number(head.wallet_paid_amount ?? 0))}
+        />
+      )}
     </div>
   );
 }
