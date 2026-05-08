@@ -298,15 +298,17 @@ export default function MePage() {
                 ${Number(overview.receivable_amount).toLocaleString()}
               </span>
             </div>
-            {overview.active_orders_count > 0 && (
-              <a
-                href="/orders"
-                className="mt-3 flex w-full items-center justify-between rounded-xl bg-[#7676801a] px-3 py-3 text-[16px] text-[var(--foreground)] active:bg-[#76768033]"
-              >
-                <span>進行中訂單 {overview.active_orders_count} 筆</span>
-                <span className="text-[var(--ios-gray)]">›</span>
-              </a>
-            )}
+            <a
+              href="/orders"
+              className="mt-3 flex w-full items-center justify-between rounded-xl bg-[#7676801a] px-3 py-3 text-[16px] text-[var(--foreground)] active:bg-[#76768033]"
+            >
+              <span>
+                {overview.active_orders_count > 0
+                  ? `進行中訂單 ${overview.active_orders_count} 筆`
+                  : "查看我的訂單"}
+              </span>
+              <span className="text-[var(--ios-gray)]">›</span>
+            </a>
           </section>
         )}
 

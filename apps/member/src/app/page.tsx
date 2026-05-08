@@ -155,11 +155,6 @@ export default function LandingPage() {
             localStorage.setItem("last_store_id", s);
           }
 
-          if (!s) {
-            setStatus("idle");
-            return;
-          }
-
           if (liff.isInClient()) {
             setStatus("liff_auth");
             if (!liff.isLoggedIn()) {
@@ -173,7 +168,18 @@ export default function LandingPage() {
             if (!idToken) throw new Error("LIFF getIDToken returned null");
 
             const pairCode = readPairFromUrl();
-            await runLiffSession(idToken, s, pairCode);
+            try {
+              // 沒帶 store 也試 — 後端會用 line_user_id 找既有 binding
+              await runLiffSession(idToken, s, pairCode);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              if (msg.includes("store_required")) {
+                // 首次註冊、又沒帶 store → 顯示 store picker
+                setStatus("idle");
+                return;
+              }
+              throw e;
+            }
 
             if (pairCode) {
               setStatus("pair_done");
@@ -181,6 +187,11 @@ export default function LandingPage() {
               try { liff.closeWindow(); } catch { /* noop */ }
               return;
             }
+            return;
+          }
+
+          if (!s) {
+            setStatus("idle");
             return;
           }
         } catch (e) {
@@ -431,7 +442,7 @@ function readStore(): string | null {
 
 async function runLiffSession(
   idToken: string,
-  storeId: string,
+  storeId: string | null,
   pairCode: string | null,
 ) {
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -439,8 +450,8 @@ async function runLiffSession(
 
   const body: Record<string, string> = {
     id_token: idToken,
-    store: storeId,
   };
+  if (storeId) body.store = storeId;
   if (pairCode) body.pair_code = pairCode;
 
   const resp = await fetch(`${base}/functions/v1/liff-session`, {

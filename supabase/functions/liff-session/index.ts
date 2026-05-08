@@ -4,10 +4,14 @@
 // 前端流程：liff.init() → liff.getIDToken() → POST 到這支
 //
 // 流程：
-//   1. 收 id_token + store
+//   1. 收 id_token (+ optional store)
 //   2. 驗 id_token（LINE verify API）
-//   3. 查綁定、未綁 → auto-register + 下載頭像
-//   4. 簽 Supabase-compatible JWT 回傳
+//   3. 決定 store：
+//      - 沒帶 store → 用 line_user_id 找既有 binding（最近一筆）
+//      - 帶 store → 優先用既有 binding 的 store；若無 → 用帶來的 store 註冊
+//      - 無 binding 又無 store → 回 store_required（首次註冊必須選店）
+//   4. 未綁 → auto-register
+//   5. 簽 Supabase-compatible JWT 回傳
 //
 // 跟 line-oauth-callback 差別：
 //   - 不用 state / code exchange（LIFF 直接給 id_token）
@@ -29,8 +33,10 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json() as { id_token?: string; store?: string; pair_code?: string };
     if (!body.id_token) return json({ error: "id_token required" }, 400);
-    if (!body.store)    return json({ error: "store required" }, 400);
     const pairCode = typeof body.pair_code === "string" ? body.pair_code.trim() : "";
+    const incomingStore = typeof body.store === "string" && body.store.trim().length > 0
+      ? body.store.trim()
+      : null;
 
     const channelId   = requireEnv("LINE_LIFF_CHANNEL_ID"); // 可跟 LINE_CHANNEL_ID 相同、或獨立 LIFF channel
     const jwtSecret   = requireEnv("PROJECT_JWT_SECRET");
@@ -44,30 +50,42 @@ Deno.serve(async (req) => {
       channelId,
     });
     const lineUserId = payload.sub;
-    const storeKey   = String(body.store);
 
-    // 1b) 解析 store key (code "S001" 或 numeric "1") → canonical { id, code }
-    const resolved = await resolveStore(supabaseUrl, serviceKey, tenantId, storeKey);
-    if (!resolved) return json({ error: "store_not_found", detail: storeKey }, 400);
-    const storeNumericId = resolved.id;
-    const storeCode = resolved.code;
-
-    // 2) lookup binding
-    const bindingUrl =
+    // 2) 先用 line_user_id 找既有 binding（不限 store）— 回頭客直接命中
+    const existingUrl =
       `${supabaseUrl}/rest/v1/member_line_bindings` +
-      `?select=member_id&tenant_id=eq.${tenantId}` +
-      `&store_id=eq.${storeNumericId}&line_user_id=eq.${lineUserId}` +
-      `&unbound_at=is.null&limit=1`;
-
-    const resp = await fetch(bindingUrl, {
+      `?select=member_id,store_id,bound_at&tenant_id=eq.${tenantId}` +
+      `&line_user_id=eq.${lineUserId}&unbound_at=is.null` +
+      `&order=bound_at.desc&limit=1`;
+    const existingResp = await fetch(existingUrl, {
       headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
     });
-    if (!resp.ok) throw new Error(`binding lookup ${resp.status}: ${await resp.text()}`);
-    const rows = await resp.json() as Array<{ member_id: number }>;
-    let memberId: number | null = rows.length > 0 ? rows[0].member_id : null;
+    if (!existingResp.ok) {
+      throw new Error(`binding lookup ${existingResp.status}: ${await existingResp.text()}`);
+    }
+    const existingRows = await existingResp.json() as Array<{ member_id: number; store_id: number }>;
 
-    // 3) 未綁 → auto-register
-    if (!memberId) {
+    let memberId: number | null = null;
+    let storeNumericId: number;
+    let storeCode: string;
+
+    if (existingRows.length > 0) {
+      // 回頭客：用既有 binding 的 store，忽略 URL ?store= 帶來的 store
+      memberId = existingRows[0].member_id;
+      storeNumericId = existingRows[0].store_id;
+      const resolved = await resolveStore(supabaseUrl, serviceKey, tenantId, String(storeNumericId));
+      if (!resolved) return json({ error: "store_not_found", detail: String(storeNumericId) }, 500);
+      storeCode = resolved.code;
+    } else {
+      // 沒 binding → 必須有 store 才能首次註冊
+      if (!incomingStore) {
+        return json({ error: "store_required", detail: "first registration requires store" }, 400);
+      }
+      const resolved = await resolveStore(supabaseUrl, serviceKey, tenantId, incomingStore);
+      if (!resolved) return json({ error: "store_not_found", detail: incomingStore }, 400);
+      storeNumericId = resolved.id;
+      storeCode = resolved.code;
+
       memberId = await autoRegister({
         supabaseUrl,
         serviceKey,
