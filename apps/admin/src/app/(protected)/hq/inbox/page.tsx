@@ -449,6 +449,207 @@ async function fetchShortageRows(
   return { rows, total };
 }
 
+// === ByIds 變體 — 給「全部」視圖分頁用(已從 v_hq_inbox 拿到 page keys 後,反查各表詳情) ===
+
+async function fetchRestockRowsByIds(sb: SBClient, ids: number[]): Promise<Row[]> {
+  if (ids.length === 0) return [];
+  const { data, error } = await sb
+    .from("restock_requests")
+    .select(
+      "id, status, notes, rejected_reason, linked_transfer_id, linked_pr_id, requested_at, stores!inner(name)",
+    )
+    .in("id", ids);
+  if (error) throw new Error("restock: " + error.message);
+  const rsRows = (data ?? []) as unknown as Array<RestockRaw & { stores?: { name: string } }>;
+  const lineMap = new Map<number, { count: number; total: number }>();
+  if (rsRows.length > 0) {
+    const { data: lineData } = await sb
+      .from("restock_request_lines")
+      .select("request_id, qty, unit_price")
+      .in("request_id", rsRows.map((r) => r.id));
+    for (const l of (lineData ?? []) as { request_id: number; qty: number; unit_price: number }[]) {
+      const slot = lineMap.get(l.request_id) ?? { count: 0, total: 0 };
+      slot.count += 1;
+      slot.total += Number(l.qty) * Number(l.unit_price);
+      lineMap.set(l.request_id, slot);
+    }
+  }
+  const xferIds = rsRows.map((r) => r.linked_transfer_id).filter((x): x is number => !!x);
+  const prIds = rsRows.map((r) => r.linked_pr_id).filter((x): x is number => !!x);
+  const xferNoMap = new Map<number, string>();
+  const prNoMap = new Map<number, string>();
+  if (xferIds.length > 0) {
+    const { data: xs } = await sb.from("transfers").select("id, transfer_no").in("id", xferIds);
+    for (const x of (xs ?? []) as { id: number; transfer_no: string }[]) xferNoMap.set(x.id, x.transfer_no);
+  }
+  if (prIds.length > 0) {
+    const { data: ps } = await sb.from("purchase_requests").select("id, pr_no").in("id", prIds);
+    for (const p of (ps ?? []) as { id: number; pr_no: string }[]) prNoMap.set(p.id, p.pr_no);
+  }
+  return rsRows.map((r) => ({
+    key: `restock-${r.id}`,
+    source: "restock" as const,
+    ts: new Date(r.requested_at).getTime(),
+    stage: classifyRestock(r.status),
+    raw: {
+      id: r.id,
+      status: r.status,
+      notes: r.notes,
+      rejected_reason: r.rejected_reason,
+      linked_transfer_id: r.linked_transfer_id,
+      linked_pr_id: r.linked_pr_id,
+      linked_transfer_no: r.linked_transfer_id ? xferNoMap.get(r.linked_transfer_id) ?? null : null,
+      linked_pr_no: r.linked_pr_id ? prNoMap.get(r.linked_pr_id) ?? null : null,
+      store_name: r.stores?.name ?? null,
+      requested_at: r.requested_at,
+      line_count: lineMap.get(r.id)?.count ?? 0,
+      total_amount: lineMap.get(r.id)?.total ?? 0,
+    },
+  }));
+}
+
+async function fetchTransferRowsByIds(sb: SBClient, ids: number[]): Promise<Row[]> {
+  if (ids.length === 0) return [];
+  const { data, error } = await sb
+    .from("transfers")
+    .select(
+      "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, shipped_at, received_at, created_at",
+    )
+    .in("id", ids);
+  if (error) throw new Error("transfers: " + error.message);
+  const trs = (data as TransferRaw[] | null) ?? [];
+  const locIds = Array.from(new Set(trs.flatMap((t) => [t.source_location, t.dest_location])));
+  const locNameMap = new Map<number, string>();
+  if (locIds.length > 0) {
+    const { data: lr } = await sb.from("locations").select("id, name").in("id", locIds);
+    for (const l of (lr ?? []) as { id: number; name: string }[]) locNameMap.set(l.id, l.name);
+  }
+  const tLineMap = new Map<number, number>();
+  if (trs.length > 0) {
+    const { data: tl } = await sb.from("transfer_items").select("transfer_id").in("transfer_id", trs.map((t) => t.id));
+    for (const it of (tl ?? []) as { transfer_id: number }[]) {
+      tLineMap.set(it.transfer_id, (tLineMap.get(it.transfer_id) ?? 0) + 1);
+    }
+  }
+  return trs.map((t) => ({
+    key: `transfer-${t.id}`,
+    source: "transfer" as const,
+    ts: new Date(t.created_at).getTime(),
+    stage: classifyTransfer(t),
+    raw: {
+      ...t,
+      source_name: locNameMap.get(t.source_location) ?? `#${t.source_location}`,
+      dest_name: locNameMap.get(t.dest_location) ?? `#${t.dest_location}`,
+      line_count: tLineMap.get(t.id) ?? 0,
+    },
+  }));
+}
+
+async function fetchAidRowsByIds(sb: SBClient, ids: number[]): Promise<Row[]> {
+  if (ids.length === 0) return [];
+  const { data, error } = await sb
+    .from("customer_orders")
+    .select(
+      `id, order_no, status, is_air_transfer, pickup_store_id, updated_at,
+       campaign:group_buy_campaigns(id, campaign_no, name),
+       store:stores!customer_orders_pickup_store_id_fkey(id, name),
+       items:customer_order_items!inner(id, source)`,
+    )
+    .eq("items.source", "aid_transfer")
+    .in("id", ids);
+  if (error) throw new Error("aid: " + error.message);
+  const aidRows = (data ?? []) as unknown as Array<{
+    id: number;
+    order_no: string;
+    status: AidStatus;
+    is_air_transfer: boolean | null;
+    pickup_store_id: number | null;
+    updated_at: string;
+    campaign?: { id: number; campaign_no: string; name: string } | null;
+    store?: { id: number; name: string } | null;
+    items?: { id: number }[];
+  }>;
+  return aidRows.map((a) => ({
+    key: `aid-${a.id}`,
+    source: "aid" as const,
+    ts: new Date(a.updated_at).getTime(),
+    stage: classifyAid(a.status),
+    raw: {
+      id: a.id,
+      order_no: a.order_no,
+      status: a.status,
+      is_air_transfer: a.is_air_transfer,
+      pickup_store_id: a.pickup_store_id,
+      store_name: a.store?.name ?? null,
+      campaign_no: a.campaign?.campaign_no ?? null,
+      updated_at: a.updated_at,
+      line_count: a.items?.length ?? 0,
+    },
+  }));
+}
+
+async function fetchShortageRowsByIds(sb: SBClient, ids: number[]): Promise<Row[]> {
+  if (ids.length === 0) return [];
+  const { data, error } = await sb
+    .from("v_order_shortage")
+    .select(
+      "order_id, order_no, member_id, store_name, order_status, shortage_resolution, shortage_notified_at, sku_id, product_name, variant_name, sku_code, order_qty, demand_unfulfillable, order_updated_at",
+    )
+    .in("order_id", ids);
+  if (error) throw new Error("shortage: " + error.message);
+  type ShortageRowRaw = {
+    order_id: number;
+    order_no: string;
+    member_id: number | null;
+    store_name: string | null;
+    order_status: string;
+    shortage_resolution: string | null;
+    shortage_notified_at: string | null;
+    sku_id: number;
+    product_name: string | null;
+    variant_name: string | null;
+    sku_code: string | null;
+    order_qty: number;
+    demand_unfulfillable: number;
+    order_updated_at: string;
+  };
+  const shortageRaw = (data ?? []) as ShortageRowRaw[];
+  const byOrder = new Map<number, ShortageRaw>();
+  for (const r of shortageRaw) {
+    let s = byOrder.get(r.order_id);
+    if (!s) {
+      s = {
+        order_id: r.order_id,
+        order_no: r.order_no,
+        member_id: r.member_id,
+        store_name: r.store_name,
+        order_status: r.order_status,
+        shortage_resolution: r.shortage_resolution,
+        shortage_notified_at: r.shortage_notified_at,
+        short_items: [],
+        total_unfulfillable: 0,
+        order_updated_at: r.order_updated_at,
+      };
+      byOrder.set(r.order_id, s);
+    }
+    const skuLabel = `${r.product_name ?? ""}${r.variant_name ? ` / ${r.variant_name}` : ""}`.trim() || `品項#${r.sku_id}`;
+    s.short_items.push({
+      sku_id: r.sku_id,
+      sku_label: r.sku_code ? `${r.sku_code} ${skuLabel}` : skuLabel,
+      order_qty: Number(r.order_qty),
+      demand_unfulfillable: Number(r.demand_unfulfillable),
+    });
+    s.total_unfulfillable += Number(r.demand_unfulfillable);
+  }
+  return Array.from(byOrder.values()).map((s) => ({
+    key: `shortage-${s.order_id}`,
+    source: "shortage" as const,
+    ts: new Date(s.order_updated_at).getTime(),
+    stage: classifyShortage(s.shortage_resolution),
+    raw: s,
+  }));
+}
+
 export default function HqInboxPage() {
   return (
     <Suspense fallback={<div className="p-6 text-sm text-zinc-500">載入中…</div>}>
@@ -520,75 +721,25 @@ function HqInboxContent() {
     };
   }, []);
 
-  // 抓全部 4 來源 × 4 階段 的 count(badge / stage tab 用)
-  // 在 mount 與 reloadTick 變化時刷新
+  // 一次 RPC 拿全部 4 來源 × 4 階段 的 count(rpc_inbox_counts)
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const sb = getSupabase();
-        const stages: Stage[] = ["pending", "in_transit", "done", "rejected"];
-        type R = { source: SourceTag; stage: Stage; count: number };
-
-        const queries: Promise<R>[] = [];
-        for (const stg of stages) {
-          queries.push(
-            (async () => {
-              const { count } = await sb
-                .from("restock_requests")
-                .select("id", { count: "exact", head: true })
-                .in("status", RESTOCK_STATUS_BY_STAGE[stg]);
-              return { source: "restock", stage: stg, count: count ?? 0 };
-            })(),
-          );
-          queries.push(
-            (async () => {
-              const { count } = await sb
-                .from("transfers")
-                .select("id", { count: "exact", head: true })
-                .in("status", TRANSFER_STATUS_BY_STAGE[stg]);
-              return { source: "transfer", stage: stg, count: count ?? 0 };
-            })(),
-          );
-          queries.push(
-            (async () => {
-              const { count } = await sb
-                .from("customer_orders")
-                .select("id, items:customer_order_items!inner(id, source)", { count: "exact", head: true })
-                .eq("items.source", "aid_transfer")
-                .in("status", AID_STATUS_BY_STAGE[stg] as string[]);
-              return { source: "aid", stage: stg, count: count ?? 0 };
-            })(),
-          );
-          queries.push(
-            (async () => {
-              const resolutions = SHORTAGE_RESOLUTION_BY_STAGE[stg];
-              if (resolutions !== null && resolutions.length === 0) {
-                return { source: "shortage", stage: stg, count: 0 };
-              }
-              // v_order_shortage 是 (order × sku) 維度,要算 distinct order_id
-              // 撈 order_id 後在 JS 裡 set 去重(每筆 row 只有 4 byte int,1 萬筆也才 40KB)
-              let q = sb.from("v_order_shortage").select("order_id");
-              if (resolutions === null) q = q.is("shortage_resolution", null);
-              else q = q.in("shortage_resolution", resolutions);
-              q = q.limit(20000);
-              const { data } = await q;
-              const distinct = new Set((data ?? []).map((r: { order_id: number }) => r.order_id));
-              return { source: "shortage", stage: stg, count: distinct.size };
-            })(),
-          );
-        }
-
-        const results = await Promise.all(queries);
+        const { data, error } = await sb.rpc("rpc_inbox_counts");
         if (cancelled) return;
-
+        if (error) throw error;
+        // data 形如 { restock: { pending, in_transit, done, rejected }, ... }
+        // 防呆:缺漏的階段 default 0
+        const fallback: Record<Stage, number> = { pending: 0, in_transit: 0, done: 0, rejected: 0 };
+        const raw = (data ?? {}) as Partial<Record<SourceTag, Partial<Record<Stage, number>>>>;
         const newCounts: Record<SourceTag, Record<Stage, number>> = {
-          restock: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
-          transfer: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
-          aid: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
-          shortage: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
+          restock: { ...fallback, ...(raw.restock ?? {}) },
+          transfer: { ...fallback, ...(raw.transfer ?? {}) },
+          aid: { ...fallback, ...(raw.aid ?? {}) },
+          shortage: { ...fallback, ...(raw.shortage ?? {}) },
         };
-        for (const r of results) newCounts[r.source][r.stage] = r.count;
         setCounts(newCounts);
       } catch {
         // counts 失敗就用 null,UI 會 fallback 顯示 0
@@ -613,16 +764,32 @@ function HqInboxContent() {
         let resultTotal = 0;
 
         if (sourceFilter === "all") {
-          // "全部" 視圖:從 4 個來源各抓最近 PAGE_SIZE,merge 後取前 PAGE_SIZE
-          const [r, t, a, s] = await Promise.all([
-            fetchRestockRows(sb, stageArg, 1, dateFrom, dateTo),
-            fetchTransferRows(sb, stageArg, 1, dateFrom, dateTo),
-            fetchAidRows(sb, stageArg, 1, dateFrom, dateTo, aidModeFilter, aidStatusFilter),
-            fetchShortageRows(sb, stageArg, 1, dateFrom, dateTo),
+          // 「全部」視圖:用 rpc_hq_inbox_keys 從 v_hq_inbox 拿 page keys,再 by-id 反查各表詳情
+          const { data: keysData, error: keysErr } = await sb.rpc("rpc_hq_inbox_keys", {
+            p_stage: stageArg,
+            p_date_from: dateFrom ? `${dateFrom}T00:00:00Z` : null,
+            p_date_to: dateTo ? `${dateTo}T23:59:59.999Z` : null,
+            p_page: page,
+            p_page_size: PAGE_SIZE,
+          });
+          if (keysErr) throw keysErr;
+          const keysObj = (keysData ?? { rows: [], total: 0 }) as { rows: Array<{ row_key: string; source: SourceTag; stage: Stage; ts: string; source_id: number }>; total: number };
+          const idsBy: Record<SourceTag, number[]> = { restock: [], transfer: [], aid: [], shortage: [] };
+          for (const k of keysObj.rows) idsBy[k.source].push(Number(k.source_id));
+
+          const [r, t, a, sh] = await Promise.all([
+            fetchRestockRowsByIds(sb, idsBy.restock),
+            fetchTransferRowsByIds(sb, idsBy.transfer),
+            fetchAidRowsByIds(sb, idsBy.aid),
+            fetchShortageRowsByIds(sb, idsBy.shortage),
           ]);
-          const merged = [...r.rows, ...t.rows, ...a.rows, ...s.rows].sort((x, y) => y.ts - x.ts);
-          resultRows = merged.slice(0, PAGE_SIZE);
-          resultTotal = r.total + t.total + a.total + s.total;
+          const detailMap = new Map<string, Row>();
+          for (const row of [...r, ...t, ...a, ...sh]) detailMap.set(row.key, row);
+          // 依 keys 的順序(view 已 ORDER BY ts DESC)組回去
+          resultRows = keysObj.rows
+            .map((k) => detailMap.get(k.row_key))
+            .filter((x): x is Row => !!x);
+          resultTotal = keysObj.total;
         } else {
           let res: { rows: Row[]; total: number };
           if (sourceFilter === "restock") {
@@ -1210,8 +1377,8 @@ function HqInboxContent() {
             )}
           </div>
 
-          {/* 分頁 — server-side,僅特定來源 */}
-          {sourceFilter !== "all" && total > PAGE_SIZE && (
+          {/* 分頁 — server-side,所有來源(含「全部」)都可用 */}
+          {total > PAGE_SIZE && (
             <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
               <span className="text-xs text-zinc-500">
                 共 {total} 筆 ·
