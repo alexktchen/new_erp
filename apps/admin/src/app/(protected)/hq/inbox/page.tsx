@@ -5,6 +5,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import SpinButton from "@/components/SpinButton";
+import { RowAction } from "@/components/RowAction";
 import { OrderDetail } from "@/components/OrderDetail";
 import { Modal } from "@/components/Modal";
 import { AidOrderStatusActions } from "@/components/AidOrderStatusActions";
@@ -142,6 +143,312 @@ function classifyShortage(resolution: string | null): Stage {
   return "pending";
 }
 
+// === Status → Stage 對應(server-side 過濾用)===
+const RESTOCK_STATUS_BY_STAGE: Record<Stage, string[]> = {
+  pending: ["pending"],
+  in_transit: ["approved_transfer", "approved_pr", "shipped"],
+  done: ["received"],
+  rejected: ["rejected", "cancelled"],
+};
+const TRANSFER_STATUS_BY_STAGE: Record<Stage, string[]> = {
+  pending: ["draft", "confirmed"],
+  in_transit: ["shipped"],
+  done: ["received"],
+  rejected: ["cancelled"],
+};
+const AID_STATUS_BY_STAGE: Record<Stage, AidStatus[]> = {
+  pending: ["pending", "confirmed"],
+  in_transit: ["shipping"],
+  done: ["ready", "completed", "partially_completed"],
+  rejected: ["cancelled"],
+};
+const SHORTAGE_RESOLUTION_BY_STAGE: Record<Stage, string[] | null> = {
+  pending: null, // resolution IS NULL
+  in_transit: ["notified", "waiting_next_po"],
+  done: ["cancelled", "reallocated"],
+  rejected: [], // never
+};
+
+const PAGE_SIZE = 20;
+
+// === 各來源的 server-side fetcher(回 { rows, total })===
+type SBClient = ReturnType<typeof getSupabase>;
+
+async function fetchRestockRows(
+  sb: SBClient,
+  stage: Stage | null,
+  page: number,
+  dateFrom: string,
+  dateTo: string,
+): Promise<{ rows: Row[]; total: number }> {
+  let q = sb
+    .from("restock_requests")
+    .select(
+      "id, status, notes, rejected_reason, linked_transfer_id, linked_pr_id, requested_at, stores!inner(name)",
+      { count: "exact" },
+    )
+    .order("requested_at", { ascending: false });
+  if (stage) q = q.in("status", RESTOCK_STATUS_BY_STAGE[stage]);
+  if (dateFrom) q = q.gte("requested_at", `${dateFrom}T00:00:00`);
+  if (dateTo) q = q.lte("requested_at", `${dateTo}T23:59:59.999`);
+  const start = (page - 1) * PAGE_SIZE;
+  q = q.range(start, start + PAGE_SIZE - 1);
+  const { data, count, error } = await q;
+  if (error) throw new Error("restock: " + error.message);
+  const rsRows = (data ?? []) as unknown as Array<RestockRaw & { stores?: { name: string } }>;
+
+  const reqIds = rsRows.map((r) => r.id);
+  const lineMap = new Map<number, { count: number; total: number }>();
+  if (reqIds.length > 0) {
+    const { data: lineData } = await sb
+      .from("restock_request_lines")
+      .select("request_id, qty, unit_price")
+      .in("request_id", reqIds);
+    for (const l of (lineData ?? []) as { request_id: number; qty: number; unit_price: number }[]) {
+      const slot = lineMap.get(l.request_id) ?? { count: 0, total: 0 };
+      slot.count += 1;
+      slot.total += Number(l.qty) * Number(l.unit_price);
+      lineMap.set(l.request_id, slot);
+    }
+  }
+  const xferIds = rsRows.map((r) => r.linked_transfer_id).filter((x): x is number => !!x);
+  const prIds = rsRows.map((r) => r.linked_pr_id).filter((x): x is number => !!x);
+  const xferNoMap = new Map<number, string>();
+  const prNoMap = new Map<number, string>();
+  if (xferIds.length > 0) {
+    const { data: xs } = await sb.from("transfers").select("id, transfer_no").in("id", xferIds);
+    for (const x of (xs ?? []) as { id: number; transfer_no: string }[]) xferNoMap.set(x.id, x.transfer_no);
+  }
+  if (prIds.length > 0) {
+    const { data: ps } = await sb.from("purchase_requests").select("id, pr_no").in("id", prIds);
+    for (const p of (ps ?? []) as { id: number; pr_no: string }[]) prNoMap.set(p.id, p.pr_no);
+  }
+
+  const rows: Row[] = rsRows.map((r) => ({
+    key: `restock-${r.id}`,
+    source: "restock" as const,
+    ts: new Date(r.requested_at).getTime(),
+    stage: classifyRestock(r.status),
+    raw: {
+      id: r.id,
+      status: r.status,
+      notes: r.notes,
+      rejected_reason: r.rejected_reason,
+      linked_transfer_id: r.linked_transfer_id,
+      linked_pr_id: r.linked_pr_id,
+      linked_transfer_no: r.linked_transfer_id ? xferNoMap.get(r.linked_transfer_id) ?? null : null,
+      linked_pr_no: r.linked_pr_id ? prNoMap.get(r.linked_pr_id) ?? null : null,
+      store_name: r.stores?.name ?? null,
+      requested_at: r.requested_at,
+      line_count: lineMap.get(r.id)?.count ?? 0,
+      total_amount: lineMap.get(r.id)?.total ?? 0,
+    },
+  }));
+  return { rows, total: count ?? 0 };
+}
+
+async function fetchTransferRows(
+  sb: SBClient,
+  stage: Stage | null,
+  page: number,
+  dateFrom: string,
+  dateTo: string,
+): Promise<{ rows: Row[]; total: number }> {
+  let q = sb
+    .from("transfers")
+    .select(
+      "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, shipped_at, received_at, created_at",
+      { count: "exact" },
+    )
+    .order("id", { ascending: false });
+  if (stage) q = q.in("status", TRANSFER_STATUS_BY_STAGE[stage]);
+  if (dateFrom) q = q.gte("created_at", `${dateFrom}T00:00:00`);
+  if (dateTo) q = q.lte("created_at", `${dateTo}T23:59:59.999`);
+  const start = (page - 1) * PAGE_SIZE;
+  q = q.range(start, start + PAGE_SIZE - 1);
+  const { data, count, error } = await q;
+  if (error) throw new Error("transfers: " + error.message);
+  const trs = (data as TransferRaw[] | null) ?? [];
+
+  const locIds = Array.from(new Set(trs.flatMap((t) => [t.source_location, t.dest_location])));
+  const locNameMap = new Map<number, string>();
+  if (locIds.length > 0) {
+    const { data: lr } = await sb.from("locations").select("id, name").in("id", locIds);
+    for (const l of (lr ?? []) as { id: number; name: string }[]) locNameMap.set(l.id, l.name);
+  }
+  const tIds = trs.map((t) => t.id);
+  const tLineMap = new Map<number, number>();
+  if (tIds.length > 0) {
+    const { data: tl } = await sb.from("transfer_items").select("transfer_id").in("transfer_id", tIds);
+    for (const it of (tl ?? []) as { transfer_id: number }[]) {
+      tLineMap.set(it.transfer_id, (tLineMap.get(it.transfer_id) ?? 0) + 1);
+    }
+  }
+
+  const rows: Row[] = trs.map((t) => ({
+    key: `transfer-${t.id}`,
+    source: "transfer" as const,
+    ts: new Date(t.created_at).getTime(),
+    stage: classifyTransfer(t),
+    raw: {
+      ...t,
+      source_name: locNameMap.get(t.source_location) ?? `#${t.source_location}`,
+      dest_name: locNameMap.get(t.dest_location) ?? `#${t.dest_location}`,
+      line_count: tLineMap.get(t.id) ?? 0,
+    },
+  }));
+  return { rows, total: count ?? 0 };
+}
+
+async function fetchAidRows(
+  sb: SBClient,
+  stage: Stage | null,
+  page: number,
+  dateFrom: string,
+  dateTo: string,
+  aidMode: "all" | "air" | "via_warehouse",
+  aidStatus: string,
+): Promise<{ rows: Row[]; total: number }> {
+  let q = sb
+    .from("customer_orders")
+    .select(
+      `id, order_no, status, is_air_transfer, pickup_store_id, updated_at,
+       campaign:group_buy_campaigns(id, campaign_no, name),
+       store:stores!customer_orders_pickup_store_id_fkey(id, name),
+       items:customer_order_items!inner(id, source)`,
+      { count: "exact" },
+    )
+    .eq("items.source", "aid_transfer")
+    .order("updated_at", { ascending: false });
+  if (stage) q = q.in("status", AID_STATUS_BY_STAGE[stage] as string[]);
+  if (aidStatus) q = q.eq("status", aidStatus);
+  if (aidMode === "air") q = q.eq("is_air_transfer", true);
+  if (aidMode === "via_warehouse") q = q.eq("is_air_transfer", false);
+  if (dateFrom) q = q.gte("updated_at", `${dateFrom}T00:00:00`);
+  if (dateTo) q = q.lte("updated_at", `${dateTo}T23:59:59.999`);
+  const start = (page - 1) * PAGE_SIZE;
+  q = q.range(start, start + PAGE_SIZE - 1);
+  const { data, count, error } = await q;
+  if (error) throw new Error("aid: " + error.message);
+
+  const aidRows = (data ?? []) as unknown as Array<{
+    id: number;
+    order_no: string;
+    status: AidStatus;
+    is_air_transfer: boolean | null;
+    pickup_store_id: number | null;
+    updated_at: string;
+    campaign?: { id: number; campaign_no: string; name: string } | null;
+    store?: { id: number; name: string } | null;
+    items?: { id: number }[];
+  }>;
+
+  const rows: Row[] = aidRows.map((a) => ({
+    key: `aid-${a.id}`,
+    source: "aid" as const,
+    ts: new Date(a.updated_at).getTime(),
+    stage: classifyAid(a.status),
+    raw: {
+      id: a.id,
+      order_no: a.order_no,
+      status: a.status,
+      is_air_transfer: a.is_air_transfer,
+      pickup_store_id: a.pickup_store_id,
+      store_name: a.store?.name ?? null,
+      campaign_no: a.campaign?.campaign_no ?? null,
+      updated_at: a.updated_at,
+      line_count: a.items?.length ?? 0,
+    },
+  }));
+  return { rows, total: count ?? 0 };
+}
+
+async function fetchShortageRows(
+  sb: SBClient,
+  stage: Stage | null,
+  page: number,
+  dateFrom: string,
+  dateTo: string,
+): Promise<{ rows: Row[]; total: number }> {
+  // v_order_shortage 是 (order × sku) 維度,需多撈再聚合。
+  // 先做簡化版:抓所有相關 row,client-side 聚合 + 切頁。
+  let q = sb
+    .from("v_order_shortage")
+    .select(
+      "order_id, order_no, member_id, store_name, order_status, shortage_resolution, shortage_notified_at, sku_id, product_name, variant_name, sku_code, order_qty, demand_unfulfillable, order_updated_at",
+    )
+    .order("order_updated_at", { ascending: false });
+  if (stage) {
+    const resolutions = SHORTAGE_RESOLUTION_BY_STAGE[stage];
+    if (resolutions === null) q = q.is("shortage_resolution", null);
+    else if (resolutions.length === 0) return { rows: [], total: 0 };
+    else q = q.in("shortage_resolution", resolutions);
+  }
+  if (dateFrom) q = q.gte("order_updated_at", `${dateFrom}T00:00:00`);
+  if (dateTo) q = q.lte("order_updated_at", `${dateTo}T23:59:59.999`);
+  // v_order_shortage 是 (order × sku) 維度,撈夠多 row 才能聚合出正確 distinct 訂單數
+  q = q.limit(20000);
+  const { data, error } = await q;
+  if (error) throw new Error("shortage: " + error.message);
+
+  type ShortageRowRaw = {
+    order_id: number;
+    order_no: string;
+    member_id: number | null;
+    store_name: string | null;
+    order_status: string;
+    shortage_resolution: string | null;
+    shortage_notified_at: string | null;
+    sku_id: number;
+    product_name: string | null;
+    variant_name: string | null;
+    sku_code: string | null;
+    order_qty: number;
+    demand_unfulfillable: number;
+    order_updated_at: string;
+  };
+  const shortageRaw = (data ?? []) as ShortageRowRaw[];
+  const shortageByOrder = new Map<number, ShortageRaw>();
+  for (const r of shortageRaw) {
+    let s = shortageByOrder.get(r.order_id);
+    if (!s) {
+      s = {
+        order_id: r.order_id,
+        order_no: r.order_no,
+        member_id: r.member_id,
+        store_name: r.store_name,
+        order_status: r.order_status,
+        shortage_resolution: r.shortage_resolution,
+        shortage_notified_at: r.shortage_notified_at,
+        short_items: [],
+        total_unfulfillable: 0,
+        order_updated_at: r.order_updated_at,
+      };
+      shortageByOrder.set(r.order_id, s);
+    }
+    const skuLabel = `${r.product_name ?? ""}${r.variant_name ? ` / ${r.variant_name}` : ""}`.trim() || `品項#${r.sku_id}`;
+    s.short_items.push({
+      sku_id: r.sku_id,
+      sku_label: r.sku_code ? `${r.sku_code} ${skuLabel}` : skuLabel,
+      order_qty: Number(r.order_qty),
+      demand_unfulfillable: Number(r.demand_unfulfillable),
+    });
+    s.total_unfulfillable += Number(r.demand_unfulfillable);
+  }
+  const allOrderRows = Array.from(shortageByOrder.values());
+  const total = allOrderRows.length;
+  const start = (page - 1) * PAGE_SIZE;
+  const pageRows = allOrderRows.slice(start, start + PAGE_SIZE);
+  const rows: Row[] = pageRows.map((s) => ({
+    key: `shortage-${s.order_id}`,
+    source: "shortage" as const,
+    ts: new Date(s.order_updated_at).getTime(),
+    stage: classifyShortage(s.shortage_resolution),
+    raw: s,
+  }));
+  return { rows, total };
+}
+
 export default function HqInboxPage() {
   return (
     <Suspense fallback={<div className="p-6 text-sm text-zinc-500">載入中…</div>}>
@@ -169,13 +476,21 @@ function HqInboxContent() {
     }
   }, [searchParams]);
 
+  // 共用日期區間(所有來源)
+  const [dateFrom, setDateFrom] = useState<string>("");
+  const [dateTo, setDateTo] = useState<string>("");
+
   // Aid 專屬篩選 (source=aid 時才顯示)
   const [aidModeFilter, setAidModeFilter] = useState<"all" | "air" | "via_warehouse">("all");
   const [aidStatusFilter, setAidStatusFilter] = useState<string>("");
-  const [aidDateFrom, setAidDateFrom] = useState<string>("");
-  const [aidDateTo, setAidDateTo] = useState<string>("");
-  const [aidPage, setAidPage] = useState(1);
-  const AID_PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
+
+  // server-side counts: per source × per stage(badge / tab 用)
+  const [counts, setCounts] = useState<Record<SourceTag, Record<Stage, number>> | null>(null);
+  // server-side total: 當前 (source, stage) 篩選的總數
+  const [total, setTotal] = useState(0);
+  // 載入狀態
+  const [loadingRows, setLoadingRows] = useState(false);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [rejectModal, setRejectModal] = useState<{ id: number; reason: string } | null>(null);
@@ -184,228 +499,99 @@ function HqInboxContent() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [groupBy, setGroupBy] = useState<"none" | "store" | "source" | "campaign">("none");
 
+  // 一次:抓 HQ location id
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const sb = getSupabase();
+      const { data } = await sb
+        .from("locations")
+        .select("id")
+        .eq("type", "central_warehouse")
+        .eq("is_active", true)
+        .order("id")
+        .limit(1);
+      if (cancelled) return;
+      const id = ((data as { id: number }[] | null) ?? [])[0]?.id ?? null;
+      setHqLocId(id);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 抓全部 4 來源 × 4 階段 的 count(badge / stage tab 用)
+  // 在 mount 與 reloadTick 變化時刷新
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const sb = getSupabase();
+        const stages: Stage[] = ["pending", "in_transit", "done", "rejected"];
+        type R = { source: SourceTag; stage: Stage; count: number };
 
-        const [hqRes, rsRes, tRes, aidRes, shortageRes] = await Promise.all([
-          sb.from("locations").select("id").eq("type", "central_warehouse").eq("is_active", true).order("id").limit(1),
-          sb
-            .from("restock_requests")
-            .select(
-              "id, status, notes, rejected_reason, linked_transfer_id, linked_pr_id, requested_at, stores!inner(name)",
-            )
-            .order("requested_at", { ascending: false })
-            .limit(200),
-          sb
-            .from("transfers")
-            .select(
-              "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, shipped_at, received_at, created_at",
-            )
-            .order("id", { ascending: false })
-            .limit(200),
-          sb
-            .from("customer_orders")
-            .select(
-              `id, order_no, status, is_air_transfer, pickup_store_id, updated_at,
-               campaign:group_buy_campaigns(id, campaign_no, name),
-               store:stores!customer_orders_pickup_store_id_fkey(id, name),
-               items:customer_order_items!inner(id, source)`,
-              { count: "exact" },
-            )
-            .eq("items.source", "aid_transfer")
-            .order("updated_at", { ascending: false })
-            .limit(500),
-          sb
-            .from("v_order_shortage")
-            .select("order_id, order_no, member_id, store_name, order_status, shortage_resolution, shortage_notified_at, sku_id, product_name, variant_name, sku_code, order_qty, demand_unfulfillable, order_updated_at")
-            .order("order_updated_at", { ascending: false })
-            .limit(500),
-        ]);
+        const queries: Promise<R>[] = [];
+        for (const stg of stages) {
+          queries.push(
+            (async () => {
+              const { count } = await sb
+                .from("restock_requests")
+                .select("id", { count: "exact", head: true })
+                .in("status", RESTOCK_STATUS_BY_STAGE[stg]);
+              return { source: "restock", stage: stg, count: count ?? 0 };
+            })(),
+          );
+          queries.push(
+            (async () => {
+              const { count } = await sb
+                .from("transfers")
+                .select("id", { count: "exact", head: true })
+                .in("status", TRANSFER_STATUS_BY_STAGE[stg]);
+              return { source: "transfer", stage: stg, count: count ?? 0 };
+            })(),
+          );
+          queries.push(
+            (async () => {
+              const { count } = await sb
+                .from("customer_orders")
+                .select("id, items:customer_order_items!inner(id, source)", { count: "exact", head: true })
+                .eq("items.source", "aid_transfer")
+                .in("status", AID_STATUS_BY_STAGE[stg] as string[]);
+              return { source: "aid", stage: stg, count: count ?? 0 };
+            })(),
+          );
+          queries.push(
+            (async () => {
+              const resolutions = SHORTAGE_RESOLUTION_BY_STAGE[stg];
+              if (resolutions !== null && resolutions.length === 0) {
+                return { source: "shortage", stage: stg, count: 0 };
+              }
+              // v_order_shortage 是 (order × sku) 維度,要算 distinct order_id
+              // 撈 order_id 後在 JS 裡 set 去重(每筆 row 只有 4 byte int,1 萬筆也才 40KB)
+              let q = sb.from("v_order_shortage").select("order_id");
+              if (resolutions === null) q = q.is("shortage_resolution", null);
+              else q = q.in("shortage_resolution", resolutions);
+              q = q.limit(20000);
+              const { data } = await q;
+              const distinct = new Set((data ?? []).map((r: { order_id: number }) => r.order_id));
+              return { source: "shortage", stage: stg, count: distinct.size };
+            })(),
+          );
+        }
 
+        const results = await Promise.all(queries);
         if (cancelled) return;
 
-        const hqId = ((hqRes.data as { id: number }[] | null) ?? [])[0]?.id ?? null;
-
-        if (rsRes.error) throw new Error("restock: " + rsRes.error.message);
-        if (tRes.error) throw new Error("transfers: " + tRes.error.message);
-        if (aidRes.error) throw new Error("aid: " + aidRes.error.message);
-        if (shortageRes.error) throw new Error("shortage: " + shortageRes.error.message);
-
-        const rsRows = (rsRes.data ?? []) as unknown as Array<RestockRaw & { stores?: { name: string } }>;
-        const reqIds = rsRows.map((r) => r.id);
-        const lineMap = new Map<number, { count: number; total: number }>();
-        if (reqIds.length > 0) {
-          const { data: lineData } = await sb
-            .from("restock_request_lines")
-            .select("request_id, qty, unit_price")
-            .in("request_id", reqIds);
-          for (const l of (lineData ?? []) as { request_id: number; qty: number; unit_price: number }[]) {
-            const slot = lineMap.get(l.request_id) ?? { count: 0, total: 0 };
-            slot.count += 1;
-            slot.total += Number(l.qty) * Number(l.unit_price);
-            lineMap.set(l.request_id, slot);
-          }
-        }
-        const xferIds = rsRows.map((r) => r.linked_transfer_id).filter((x): x is number => !!x);
-        const prIds = rsRows.map((r) => r.linked_pr_id).filter((x): x is number => !!x);
-        const xferNoMap = new Map<number, string>();
-        const prNoMap = new Map<number, string>();
-        if (xferIds.length > 0) {
-          const { data: xs } = await sb.from("transfers").select("id, transfer_no").in("id", xferIds);
-          for (const x of (xs ?? []) as { id: number; transfer_no: string }[]) xferNoMap.set(x.id, x.transfer_no);
-        }
-        if (prIds.length > 0) {
-          const { data: ps } = await sb.from("purchase_requests").select("id, pr_no").in("id", prIds);
-          for (const p of (ps ?? []) as { id: number; pr_no: string }[]) prNoMap.set(p.id, p.pr_no);
-        }
-
-        const trs = (tRes.data as TransferRaw[] | null) ?? [];
-        const locIds = Array.from(new Set(trs.flatMap((t) => [t.source_location, t.dest_location])));
-        const locNameMap = new Map<number, string>();
-        if (locIds.length > 0) {
-          const { data: lr } = await sb.from("locations").select("id, name").in("id", locIds);
-          for (const l of (lr ?? []) as { id: number; name: string }[]) locNameMap.set(l.id, l.name);
-        }
-        const tIds = trs.map((t) => t.id);
-        const tLineMap = new Map<number, number>();
-        if (tIds.length > 0) {
-          const { data: tl } = await sb.from("transfer_items").select("transfer_id").in("transfer_id", tIds);
-          for (const it of (tl ?? []) as { transfer_id: number }[]) {
-            tLineMap.set(it.transfer_id, (tLineMap.get(it.transfer_id) ?? 0) + 1);
-          }
-        }
-
-        const aidRows = (aidRes.data ?? []) as unknown as Array<{
-          id: number;
-          order_no: string;
-          status: AidStatus;
-          is_air_transfer: boolean | null;
-          pickup_store_id: number | null;
-          updated_at: string;
-          campaign?: { id: number; campaign_no: string; name: string } | null;
-          store?: { id: number; name: string } | null;
-          items?: { id: number }[];
-        }>;
-
-        const restockRows: Row[] = rsRows.map((r) => {
-          const raw: RestockRaw = {
-            id: r.id,
-            status: r.status,
-            notes: r.notes,
-            rejected_reason: r.rejected_reason,
-            linked_transfer_id: r.linked_transfer_id,
-            linked_pr_id: r.linked_pr_id,
-            linked_transfer_no: r.linked_transfer_id ? xferNoMap.get(r.linked_transfer_id) ?? null : null,
-            linked_pr_no: r.linked_pr_id ? prNoMap.get(r.linked_pr_id) ?? null : null,
-            store_name: r.stores?.name ?? null,
-            requested_at: r.requested_at,
-            line_count: lineMap.get(r.id)?.count ?? 0,
-            total_amount: lineMap.get(r.id)?.total ?? 0,
-          };
-          return {
-            key: `restock-${r.id}`,
-            source: "restock",
-            ts: new Date(r.requested_at).getTime(),
-            stage: classifyRestock(r.status),
-            raw,
-          };
-        });
-
-        const transferRows: Row[] = trs.map((t) => ({
-          key: `transfer-${t.id}`,
-          source: "transfer",
-          ts: new Date(t.created_at).getTime(),
-          stage: classifyTransfer(t),
-          raw: {
-            ...t,
-            source_name: locNameMap.get(t.source_location) ?? `#${t.source_location}`,
-            dest_name: locNameMap.get(t.dest_location) ?? `#${t.dest_location}`,
-            line_count: tLineMap.get(t.id) ?? 0,
-          },
-        }));
-
-        const aidNormalized: Row[] = aidRows.map((a) => ({
-          key: `aid-${a.id}`,
-          source: "aid",
-          ts: new Date(a.updated_at).getTime(),
-          stage: classifyAid(a.status),
-          raw: {
-            id: a.id,
-            order_no: a.order_no,
-            status: a.status,
-            is_air_transfer: a.is_air_transfer,
-            pickup_store_id: a.pickup_store_id,
-            store_name: a.store?.name ?? null,
-            campaign_no: a.campaign?.campaign_no ?? null,
-            updated_at: a.updated_at,
-            line_count: a.items?.length ?? 0,
-          },
-        }));
-
-        // 短少訂單 — view 是 (order × sku) 維度,需按 order 聚合
-        const shortageRaw = (shortageRes.data ?? []) as Array<{
-          order_id: number;
-          order_no: string;
-          member_id: number | null;
-          store_name: string | null;
-          order_status: string;
-          shortage_resolution: string | null;
-          shortage_notified_at: string | null;
-          sku_id: number;
-          product_name: string | null;
-          variant_name: string | null;
-          sku_code: string | null;
-          order_qty: number;
-          demand_unfulfillable: number;
-          order_updated_at: string;
-        }>;
-        const shortageByOrder = new Map<number, ShortageRaw>();
-        for (const r of shortageRaw) {
-          let s = shortageByOrder.get(r.order_id);
-          if (!s) {
-            s = {
-              order_id: r.order_id,
-              order_no: r.order_no,
-              member_id: r.member_id,
-              store_name: r.store_name,
-              order_status: r.order_status,
-              shortage_resolution: r.shortage_resolution,
-              shortage_notified_at: r.shortage_notified_at,
-              short_items: [],
-              total_unfulfillable: 0,
-              order_updated_at: r.order_updated_at,
-            };
-            shortageByOrder.set(r.order_id, s);
-          }
-          const skuLabel = `${r.product_name ?? ""}${r.variant_name ? ` / ${r.variant_name}` : ""}`.trim() || `品項#${r.sku_id}`;
-          s.short_items.push({
-            sku_id: r.sku_id,
-            sku_label: r.sku_code ? `${r.sku_code} ${skuLabel}` : skuLabel,
-            order_qty: Number(r.order_qty),
-            demand_unfulfillable: Number(r.demand_unfulfillable),
-          });
-          s.total_unfulfillable += Number(r.demand_unfulfillable);
-        }
-        const shortageRows: Row[] = Array.from(shortageByOrder.values()).map((s) => ({
-          key: `shortage-${s.order_id}`,
-          source: "shortage",
-          ts: new Date(s.order_updated_at).getTime(),
-          stage: classifyShortage(s.shortage_resolution),
-          raw: s,
-        }));
-
-        const all = [...restockRows, ...transferRows, ...aidNormalized, ...shortageRows].sort((a, b) => b.ts - a.ts);
-
-        if (!cancelled) {
-          setRows(all);
-          setHqLocId(hqId);
-          setError(null);
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        const newCounts: Record<SourceTag, Record<Stage, number>> = {
+          restock: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
+          transfer: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
+          aid: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
+          shortage: { pending: 0, in_transit: 0, done: 0, rejected: 0 },
+        };
+        for (const r of results) newCounts[r.source][r.stage] = r.count;
+        setCounts(newCounts);
+      } catch {
+        // counts 失敗就用 null,UI 會 fallback 顯示 0
       }
     })();
     return () => {
@@ -413,40 +599,92 @@ function HqInboxContent() {
     };
   }, [reloadTick]);
 
-  // stage tab counts:依當前 sourceFilter 過濾(讓 tab 數字 = 點下去看到的)
+  // 抓當前 view 的 rows(server-side pagination)
+  // 變動觸發:source / stage / page / 日期 / Aid 篩選 / reloadTick
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingRows(true);
+    (async () => {
+      try {
+        const sb = getSupabase();
+        const stageArg: Stage | null = stage === "all" ? null : stage;
+
+        let resultRows: Row[] = [];
+        let resultTotal = 0;
+
+        if (sourceFilter === "all") {
+          // "全部" 視圖:從 4 個來源各抓最近 PAGE_SIZE,merge 後取前 PAGE_SIZE
+          const [r, t, a, s] = await Promise.all([
+            fetchRestockRows(sb, stageArg, 1, dateFrom, dateTo),
+            fetchTransferRows(sb, stageArg, 1, dateFrom, dateTo),
+            fetchAidRows(sb, stageArg, 1, dateFrom, dateTo, aidModeFilter, aidStatusFilter),
+            fetchShortageRows(sb, stageArg, 1, dateFrom, dateTo),
+          ]);
+          const merged = [...r.rows, ...t.rows, ...a.rows, ...s.rows].sort((x, y) => y.ts - x.ts);
+          resultRows = merged.slice(0, PAGE_SIZE);
+          resultTotal = r.total + t.total + a.total + s.total;
+        } else {
+          let res: { rows: Row[]; total: number };
+          if (sourceFilter === "restock") {
+            res = await fetchRestockRows(sb, stageArg, page, dateFrom, dateTo);
+          } else if (sourceFilter === "transfer") {
+            res = await fetchTransferRows(sb, stageArg, page, dateFrom, dateTo);
+          } else if (sourceFilter === "aid") {
+            res = await fetchAidRows(sb, stageArg, page, dateFrom, dateTo, aidModeFilter, aidStatusFilter);
+          } else {
+            res = await fetchShortageRows(sb, stageArg, page, dateFrom, dateTo);
+          }
+          resultRows = res.rows;
+          resultTotal = res.total;
+        }
+
+        if (cancelled) return;
+        setRows(resultRows);
+        setTotal(resultTotal);
+        setError(null);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoadingRows(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceFilter, stage, page, dateFrom, dateTo, aidModeFilter, aidStatusFilter, reloadTick]);
+
+  // stage tab counts:依當前 sourceFilter,從 cached counts 算出
   const stageCounts = useMemo(() => {
     const c: Record<Stage, number> = { pending: 0, in_transit: 0, done: 0, rejected: 0 };
-    for (const r of rows ?? []) {
-      if (sourceFilter !== "all" && r.source !== sourceFilter) continue;
-      c[r.stage] += 1;
+    if (!counts) return c;
+    const sources: SourceTag[] = sourceFilter === "all"
+      ? ["restock", "transfer", "aid", "shortage"]
+      : [sourceFilter];
+    for (const s of sources) {
+      for (const stg of ["pending", "in_transit", "done", "rejected"] as Stage[]) {
+        c[stg] += counts[s][stg];
+      }
     }
     return c;
-  }, [rows, sourceFilter]);
+  }, [counts, sourceFilter]);
 
-  // source chip counts:依當前 stage 過濾(讓 chip 數字 = 點下去看到的)
+  // source chip counts:依當前 stage,從 cached counts 算出
   const sourceCounts = useMemo(() => {
     const c: Record<SourceTag, number> = { restock: 0, transfer: 0, aid: 0, shortage: 0 };
-    for (const r of rows ?? []) {
-      if (stage !== "all" && r.stage !== stage) continue;
-      c[r.source] += 1;
+    if (!counts) return c;
+    const stages: Stage[] = stage === "all"
+      ? ["pending", "in_transit", "done", "rejected"]
+      : [stage];
+    for (const s of ["restock", "transfer", "aid", "shortage"] as SourceTag[]) {
+      for (const stg of stages) c[s] += counts[s][stg];
     }
     return c;
-  }, [rows, stage]);
+  }, [counts, stage]);
 
+  // server-side 已過濾 source / stage / 日期 / Aid filters,client-side 只做 search(限當前頁)
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (rows ?? []).filter((r) => {
-      if (stage !== "all" && r.stage !== stage) return false;
-      if (sourceFilter !== "all" && r.source !== sourceFilter) return false;
-      // Aid 專屬篩選 — 只在 sourceFilter=aid 時生效
-      if (sourceFilter === "aid" && r.source === "aid") {
-        const a = r.raw;
-        if (aidModeFilter === "air" && !a.is_air_transfer) return false;
-        if (aidModeFilter === "via_warehouse" && a.is_air_transfer) return false;
-        if (aidStatusFilter && a.status !== aidStatusFilter) return false;
-        if (aidDateFrom && a.updated_at < `${aidDateFrom}T00:00:00`) return false;
-        if (aidDateTo && a.updated_at > `${aidDateTo}T23:59:59.999`) return false;
-      }
       if (!q) return true;
       if (r.source === "restock") {
         const s = r.raw;
@@ -466,16 +704,16 @@ function HqInboxContent() {
       const a = r.raw;
       return [a.order_no, a.store_name, a.campaign_no].filter((x): x is string => !!x).some((x) => x.toLowerCase().includes(q));
     });
-  }, [rows, stage, sourceFilter, search, aidModeFilter, aidStatusFilter, aidDateFrom, aidDateTo]);
+  }, [rows, search]);
 
-  // Aid 分頁:當 sourceFilter=aid 才 slice;其他 source 顯示全部 filtered
-  const paginatedRows = useMemo(() => {
-    if (sourceFilter !== "aid") return filtered;
-    const start = (aidPage - 1) * AID_PAGE_SIZE;
-    return filtered.slice(start, start + AID_PAGE_SIZE);
-  }, [filtered, sourceFilter, aidPage]);
+  // server-side 已分頁,paginatedRows 直接 = filtered(當前頁的 rows 經過 search 過濾)
+  const paginatedRows = filtered;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const aidTotalPages = sourceFilter === "aid" ? Math.max(1, Math.ceil(filtered.length / AID_PAGE_SIZE)) : 1;
+  // 任何 server 端篩選變動 → 回到第 1 頁(避免 page 超出範圍)
+  useEffect(() => {
+    setPage(1);
+  }, [stage, sourceFilter, aidModeFilter, aidStatusFilter, dateFrom, dateTo]);
 
   // 計算 group key for each row
   function getGroupKey(r: Row): { key: string; label: string } {
@@ -728,12 +966,12 @@ function HqInboxContent() {
     <div className="flex flex-1 flex-col gap-4 p-6">
       <header>
         <h1 className="text-xl font-semibold">總倉收件匣</h1>
-        <p className="text-sm text-zinc-500">
-          {rows === null
-            ? "載入中…"
-            : `共 ${rows.length} 筆 · 補貨 ${sourceCounts.restock} / 轉貨 ${sourceCounts.transfer} / 互助 ${sourceCounts.aid}${sourceCounts.shortage > 0 ? ` · ⚠️ 短少 ${sourceCounts.shortage}` : ""}`}
-          {hqLocId === null ? " · ⚠️ 未找到 HQ location" : ""}
-        </p>
+        {(rows === null || hqLocId === null) && (
+          <p className="text-sm text-zinc-500">
+            {rows === null ? "載入中…" : ""}
+            {hqLocId === null ? " ⚠️ 未找到 HQ location" : ""}
+          </p>
+        )}
       </header>
 
       {error && (
@@ -742,229 +980,214 @@ function HqInboxContent() {
         </div>
       )}
 
-      {/* Stage tabs */}
-      <div className="flex flex-wrap gap-1 border-b border-zinc-200 dark:border-zinc-800">
-        {(["pending", "in_transit", "done", "rejected", "all"] as const).map((s) => {
-          const label = s === "all" ? "全部" : STAGE_LABEL[s];
-          const count = s === "all"
-            ? Object.values(stageCounts).reduce((a, b) => a + b, 0)
-            : stageCounts[s];
-          const active = stage === s;
-          return (
-            <SpinButton
-              key={s}
-              onClick={() => setStage(s)}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm ${
-                active
-                  ? "border-blue-600 font-semibold text-blue-700 dark:text-blue-300"
-                  : "border-transparent text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              }`}
-            >
-              {label} <span className="ml-1 text-xs text-zinc-400">{count}</span>
-            </SpinButton>
-          );
-        })}
-      </div>
-
-      {/* Source filter chips + search */}
+      {/* === 來源資料夾 chip bar === */}
       <div className="flex flex-wrap items-center gap-2">
         {(["all", "restock", "transfer", "aid", "shortage"] as const).map((s) => {
           const active = sourceFilter === s;
-          const label = s === "all" ? "全部來源" : SOURCE_LABEL[s];
-          const count = s === "all"
-            ? Object.values(sourceCounts).reduce((a, b) => a + b, 0)
-            : sourceCounts[s];
+          const label = s === "all" ? "📥 全部" : ({
+            restock: "📦 補貨申請",
+            transfer: "🚚 轉貨單",
+            aid: "🤝 互助訂單",
+            shortage: "⚠️ 短少訂單",
+          } as const)[s];
+          // chip 顯示「該來源」的待處理數(從 cached counts 算,固定值,跟 stage 切換無關)
+          const count = !counts
+            ? 0
+            : s === "all"
+              ? counts.restock.pending + counts.transfer.pending + counts.aid.pending + counts.shortage.pending
+              : counts[s].pending;
           return (
             <SpinButton
               key={s}
               onClick={() => setSourceFilter(s)}
-              className={`rounded-full border px-3 py-1 text-xs font-medium ${
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition ${
                 active
                   ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
                   : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
               }`}
             >
-              {label} <span className="ml-1 opacity-60">{count}</span>
+              <span>{label}</span>
+              {count > 0 && (
+                <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                  active ? "bg-white/20 text-white dark:bg-zinc-900/20 dark:text-zinc-900" : "bg-blue-600 text-white"
+                }`}>
+                  {count}
+                </span>
+              )}
             </SpinButton>
           );
         })}
-        <label className="flex items-center gap-1 text-xs text-zinc-500">
-          <span>分組</span>
-          <select
-            value={groupBy}
-            onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
-            className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-          >
-            <option value="none">不分組</option>
-            <option value="store">分店</option>
-            <option value="source">來源類型</option>
-            <option value="campaign">開團</option>
-          </select>
-        </label>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="搜尋 單號 / 店 / 備註"
-          className="ml-auto w-64 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
-        />
       </div>
 
-      {/* Aid 專屬進階篩選(source=aid 時顯示)*/}
+      {/* Aid 專屬篩選 — 選 Aid 才出現 */}
       {sourceFilter === "aid" && (
-        <div className="flex flex-wrap items-end gap-3 rounded-md border border-fuchsia-200 bg-fuchsia-50 p-3 dark:border-fuchsia-900 dark:bg-fuchsia-950/30">
-          <label className="text-xs">
-            <span className="mb-1 block text-zinc-500">模式</span>
-            <select
-              value={aidModeFilter}
-              onChange={(e) => { setAidModeFilter(e.target.value as typeof aidModeFilter); setAidPage(1); }}
-              className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-            >
-              <option value="all">全部模式</option>
-              <option value="air">空中轉(店對店直送)</option>
-              <option value="via_warehouse">經總倉中轉</option>
-            </select>
-          </label>
-          <label className="text-xs">
-            <span className="mb-1 block text-zinc-500">訂單狀態</span>
-            <select
-              value={aidStatusFilter}
-              onChange={(e) => { setAidStatusFilter(e.target.value); setAidPage(1); }}
-              className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-            >
-              <option value="">全部狀態</option>
-              {Object.entries(AID_STATUS_LABEL).map(([v, l]) => (
-                <option key={v} value={v}>{l}</option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs">
-            <span className="mb-1 block text-zinc-500">起日</span>
-            <input
-              type="date"
-              value={aidDateFrom}
-              onChange={(e) => { setAidDateFrom(e.target.value); setAidPage(1); }}
-              className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-            />
-          </label>
-          <label className="text-xs">
-            <span className="mb-1 block text-zinc-500">迄日</span>
-            <input
-              type="date"
-              value={aidDateTo}
-              onChange={(e) => { setAidDateTo(e.target.value); setAidPage(1); }}
-              className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800"
-            />
-          </label>
-          {(aidModeFilter !== "all" || aidStatusFilter || aidDateFrom || aidDateTo) && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-fuchsia-200 bg-fuchsia-50 px-3 py-2 text-xs dark:border-fuchsia-900 dark:bg-fuchsia-950/30">
+          <span className="font-semibold text-fuchsia-700 dark:text-fuchsia-300">互助專屬:</span>
+          <select
+            value={aidModeFilter}
+            onChange={(e) => setAidModeFilter(e.target.value as typeof aidModeFilter)}
+            className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+          >
+            <option value="all">全部模式</option>
+            <option value="air">空中轉</option>
+            <option value="via_warehouse">經總倉中轉</option>
+          </select>
+          <select
+            value={aidStatusFilter}
+            onChange={(e) => setAidStatusFilter(e.target.value)}
+            className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+          >
+            <option value="">全部狀態</option>
+            {Object.entries(AID_STATUS_LABEL).map(([v, l]) => (
+              <option key={v} value={v}>{l}</option>
+            ))}
+          </select>
+          {(aidModeFilter !== "all" || aidStatusFilter) && (
             <SpinButton
               onClick={() => {
                 setAidModeFilter("all");
                 setAidStatusFilter("");
-                setAidDateFrom("");
-                setAidDateTo("");
-                setAidPage(1);
               }}
               className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
             >
-              清除篩選
+              清除
             </SpinButton>
           )}
-          <span className="ml-auto text-xs text-zinc-500">— 來自互助交流板的訂單轉移;經總倉者需走收/出貨流程</span>
         </div>
       )}
 
-      {/* 批次工具列 — 只在 sourceFilter 鎖定且有可批次項目時顯示 */}
-      {sourceFilter !== "all" && batchableKeys.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <span className="text-xs text-zinc-500">
-            {selected.size > 0 ? `已選 ${selected.size} / ${batchableKeys.length} 筆待處理` : `${batchableKeys.length} 筆待處理可批次`}
-          </span>
-          <SpinButton
-            type="button"
-            onClick={selectAllVisible}
-            disabled={selected.size === batchableKeys.length}
-            className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-          >
-            全選
-          </SpinButton>
-          {selected.size > 0 && (
-            <SpinButton
-              type="button"
-              onClick={clearSelection}
-              className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-            >
-              清空
-            </SpinButton>
-          )}
-          {selected.size > 0 && (
-            <div className="ml-auto flex flex-wrap gap-1">
-              {sourceFilter === "restock" && (
-                <>
-                  <SpinButton onClick={() => batchAction("派貨")} disabled={batchBusy} className="rounded border border-blue-400 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300">📦 派貨 ({selected.size})</SpinButton>
-                  <SpinButton onClick={() => batchAction("下訂單")} disabled={batchBusy} className="rounded border border-indigo-400 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">🛒 下訂單 ({selected.size})</SpinButton>
-                </>
+      {/* === 主區 === */}
+      <div className="flex flex-1 flex-col gap-3 min-w-0">
+
+          {/* Toolbar: 搜尋 + 起迄日 + 閱讀模式 */}
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="🔍 搜尋 單號 / 店 / 備註"
+              className="flex-1 min-w-[180px] rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+            />
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+              title="起日"
+            />
+            <span className="text-xs text-zinc-400">~</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+              title="迄日"
+            />
+            <label className="flex items-center gap-1 text-xs text-zinc-500">
+              <span>閱讀模式</span>
+              <select
+                value={groupBy}
+                onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
+                className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <option value="none">不分組</option>
+                <option value="store">分店</option>
+                <option value="campaign">開團</option>
+              </select>
+            </label>
+          </div>
+
+          {/* Stage tabs (套用在當前資料夾) */}
+          <div className="flex flex-wrap gap-1 border-b border-zinc-200 dark:border-zinc-800">
+            {(["pending", "in_transit", "done", "rejected", "all"] as const).map((s) => {
+              const label = s === "all" ? "全部" : STAGE_LABEL[s];
+              const count = s === "all"
+                ? Object.values(stageCounts).reduce((a, b) => a + b, 0)
+                : stageCounts[s];
+              const active = stage === s;
+              return (
+                <SpinButton
+                  key={s}
+                  onClick={() => setStage(s)}
+                  className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+                    active
+                      ? "border-blue-600 font-semibold text-blue-700 dark:text-blue-300"
+                      : "border-transparent text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                  }`}
+                >
+                  {label} <span className="ml-1 text-xs text-zinc-400">{count}</span>
+                </SpinButton>
+              );
+            })}
+          </div>
+
+          {/* 批次工具列 */}
+          {sourceFilter !== "all" && batchableKeys.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-800 dark:bg-zinc-900">
+              <input
+                type="checkbox"
+                checked={selected.size > 0 && selected.size === batchableKeys.length}
+                onChange={() => selected.size === batchableKeys.length ? clearSelection() : selectAllVisible()}
+                className="cursor-pointer"
+                title="全選 / 清空"
+              />
+              <span className="text-xs text-zinc-500">
+                {selected.size > 0 ? `已選 ${selected.size} / ${batchableKeys.length} 筆待處理` : `${batchableKeys.length} 筆待處理可批次`}
+              </span>
+              <SpinButton
+                type="button"
+                onClick={selectAllVisible}
+                disabled={selected.size === batchableKeys.length}
+                className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                全選
+              </SpinButton>
+              {selected.size > 0 && (
+                <SpinButton
+                  type="button"
+                  onClick={clearSelection}
+                  className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                >
+                  清空
+                </SpinButton>
               )}
-              {sourceFilter === "aid" && (
-                <>
-                  <SpinButton onClick={() => batchAction("確認")} disabled={batchBusy} className="rounded border border-blue-400 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300">→ 確認 ({selected.size})</SpinButton>
-                  <SpinButton onClick={() => batchAction("派貨")} disabled={batchBusy} className="rounded border border-emerald-400 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">🚚 派貨 ({selected.size})</SpinButton>
-                </>
-              )}
-              {sourceFilter === "shortage" && (
-                <>
-                  <SpinButton onClick={() => batchAction("通知客戶")} disabled={batchBusy} className="rounded border border-blue-400 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300">📢 通知客戶 ({selected.size})</SpinButton>
-                  <SpinButton onClick={() => batchAction("等下批")} disabled={batchBusy} className="rounded border border-amber-400 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300">⏳ 等下批 ({selected.size})</SpinButton>
-                </>
+              {selected.size > 0 && (
+                <div className="ml-auto flex flex-wrap gap-1">
+                  {sourceFilter === "restock" && (
+                    <>
+                      <RowAction variant="success" onClick={() => batchAction("派貨")} disabled={batchBusy}>派貨 ({selected.size})</RowAction>
+                      <RowAction variant="indigo" onClick={() => batchAction("下訂單")} disabled={batchBusy}>下訂單 ({selected.size})</RowAction>
+                    </>
+                  )}
+                  {sourceFilter === "aid" && (
+                    <>
+                      <RowAction variant="primary" onClick={() => batchAction("確認")} disabled={batchBusy}>確認 ({selected.size})</RowAction>
+                      <RowAction variant="success" onClick={() => batchAction("派貨")} disabled={batchBusy}>派貨 ({selected.size})</RowAction>
+                    </>
+                  )}
+                  {sourceFilter === "shortage" && (
+                    <>
+                      <RowAction variant="primary" onClick={() => batchAction("通知客戶")} disabled={batchBusy}>通知客戶 ({selected.size})</RowAction>
+                      <RowAction variant="warning" onClick={() => batchAction("等下批")} disabled={batchBusy}>等下批 ({selected.size})</RowAction>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* Table */}
-      <div className="overflow-x-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-        <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-          <thead className="bg-zinc-50 dark:bg-zinc-900">
-            <tr className="text-left text-xs uppercase tracking-wide text-zinc-500">
-              {sourceFilter !== "all" && batchableKeys.length > 0 && (
-                <th className="w-8 px-2 py-2">
-                  <input
-                    type="checkbox"
-                    checked={selected.size > 0 && selected.size === batchableKeys.length}
-                    onChange={() => selected.size === batchableKeys.length ? clearSelection() : selectAllVisible()}
-                    title="全選 / 清空"
-                  />
-                </th>
-              )}
-              <th className="px-3 py-2">類型 / 單號</th>
-              <th className="px-3 py-2">時間</th>
-              <th className="px-3 py-2">來源 → 目的</th>
-              <th className="px-3 py-2">摘要</th>
-              <th className="px-3 py-2">階段</th>
-              <th className="px-3 py-2">動作 / 連結</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+          {/* === Row list (郵件列) === */}
+          <div className="overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             {rows === null ? (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-zinc-500">
-                  載入中…
-                </td>
-              </tr>
+              <div className="p-6 text-center text-sm text-zinc-500">載入中…</div>
             ) : filtered.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-zinc-500">
-                  目前沒有資料
-                </td>
-              </tr>
+              <div className="p-6 text-center text-sm text-zinc-500">目前沒有資料</div>
             ) : (
               (() => {
                 const showCheckbox = sourceFilter !== "all" && batchableKeys.length > 0;
-                const totalCols = showCheckbox ? 7 : 6;
                 const renderRow = (r: Row) => {
                   const batchable = batchableKeys.includes(r.key);
                   return (
-                    <Row key={r.key} row={r} busy={busy}
+                    <MailRow key={r.key} row={r} busy={busy}
                       onApproveTransfer={approveToTransfer} onApprovePr={approveToPr} onShipPrReceived={shipPrReceived}
                       onOpenReject={(id) => setRejectModal({ id, reason: "" })}
                       onOpenAidDetail={setAidDetailId} onAidChanged={() => setReloadTick((t) => t + 1)}
@@ -976,47 +1199,44 @@ function HqInboxContent() {
                 };
                 if (grouped) {
                   return grouped.flatMap((g) => [
-                    <tr key={`g-${g.key}`} className="bg-zinc-100 dark:bg-zinc-800">
-                      <td colSpan={totalCols} className="px-3 py-2 text-xs font-semibold text-zinc-700 dark:text-zinc-200">
-                        📂 {g.label} <span className="ml-2 font-normal text-zinc-500">({g.rows.length})</span>
-                      </td>
-                    </tr>,
+                    <div key={`g-${g.key}`} className="border-b border-zinc-200 bg-zinc-100 px-4 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:bg-zinc-800 dark:text-zinc-200">
+                      📂 {g.label} <span className="ml-2 font-normal text-zinc-500">({g.rows.length})</span>
+                    </div>,
                     ...g.rows.map(renderRow),
                   ]);
                 }
                 return paginatedRows.map(renderRow);
               })()
             )}
-          </tbody>
-        </table>
-      </div>
+          </div>
 
-      {/* Aid 分頁 */}
-      {sourceFilter === "aid" && filtered.length > AID_PAGE_SIZE && (
-        <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
-          <span className="text-xs text-zinc-500">
-            共 {filtered.length} 筆 ·
-            顯示 {(aidPage - 1) * AID_PAGE_SIZE + 1} - {Math.min(aidPage * AID_PAGE_SIZE, filtered.length)}
-          </span>
-          <SpinButton onClick={() => setAidPage(1)} disabled={aidPage === 1}
-            className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
-            « 第一頁
-          </SpinButton>
-          <SpinButton onClick={() => setAidPage((p) => Math.max(1, p - 1))} disabled={aidPage === 1}
-            className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
-            ‹ 上頁
-          </SpinButton>
-          <span className="text-xs text-zinc-500">{aidPage} / {aidTotalPages}</span>
-          <SpinButton onClick={() => setAidPage((p) => Math.min(aidTotalPages, p + 1))} disabled={aidPage === aidTotalPages}
-            className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
-            下頁 ›
-          </SpinButton>
-          <SpinButton onClick={() => setAidPage(aidTotalPages)} disabled={aidPage === aidTotalPages}
-            className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
-            最末頁 »
-          </SpinButton>
-        </div>
-      )}
+          {/* 分頁 — server-side,僅特定來源 */}
+          {sourceFilter !== "all" && total > PAGE_SIZE && (
+            <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
+              <span className="text-xs text-zinc-500">
+                共 {total} 筆 ·
+                顯示 {(page - 1) * PAGE_SIZE + 1} - {Math.min(page * PAGE_SIZE, total)}
+              </span>
+              <SpinButton onClick={() => setPage(1)} disabled={page === 1}
+                className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
+                « 第一頁
+              </SpinButton>
+              <SpinButton onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}
+                className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
+                ‹ 上頁
+              </SpinButton>
+              <span className="text-xs text-zinc-500">{page} / {totalPages}</span>
+              <SpinButton onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}
+                className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
+                下頁 ›
+              </SpinButton>
+              <SpinButton onClick={() => setPage(totalPages)} disabled={page === totalPages}
+                className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
+                最末頁 »
+              </SpinButton>
+            </div>
+          )}
+      </div>
 
       {rejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -1063,7 +1283,7 @@ function HqInboxContent() {
   );
 }
 
-function Row({
+function MailRow({
   row,
   busy,
   onApproveTransfer,
@@ -1096,249 +1316,172 @@ function Row({
   selected: boolean;
   onToggleSelect: () => void;
 }) {
-  const checkboxCell = showCheckbox ? (
-    <td className="w-8 px-2 py-3 align-top">
-      {batchable ? (
-        <input type="checkbox" checked={selected} onChange={onToggleSelect} />
-      ) : null}
-    </td>
-  ) : null;
-  const stageCls = STAGE_COLOR[row.stage];
-  const stageText = STAGE_LABEL[row.stage];
+  const isPending = row.stage === "pending";
   const sourceCls = SOURCE_COLOR[row.source];
+  const stageCls = STAGE_COLOR[row.stage];
   const sourceText = SOURCE_LABEL[row.source];
+  const stageText = STAGE_LABEL[row.stage];
+  const accent = ({
+    restock: "border-l-indigo-500",
+    transfer: "border-l-blue-500",
+    aid: "border-l-fuchsia-500",
+    shortage: "border-l-rose-500",
+  } as const)[row.source];
+
+  let idText: string;
+  let title: React.ReactNode;
+  let subtitle: React.ReactNode;
+  let timeIso: string;
+  let actions: React.ReactNode;
 
   if (row.source === "restock") {
     const s = row.raw;
-    return (
-      <tr className="hover:bg-zinc-50 dark:hover:bg-zinc-950">{checkboxCell}
-        <td className="px-3 py-3 align-top">
-          <div className="flex flex-col gap-1">
-            <span className={`inline-flex w-fit rounded px-2 py-0.5 text-xs font-medium ${sourceCls}`}>{sourceText}</span>
-            <span className="font-mono text-xs">RESTOCK#{s.id}</span>
-          </div>
-        </td>
-        <td className="px-3 py-3 align-top text-xs text-zinc-500">
-          {new Date(s.requested_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}
-        </td>
-        <td className="px-3 py-3 align-top text-xs">
-          <span>{s.store_name ?? "—"}</span>
-          <span className="mx-1 text-zinc-400">→</span>
-          <span>HQ</span>
-        </td>
-        <td className="px-3 py-3 align-top text-right font-mono text-xs">
-          {s.line_count} 項 / ${s.total_amount.toFixed(0)}
-        </td>
-        <td className="px-3 py-3 align-top">
-          <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCls}`}>{stageText}</span>
-        </td>
-        <td className="px-3 py-3 align-top">
-          {s.status === "pending" ? (
-            <div className="flex flex-wrap gap-1">
-              <SpinButton
-                onClick={() => onApproveTransfer(s.id)}
-                disabled={busy?.startsWith(`restock-${s.id}`) ?? false}
-                className="rounded border border-blue-400 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"
-              >
-                派貨
-              </SpinButton>
-              <SpinButton
-                onClick={() => onApprovePr(s.id)}
-                disabled={busy?.startsWith(`restock-${s.id}`) ?? false}
-                className="rounded border border-indigo-400 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
-              >
-                下訂單
-              </SpinButton>
-              <SpinButton
-                onClick={() => onOpenReject(s.id)}
-                disabled={busy?.startsWith(`restock-${s.id}`) ?? false}
-                className="rounded border border-red-400 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-700 dark:bg-red-950 dark:text-red-300"
-              >
-                拒絕
-              </SpinButton>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1 text-xs">
-              {s.linked_pr_id && (
-                <Link href={`/purchase/requests/edit?id=${s.linked_pr_id}`} className="font-mono text-blue-600 hover:underline dark:text-blue-400">
-                  → {s.linked_pr_no ?? `採購單 #${s.linked_pr_id}`}
-                </Link>
-              )}
-              {s.linked_transfer_id && (
-                <Link href={`/wms/outbound?id=${s.linked_transfer_id}`} className="font-mono text-blue-600 hover:underline dark:text-blue-400">
-                  → {s.linked_transfer_no ?? `轉貨單 #${s.linked_transfer_id}`}
-                </Link>
-              )}
-              {s.status === "approved_pr" && (
-                <SpinButton
-                  onClick={() => onShipPrReceived(s.id)}
-                  disabled={busy?.startsWith(`restock-${s.id}`) ?? false}
-                  className="mt-1 self-start rounded border border-emerald-400 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                >
-                  📦 PO 到貨、建轉貨單
-                </SpinButton>
-              )}
-              {s.status === "rejected" && s.rejected_reason && <span className="text-red-600">拒絕：{s.rejected_reason}</span>}
-            </div>
-          )}
-        </td>
-      </tr>
+    idText = `RESTOCK#${s.id}`;
+    title = <>{s.store_name ?? "—"} <span className="text-zinc-400 mx-1">→</span> HQ</>;
+    subtitle = (
+      <>
+        急補 {s.line_count} 項 · NT${s.total_amount.toFixed(0)}
+        {s.linked_pr_id && (
+          <Link href={`/purchase/requests/edit?id=${s.linked_pr_id}`} className="ml-2 font-mono text-blue-600 hover:underline dark:text-blue-400">
+            · {s.linked_pr_no ?? `採購單 #${s.linked_pr_id}`}
+          </Link>
+        )}
+        {s.linked_transfer_id && (
+          <Link href={`/wms/outbound?id=${s.linked_transfer_id}`} className="ml-2 font-mono text-blue-600 hover:underline dark:text-blue-400">
+            · {s.linked_transfer_no ?? `轉貨單 #${s.linked_transfer_id}`}
+          </Link>
+        )}
+        {s.status === "rejected" && s.rejected_reason && (
+          <span className="ml-2 text-red-600" title={s.rejected_reason}>· 拒絕:{s.rejected_reason}</span>
+        )}
+      </>
     );
-  }
-
-  if (row.source === "transfer") {
+    timeIso = s.requested_at;
+    if (s.status === "pending") {
+      actions = (
+        <>
+          <RowAction variant="success" onClick={() => onApproveTransfer(s.id)} disabled={busy?.startsWith(`restock-${s.id}`) ?? false}>派貨</RowAction>
+          <RowAction variant="indigo" onClick={() => onApprovePr(s.id)} disabled={busy?.startsWith(`restock-${s.id}`) ?? false}>下訂單</RowAction>
+          <RowAction variant="danger" onClick={() => onOpenReject(s.id)} disabled={busy?.startsWith(`restock-${s.id}`) ?? false}>拒絕</RowAction>
+        </>
+      );
+    } else if (s.status === "approved_pr") {
+      actions = (
+        <RowAction variant="success" onClick={() => onShipPrReceived(s.id)} disabled={busy?.startsWith(`restock-${s.id}`) ?? false}>PO 到貨建轉貨單</RowAction>
+      );
+    } else {
+      actions = null;
+    }
+  } else if (row.source === "transfer") {
     const t = row.raw;
-    return (
-      <tr className="hover:bg-zinc-50 dark:hover:bg-zinc-950">{checkboxCell}
-        <td className="px-3 py-3 align-top">
-          <div className="flex flex-col gap-1">
-            <span className={`inline-flex w-fit rounded px-2 py-0.5 text-xs font-medium ${sourceCls}`}>
-              {sourceText}
-              {t.is_air_transfer && <span className="ml-1">✈</span>}
-            </span>
-            <span className="font-mono text-xs">{t.transfer_no}</span>
-          </div>
-        </td>
-        <td className="px-3 py-3 align-top text-xs text-zinc-500">
-          {new Date(t.created_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}
-        </td>
-        <td className="px-3 py-3 align-top text-xs">
-          <span>{t.source_name}</span>
-          <span className="mx-1 text-zinc-400">→</span>
-          <span>{t.dest_name}</span>
-        </td>
-        <td className="px-3 py-3 align-top text-right font-mono text-xs">{t.line_count} 項</td>
-        <td className="px-3 py-3 align-top">
-          <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCls}`}>{stageText}</span>
-          <div className="mt-1 text-[10px] text-zinc-500">{t.status}</div>
-        </td>
-        <td className="px-3 py-3 align-top">
-          <TransferActions
-            transfer={t}
-            hqLocId={hqLocId}
-            busy={busy}
-            onAction={onTransferAction}
-          />
-        </td>
-      </tr>
+    idText = t.transfer_no;
+    title = <>{t.source_name} <span className="text-zinc-400 mx-1">→</span> {t.dest_name}</>;
+    subtitle = (
+      <>
+        {t.line_count} 項
+        {t.is_air_transfer && <span className="ml-1">· ✈ 空運</span>}
+        {t.shipping_temp && <span className="ml-1">· {t.shipping_temp}</span>}
+        <span className="ml-1 text-[10px] text-zinc-400">· {t.status}</span>
+      </>
     );
-  }
-
-  if (row.source === "shortage") {
+    timeIso = t.created_at;
+    actions = <TransferActions transfer={t} hqLocId={hqLocId} busy={busy} onAction={onTransferAction} />;
+  } else if (row.source === "shortage") {
     const sh = row.raw;
     const isBusy = busy?.startsWith(`shortage-${sh.order_id}`) ?? false;
-    return (
-      <tr className="bg-rose-50/40 hover:bg-rose-50 dark:bg-rose-950/20 dark:hover:bg-rose-950/40">{checkboxCell}
-        <td className="px-3 py-3 align-top">
-          <div className="flex flex-col gap-1">
-            <span className={`inline-flex w-fit rounded px-2 py-0.5 text-xs font-medium ${sourceCls}`}>{sourceText}</span>
-            <span className="font-mono text-xs">{sh.order_no}</span>
-          </div>
-        </td>
-        <td className="px-3 py-3 align-top text-xs text-zinc-500">
-          {new Date(sh.order_updated_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}
-        </td>
-        <td className="px-3 py-3 align-top text-xs">
-          <span>會員 #{sh.member_id ?? "—"}</span>
-          <span className="mx-1 text-zinc-400">→</span>
-          <span>{sh.store_name ?? "—"}</span>
-        </td>
-        <td className="px-3 py-3 align-top text-right font-mono text-xs">
-          <div className="font-bold text-rose-700 dark:text-rose-400">缺 {sh.total_unfulfillable}</div>
-          <div className="text-[10px] text-zinc-500">{sh.short_items.length} 項</div>
-        </td>
-        <td className="px-3 py-3 align-top">
-          <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCls}`}>{stageText}</span>
-          <div className="mt-1 text-[10px] text-zinc-500">
-            {sh.shortage_resolution ? RESOLUTION_LABEL[sh.shortage_resolution] ?? sh.shortage_resolution : "未處理"}
-          </div>
-          {sh.shortage_notified_at && (
-            <div className="mt-0.5 text-[9px] text-zinc-400">已通知 {new Date(sh.shortage_notified_at).toLocaleDateString("zh-TW")}</div>
-          )}
-        </td>
-        <td className="px-3 py-3 align-top">
-          <details className="text-xs">
-            <summary className="cursor-pointer text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">短缺品項</summary>
-            <ul className="mt-1 ml-3 list-disc space-y-0.5 text-[10px] text-zinc-600 dark:text-zinc-400">
-              {sh.short_items.map((it) => (
-                <li key={it.sku_id}>
-                  {it.sku_label}:訂 {it.order_qty},缺 <span className="font-bold text-rose-600">{it.demand_unfulfillable}</span>
-                </li>
-              ))}
-            </ul>
-          </details>
-          <div className="mt-2 flex flex-wrap gap-1">
-            <SpinButton
-              onClick={() => onShortageAction(sh.order_id, "notified")}
-              disabled={isBusy}
-              className="rounded border border-blue-400 bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"
-            >
-              📢 通知客戶
-            </SpinButton>
-            <SpinButton
-              onClick={() => onShortageAction(sh.order_id, "waiting_next_po")}
-              disabled={isBusy}
-              className="rounded border border-amber-400 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300"
-            >
-              ⏳ 等下批
-            </SpinButton>
-            <SpinButton
-              onClick={() => onShortageAction(sh.order_id, "reallocated")}
-              disabled={isBusy}
-              className="rounded border border-emerald-400 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-            >
-              🔄 改派
-            </SpinButton>
-            <SpinButton
-              onClick={() => onShortageAction(sh.order_id, "cancelled")}
-              disabled={isBusy}
-              className="rounded border border-red-400 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-700 dark:bg-red-950 dark:text-red-300"
-            >
-              ❌ 取消退款
-            </SpinButton>
-          </div>
-        </td>
-      </tr>
+    const itemsTooltip = sh.short_items
+      .map((it) => `${it.sku_label}:訂 ${it.order_qty}, 缺 ${it.demand_unfulfillable}`)
+      .join("\n");
+    idText = sh.order_no;
+    title = <>會員 #{sh.member_id ?? "—"} <span className="text-zinc-400 mx-1">·</span> {sh.store_name ?? "—"}</>;
+    subtitle = (
+      <span title={itemsTooltip}>
+        <span className="font-semibold text-rose-700 dark:text-rose-400">
+          缺 {sh.total_unfulfillable}({sh.short_items.length} 項)
+        </span>
+        {sh.shortage_resolution && (
+          <span className="ml-2 text-zinc-500">
+            · {RESOLUTION_LABEL[sh.shortage_resolution] ?? sh.shortage_resolution}
+          </span>
+        )}
+        {sh.shortage_notified_at && (
+          <span className="ml-2 text-zinc-400">已通知 {new Date(sh.shortage_notified_at).toLocaleDateString("zh-TW")}</span>
+        )}
+      </span>
+    );
+    timeIso = sh.order_updated_at;
+    actions = (
+      <>
+        <RowAction variant="primary" onClick={() => onShortageAction(sh.order_id, "notified")} disabled={isBusy}>通知客戶</RowAction>
+        <RowAction variant="warning" onClick={() => onShortageAction(sh.order_id, "waiting_next_po")} disabled={isBusy}>等下批</RowAction>
+        <RowAction variant="success" onClick={() => onShortageAction(sh.order_id, "reallocated")} disabled={isBusy}>改派</RowAction>
+        <RowAction variant="danger" onClick={() => onShortageAction(sh.order_id, "cancelled")} disabled={isBusy}>取消退款</RowAction>
+      </>
+    );
+  } else {
+    const a = row.raw;
+    idText = a.order_no;
+    title = <>{a.campaign_no ?? "—"} <span className="text-zinc-400 mx-1">→</span> {a.store_name ?? "—"}</>;
+    subtitle = (
+      <>
+        {a.line_count} 項
+        {a.is_air_transfer && <span className="ml-1">· ✈ 空運</span>}
+        <span className="ml-1">· {AID_STATUS_LABEL[a.status]}</span>
+      </>
+    );
+    timeIso = a.updated_at;
+    actions = (
+      <>
+        <AidOrderStatusActions order={{ id: a.id, status: a.status }} onChanged={onAidChanged} />
+        <RowAction variant="neutral" onClick={() => onOpenAidDetail(a.id)}>查看訂單</RowAction>
+      </>
     );
   }
 
-  const a = row.raw;
+  const time = new Date(timeIso).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" });
+
   return (
-    <tr className="hover:bg-zinc-50 dark:hover:bg-zinc-950">{checkboxCell}
-      <td className="px-3 py-3 align-top">
-        <div className="flex flex-col gap-1">
-          <span className={`inline-flex w-fit rounded px-2 py-0.5 text-xs font-medium ${sourceCls}`}>
+    <div className={`flex items-start gap-3 border-b border-l-4 px-4 py-3 transition hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-950 ${accent} ${row.source === "shortage" ? "bg-rose-50/30 dark:bg-rose-950/20" : ""} ${selected ? "bg-blue-50 dark:bg-blue-950/30" : ""}`}>
+      {/* checkbox */}
+      <div className="w-5 shrink-0 pt-1">
+        {showCheckbox && batchable ? (
+          <input type="checkbox" checked={selected} onChange={onToggleSelect} className="cursor-pointer" />
+        ) : null}
+      </div>
+
+      {/* source chip + 未讀 dot (sm+) */}
+      <div className="hidden sm:block w-24 shrink-0 pt-0.5">
+        <span className={`inline-flex w-fit items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium ${sourceCls}`}>
+          {isPending && <span className="h-1.5 w-1.5 rounded-full bg-current opacity-80" aria-hidden />}
+          {sourceText}
+        </span>
+      </div>
+
+      {/* 主旨 + 摘要 */}
+      <div className="min-w-0 flex-1">
+        <div className={`flex flex-wrap items-baseline gap-x-2 ${isPending ? "font-semibold" : "text-zinc-700 dark:text-zinc-300"}`}>
+          <span className="truncate text-sm">{title}</span>
+          <span className="font-mono text-[10px] text-zinc-500">{idText}</span>
+          <span className={`sm:hidden inline-flex rounded px-1.5 py-0.5 text-[9px] font-medium ${sourceCls}`}>
             {sourceText}
-            {a.is_air_transfer && <span className="ml-1">✈</span>}
           </span>
-          <span className="font-mono text-xs">{a.order_no}</span>
         </div>
-      </td>
-      <td className="px-3 py-3 align-top text-xs text-zinc-500">
-        {new Date(a.updated_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}
-      </td>
-      <td className="px-3 py-3 align-top text-xs">
-        <span>{a.campaign_no ?? "—"}</span>
-        <span className="mx-1 text-zinc-400">→</span>
-        <span>{a.store_name ?? "—"}</span>
-      </td>
-      <td className="px-3 py-3 align-top text-right font-mono text-xs">{a.line_count} 項</td>
-      <td className="px-3 py-3 align-top">
-        <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCls}`}>{stageText}</span>
-        <div className="mt-1 text-[10px] text-zinc-500">{AID_STATUS_LABEL[a.status]}</div>
-      </td>
-      <td className="px-3 py-3 align-top">
-        <div className="flex flex-col gap-1">
-          <AidOrderStatusActions order={{ id: a.id, status: a.status }} onChanged={onAidChanged} />
-          <SpinButton
-            onClick={() => onOpenAidDetail(a.id)}
-            className="self-start rounded border border-zinc-300 px-2 py-0.5 text-[10px] hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-          >
-            查看訂單
-          </SpinButton>
+        <div className="mt-0.5 truncate text-xs text-zinc-500">{subtitle}</div>
+      </div>
+
+      {/* 階段 chip 直接放在動作區左邊(時間移到動作下方右下) */}
+      <div className="hidden md:flex shrink-0 items-start pt-0.5">
+        <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] ${stageCls}`}>{stageText}</span>
+      </div>
+
+      {/* 動作 + 時間(右下)— 固定寬度 */}
+      <div className="flex w-[280px] shrink-0 flex-col items-end gap-1">
+        <div className="flex flex-wrap items-center justify-end gap-1">
+          {actions}
         </div>
-      </td>
-    </tr>
+        <span className="text-[11px] text-zinc-400">{time}</span>
+      </div>
+    </div>
   );
 }
 
@@ -1360,54 +1503,44 @@ function TransferActions({
   // draft: 可刪除
   if (transfer.status === "draft") {
     buttons.push(
-      <SpinButton
+      <RowAction
         key="delete"
+        variant="danger"
         onClick={() => onAction(transfer.id, "delete")}
         disabled={isBusy}
-        className="rounded border border-red-400 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-700 dark:bg-red-950 dark:text-red-300"
       >
-        × 刪除
-      </SpinButton>,
+        刪除
+      </RowAction>,
     );
   }
 
   // draft / confirmed → 出貨(RPC 不限 source,任何 source 都可以)
   if (transfer.status === "draft" || transfer.status === "confirmed") {
     buttons.push(
-      <SpinButton
+      <RowAction
         key="ship"
+        variant="success"
         onClick={() => onAction(transfer.id, "ship")}
         disabled={isBusy}
-        className="rounded border border-emerald-400 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
       >
-        🚚 出貨
-      </SpinButton>,
+        出貨
+      </RowAction>,
     );
   }
 
   // shipped + dest=HQ → 到倉
   if (transfer.status === "shipped" && isHqDest) {
     buttons.push(
-      <SpinButton
+      <RowAction
         key="arrive"
+        variant="primary"
         onClick={() => onAction(transfer.id, "arrive_at_hq")}
         disabled={isBusy}
-        className="rounded border border-blue-400 bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"
       >
-        📦 到倉
-      </SpinButton>,
+        到倉
+      </RowAction>,
     );
   }
 
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="text-[10px] text-zinc-500">{transfer.status}</div>
-      {buttons.length > 0 ? (
-        <div className="flex flex-wrap gap-1">{buttons}</div>
-      ) : null}
-      <Link href="/wms/outbound" className="text-[10px] text-blue-600 hover:underline dark:text-blue-400">
-        批次處理 →
-      </Link>
-    </div>
-  );
+  return <>{buttons}</>;
 }

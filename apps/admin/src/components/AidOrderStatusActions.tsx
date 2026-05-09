@@ -4,7 +4,7 @@ import { useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { translateRpcError } from "@/lib/rpcError";
 import { ORDER_STATUS_LABEL as STATUS_LABEL, type OrderStatus } from "@/lib/orderStatus";
-import SpinButton from "@/components/SpinButton";
+import { RowAction } from "@/components/RowAction";
 
 // 互助訂單狀態流程:
 //   pending → confirmed   (rpc_advance_order_status)
@@ -18,11 +18,9 @@ const ADVANCE_NEXT: Partial<Record<OrderStatus, OrderStatus>> = {
 export type AidOrderStatusActionsProps = {
   order: { id: number; status: OrderStatus };
   onChanged: () => void;
-  /** 顯示模式: "inline" 在表格內 (compact)、"detail" 在訂單明細頁 */
-  variant?: "inline" | "detail";
 };
 
-export function AidOrderStatusActions({ order, onChanged, variant = "inline" }: AidOrderStatusActionsProps) {
+export function AidOrderStatusActions({ order, onChanged }: AidOrderStatusActionsProps) {
   const [busy, setBusy] = useState(false);
   const advanceNext = ADVANCE_NEXT[order.status];
   const isShipAction = order.status === "confirmed";
@@ -91,52 +89,29 @@ export function AidOrderStatusActions({ order, onChanged, variant = "inline" }: 
     }
   }
 
-  const sizeCls =
-    variant === "detail"
-      ? "px-3 py-1.5 text-xs"
-      : "px-2 py-0.5 text-[10px]";
-
   return (
-    <div className="flex flex-wrap items-center gap-1">
+    <>
       {advanceNext && (
-        <SpinButton
+        <RowAction
+          variant="primary"
           onClick={advance}
           disabled={busy}
           title={`點擊 → ${STATUS_LABEL[advanceNext]}`}
-          className={`rounded bg-blue-600 font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50 ${sizeCls}`}
         >
           → {STATUS_LABEL[advanceNext]}
-        </SpinButton>
+        </RowAction>
       )}
       {isShipAction && (
-        <SpinButton
-          onClick={ship}
-          disabled={busy}
-          className={`rounded bg-emerald-600 font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 ${sizeCls}`}
-        >
-          🚚 派貨
-        </SpinButton>
-      )}
-      {order.status === "shipping" && (
-        <span className="text-[10px] text-zinc-400" title="此狀態由店家在「收貨」代辦頁點收貨後自動推進到「可取貨」">
-          (待店家收貨)
-        </span>
-      )}
-      {order.status === "ready" && (
-        <span className="text-[10px] text-zinc-400" title="此狀態由門市在「取貨」流程點取貨後自動推進到「已完成」">
-          (待門市取貨)
-        </span>
+        <RowAction variant="success" onClick={ship} disabled={busy}>
+          派貨
+        </RowAction>
       )}
       {isCancellable && (
-        <SpinButton
-          onClick={cancel}
-          disabled={busy}
-          className={`rounded bg-rose-600 font-semibold text-white shadow-sm hover:bg-rose-700 disabled:opacity-50 ${sizeCls}`}
-        >
+        <RowAction variant="danger" onClick={cancel} disabled={busy}>
           {order.status === "shipping" ? "撤回" : "取消"}
-        </SpinButton>
+        </RowAction>
       )}
-    </div>
+    </>
   );
 }
 

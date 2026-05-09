@@ -9,6 +9,7 @@ import { CampaignOrdersPanel } from "@/components/CampaignOrdersPanel";
 import { CampaignItemsTable } from "@/components/CampaignItemsTable";
 import { DatePicker } from "@/components/DatePicker";
 import SpinButton from "@/components/SpinButton";
+import { Table, THead, TBody, Tr, Th, Td, EmptyRow, LoadingRow } from "@/components/DataTable";
 
 type Status =
   | "draft" | "open" | "closed" | "ordered" | "receiving" | "ready" | "completed" | "cancelled";
@@ -44,7 +45,7 @@ const CLOSE_TYPE_BADGE: Record<CloseType, string> = {
   limited: "bg-pink-100 text-pink-800 dark:bg-pink-950 dark:text-pink-300",
 };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 
 type View = "list" | "week" | "month";
 
@@ -415,20 +416,17 @@ export default function CampaignsListPage() {
       )}
 
       {view === "list" && (
-      <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
-        <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-          <thead className="bg-zinc-50 dark:bg-zinc-900">
-            <tr>
-              <Th>團號</Th><Th>名稱</Th><Th>狀態</Th><Th>收單</Th><Th>開團/收單</Th><Th>取貨截止</Th><Th className="text-right">商品數</Th><Th className="text-right">下單總數</Th><Th className="text-right">更新</Th><Th>{""}</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-            {rows === null ? (
-              <tr><td colSpan={10} className="p-3 text-center text-zinc-500">載入中…</td></tr>
-            ) : rows.length === 0 ? (
-              <tr><td colSpan={10} className="p-6 text-center text-zinc-500">{total === 0 && !query && !status ? "還沒有開團，按「新增開團」開始。" : "沒有符合條件的開團。"}</td></tr>
-            ) : rows.map((r) => (
-              <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
+      <Table>
+        <THead>
+          <Th>團號</Th><Th>名稱</Th><Th>狀態</Th><Th>收單</Th><Th>開團/收單</Th><Th>取貨截止</Th><Th align="right">商品數</Th><Th align="right">下單總數</Th><Th align="right">更新</Th><Th>{""}</Th>
+        </THead>
+        <TBody>
+          {rows === null ? (
+            <LoadingRow colSpan={10} />
+          ) : rows.length === 0 ? (
+            <EmptyRow colSpan={10}>{total === 0 && !query && !status ? "還沒有開團，按「新增開團」開始。" : "沒有符合條件的開團。"}</EmptyRow>
+          ) : rows.map((r) => (
+            <Tr key={r.id}>
                 <Td className="font-mono">
                   <SpinButton onClick={() => openEdit(r.id)} className="hover:underline">{r.campaign_no}</SpinButton>
                 </Td>
@@ -445,8 +443,8 @@ export default function CampaignsListPage() {
                   {r.end_at ? new Date(r.end_at).toLocaleDateString("zh-TW") : "—"}
                 </Td>
                 <Td className="text-xs">{r.pickup_deadline ?? "—"}</Td>
-                <Td className="text-right font-mono">{itemCounts.get(r.id) ?? 0}</Td>
-                <Td className="text-right">
+                <Td align="right" className="font-mono">{itemCounts.get(r.id) ?? 0}</Td>
+                <Td align="right">
                   {(() => {
                     const oc = listOrderCounts.get(r.id) ?? { normalQty: 0, offsetQty: 0 };
                     const totalQty = oc.normalQty + oc.offsetQty;
@@ -471,7 +469,7 @@ export default function CampaignsListPage() {
                     );
                   })()}
                 </Td>
-                <Td className="text-right text-xs text-zinc-500">{new Date(r.updated_at).toLocaleString("zh-TW")}</Td>
+                <Td align="right" className="text-xs text-zinc-500">{new Date(r.updated_at).toLocaleString("zh-TW")}</Td>
                 <Td>
                   <div className="flex gap-2">
                     <SpinButton
@@ -508,11 +506,10 @@ export default function CampaignsListPage() {
                     )}
                   </div>
                 </Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </Tr>
+          ))}
+        </TBody>
+      </Table>
       )}
 
       <Modal
@@ -565,12 +562,6 @@ export default function CampaignsListPage() {
   );
 }
 
-function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <th className={`px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 ${className}`}>{children}</th>;
-}
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`px-4 py-3 ${className}`}>{children}</td>;
-}
 function PagerBtn({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
   return <SpinButton onClick={onClick} disabled={disabled} className="rounded-md border border-zinc-300 px-2 py-1 hover:bg-zinc-100 disabled:opacity-40 disabled:hover:bg-transparent dark:border-zinc-700 dark:hover:bg-zinc-800 dark:disabled:hover:bg-transparent">{children}</SpinButton>;
 }

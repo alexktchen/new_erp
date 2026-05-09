@@ -9,6 +9,7 @@ import { ProductForm, type ProductFormValues } from "@/components/ProductForm";
 import { ProductSkuSection, type ProductSkuSectionHandle } from "@/components/ProductSkuSection";
 import { DatePicker } from "@/components/DatePicker";
 import SpinButton from "@/components/SpinButton";
+import { Table, THead, TBody, Tr, Th, Td, EmptyRow } from "@/components/DataTable";
 
 type Status = "draft" | "active" | "inactive" | "discontinued";
 type SortKey = "updated_at" | "product_code" | "name" | "status";
@@ -36,7 +37,7 @@ const STATUS_LABEL: Record<Status, string> = {
   discontinued: "停產",
 };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 
 // 取貨天數 by 溫層（收單時間 + N 天 = 取貨截止）
 const PICKUP_DAYS_BY_STORAGE: Record<string, number> = {
@@ -562,52 +563,47 @@ function PageContent() {
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
-        <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-          <thead className="bg-zinc-50 dark:bg-zinc-900">
-            <tr>
-              <th className="w-10 px-3 py-2">
-                <input
-                  type="checkbox"
-                  checked={allOnPageSelected}
-                  ref={(el) => { if (el) el.indeterminate = !allOnPageSelected && someOnPageSelected; }}
-                  onChange={toggleAll}
-                  className="cursor-pointer"
-                />
-              </th>
-              <ThSort label="商品編號" col="product_code" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
-              <ThSort label="名稱" col="name" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
-              <Th>品牌 / 分類</Th>
-              <ThSort label="狀態" col="status" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
-              <ThSort label="更新時間" col="updated_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
-              <Th>{""}</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-            {rows === null ? (
-              <SkeletonRows />
-            ) : rows.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="p-6 text-center text-sm text-zinc-500">
-                  {total === 0 && !query && !categoryId && !brandId && !status
-                    ? "還沒有商品，按「新增商品」開始建立。"
-                    : "沒有符合條件的商品。"}
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => (
-                <tr
-                  key={r.id}
-                  className={`hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selectedIds.has(r.id) ? "bg-blue-50 dark:bg-blue-950/30" : ""}`}
-                >
-                  <td className="w-10 px-3 py-3">
+      <Table>
+        <THead>
+          <Th className="w-10">
+            <input
+              type="checkbox"
+              checked={allOnPageSelected}
+              ref={(el) => { if (el) el.indeterminate = !allOnPageSelected && someOnPageSelected; }}
+              onChange={toggleAll}
+              className="cursor-pointer"
+            />
+          </Th>
+          <ThSort label="商品編號" col="product_code" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
+          <ThSort label="名稱" col="name" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
+          <Th>品牌 / 分類</Th>
+          <ThSort label="狀態" col="status" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
+          <ThSort label="更新時間" col="updated_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
+          <Th>{""}</Th>
+        </THead>
+        <TBody>
+          {rows === null ? (
+            <SkeletonRows />
+          ) : rows.length === 0 ? (
+            <EmptyRow colSpan={7}>
+              {total === 0 && !query && !categoryId && !brandId && !status
+                ? "還沒有商品，按「新增商品」開始建立。"
+                : "沒有符合條件的商品。"}
+            </EmptyRow>
+          ) : (
+            rows.map((r) => (
+              <Tr
+                key={r.id}
+                className={selectedIds.has(r.id) ? "bg-blue-50 dark:bg-blue-950/30" : ""}
+              >
+                  <Td className="w-10">
                     <input
                       type="checkbox"
                       checked={selectedIds.has(r.id)}
                       onChange={() => toggleSelect(r.id)}
                       className="cursor-pointer"
                     />
-                  </td>
+                  </Td>
                   <Td className="font-mono">
                     <SpinButton onClick={() => openEdit(r.id)} className="hover:underline">
                       {r.product_code}
@@ -624,7 +620,7 @@ function PageContent() {
                   <Td>
                     <StatusBadge status={r.status} />
                   </Td>
-                  <Td className="text-right text-zinc-500">
+                  <Td align="right" className="text-zinc-500">
                     {new Date(r.updated_at).toLocaleString("zh-TW")}
                   </Td>
                   <Td>
@@ -635,12 +631,11 @@ function PageContent() {
                       編輯
                     </SpinButton>
                   </Td>
-                </tr>
+                </Tr>
               ))
             )}
-          </tbody>
-        </table>
-      </div>
+          </TBody>
+        </Table>
 
       {totalPages > 1 && (
         <div className="flex items-center justify-end gap-2 text-sm">
@@ -723,14 +718,6 @@ function PagerBtn({ onClick, disabled, children }: { onClick: () => void; disabl
   );
 }
 
-function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <th className={`px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 ${className}`}>
-      {children}
-    </th>
-  );
-}
-
 function ThSort({
   label, col, sortBy, sortDir, onToggle, align = "left",
 }: {
@@ -747,10 +734,6 @@ function ThSort({
       {label} <span className="text-zinc-400">{arrow}</span>
     </th>
   );
-}
-
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`px-4 py-3 ${className}`}>{children}</td>;
 }
 
 function StatusBadge({ status }: { status: Status }) {

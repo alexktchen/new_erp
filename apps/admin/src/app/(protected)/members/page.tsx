@@ -9,6 +9,7 @@ import { Modal } from "@/components/Modal";
 import { MemberForm, type MemberFormValues } from "@/components/MemberForm";
 import { MemberDetail } from "@/components/MemberDetail";
 import SpinButton from "@/components/SpinButton";
+import { Table, THead, TBody, Tr, Th, Td, EmptyRow } from "@/components/DataTable";
 
 type Status = "active" | "inactive" | "blocked" | "merged" | "deleted";
 type SortKey = "updated_at" | "member_no" | "name";
@@ -34,7 +35,7 @@ function displayPhone(p: string | null): string {
 
 type Store = { id: number; code: string; name: string };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 
 export default function MembersListPage() {
   return (
@@ -243,35 +244,28 @@ function MembersListBody() {
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
-        <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-          <thead className="bg-zinc-50 dark:bg-zinc-900">
-            <tr>
-              <ThSort label="編號" col="member_no" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
-              <ThSort label="姓名" col="name" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
-              <Th>手機</Th>
-              <Th className="text-right">積分</Th>
-              <Th className="text-right">儲值</Th>
-              <ThSort label="更新" col="updated_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
-              <Th>{""}</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-            {rows === null ? (
-              <SkeletonRows cols={7} />
-            ) : rows.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="p-6 text-center text-sm text-zinc-500">
-                  {total === 0 && !query
-                    ? "還沒有會員，按「新增會員」開始建立。"
-                    : "沒有符合條件的會員。"}
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => {
-                const bal = balances.get(r.id);
-                return (
-                  <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
+      <Table>
+        <THead>
+          <ThSort label="編號" col="member_no" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
+          <ThSort label="姓名" col="name" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
+          <Th>手機</Th>
+          <Th align="right">積分</Th>
+          <Th align="right">儲值</Th>
+          <ThSort label="更新" col="updated_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
+          <Th>{""}</Th>
+        </THead>
+        <TBody>
+          {rows === null ? (
+            <SkeletonRows cols={7} />
+          ) : rows.length === 0 ? (
+            <EmptyRow colSpan={7}>
+              {total === 0 && !query ? "還沒有會員，按「新增會員」開始建立。" : "沒有符合條件的會員。"}
+            </EmptyRow>
+          ) : (
+            rows.map((r) => {
+              const bal = balances.get(r.id);
+              return (
+                <Tr key={r.id}>
                     <Td className="font-mono">
                       <SpinButton
                         onClick={() => setModal({ mode: "detail", memberId: r.id, memberNo: r.member_no })}
@@ -334,13 +328,12 @@ function MembersListBody() {
                         </SpinButton>
                       </div>
                     </Td>
-                  </tr>
+                  </Tr>
                 );
               })
             )}
-          </tbody>
-        </table>
-      </div>
+        </TBody>
+      </Table>
 
       <Modal
         open={!!modal}
@@ -382,10 +375,6 @@ function MembersListBody() {
   );
 }
 
-function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <th className={`px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 ${className}`}>{children}</th>;
-}
-
 function ThSort({
   label, col, sortBy, sortDir, onToggle, align = "left",
 }: {
@@ -402,10 +391,6 @@ function ThSort({
       {label} <span className="text-zinc-400">{arrow}</span>
     </th>
   );
-}
-
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`px-4 py-3 ${className}`}>{children}</td>;
 }
 
 function SkeletonRows({ cols }: { cols: number }) {

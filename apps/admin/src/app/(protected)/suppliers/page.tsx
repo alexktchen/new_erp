@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
-import { Modal } from "@/components/Modal";
 import SpinButton from "@/components/SpinButton";
+import { Table, THead, TBody, Tr, Th, Td, EmptyRow, LoadingRow } from "@/components/DataTable";
+
+const PAGE_SIZE = 20;
 
 type Supplier = {
   id: number;
@@ -34,11 +36,20 @@ export default function SuppliersPage() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Supplier | null>(null);
   const [creating, setCreating] = useState(false);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(queryDraft), 250);
     return () => clearTimeout(t);
   }, [queryDraft]);
+
+  useEffect(() => { setPage(1); }, [query, showActive]);
+
+  const totalPages = Math.max(1, Math.ceil((rows?.length ?? 0) / PAGE_SIZE));
+  const paginated = useMemo(
+    () => (rows ?? []).slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [rows, page],
+  );
 
   const reload = async () => {
     let q = getSupabase()
@@ -119,51 +130,60 @@ export default function SuppliersPage() {
         </select>
       </div>
 
-      <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
-        <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-          <thead className="bg-zinc-50 dark:bg-zinc-900">
-            <tr>
-              <Th>代碼</Th><Th>名稱</Th><Th>聯絡人</Th><Th>電話</Th><Th>Email</Th><Th>付款</Th><Th>交期(天)</Th><Th>狀態</Th><Th>{""}</Th>
+      <Table>
+        <THead>
+          <Th>代碼</Th><Th>名稱</Th><Th>聯絡人</Th><Th>電話</Th><Th>Email</Th><Th>付款</Th><Th>交期(天)</Th><Th>狀態</Th><Th>{""}</Th>
+        </THead>
+        <TBody>
+          {rows === null ? (
+            <LoadingRow colSpan={9} />
+          ) : rows.length === 0 ? (
+            <EmptyRow colSpan={9}>尚無供應商</EmptyRow>
+          ) : paginated.map((r) => editing?.id === r.id ? (
+            <tr key={r.id}>
+              <td colSpan={9} className="p-0">
+                <SupplierForm
+                  initial={{ ...r, id: r.id }}
+                  title="編輯"
+                  onCancel={() => setEditing(null)}
+                  onSave={(v) => save({ ...v, id: r.id })}
+                />
+              </td>
             </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-            {rows === null ? (
-              <tr><td colSpan={9} className="p-3 text-center text-zinc-500">載入中…</td></tr>
-            ) : rows.length === 0 ? (
-              <tr><td colSpan={9} className="p-6 text-center text-zinc-500">尚無供應商</td></tr>
-            ) : rows.map((r) => editing?.id === r.id ? (
-              <tr key={r.id}>
-                <td colSpan={9} className="p-0">
-                  <SupplierForm
-                    initial={{ ...r, id: r.id }}
-                    title="編輯"
-                    onCancel={() => setEditing(null)}
-                    onSave={(v) => save({ ...v, id: r.id })}
-                  />
-                </td>
-              </tr>
-            ) : (
-              <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900">
-                <Td className="font-mono">{r.code}</Td>
-                <Td>{r.name}</Td>
-                <Td className="text-xs">{r.contact_name ?? "—"}</Td>
-                <Td className="font-mono text-xs">{r.phone ?? "—"}</Td>
-                <Td className="text-xs">{r.email ?? "—"}</Td>
-                <Td className="text-xs">{r.payment_terms ?? "—"}</Td>
-                <Td className="text-xs">{r.lead_time_days ?? "—"}</Td>
-                <Td>
-                  <span className={`inline-block rounded px-2 py-0.5 text-xs ${r.is_active ? "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"}`}>
-                    {r.is_active ? "啟用" : "停用"}
-                  </span>
-                </Td>
-                <Td>
-                  <SpinButton onClick={() => setEditing(r)} className="text-xs text-blue-600 hover:underline dark:text-blue-400">編輯</SpinButton>
-                </Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+          ) : (
+            <Tr key={r.id}>
+              <Td className="font-mono">{r.code}</Td>
+              <Td>{r.name}</Td>
+              <Td className="text-xs">{r.contact_name ?? "—"}</Td>
+              <Td className="font-mono text-xs">{r.phone ?? "—"}</Td>
+              <Td className="text-xs">{r.email ?? "—"}</Td>
+              <Td className="text-xs">{r.payment_terms ?? "—"}</Td>
+              <Td className="text-xs">{r.lead_time_days ?? "—"}</Td>
+              <Td>
+                <span className={`inline-block rounded px-2 py-0.5 text-xs ${r.is_active ? "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"}`}>
+                  {r.is_active ? "啟用" : "停用"}
+                </span>
+              </Td>
+              <Td>
+                <SpinButton onClick={() => setEditing(r)} className="text-xs text-blue-600 hover:underline dark:text-blue-400">編輯</SpinButton>
+              </Td>
+            </Tr>
+          ))}
+        </TBody>
+      </Table>
+
+      {(rows?.length ?? 0) > PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
+          <span className="text-xs text-zinc-500">
+            共 {rows?.length ?? 0} 筆 · 顯示 {(page - 1) * PAGE_SIZE + 1} - {Math.min(page * PAGE_SIZE, rows?.length ?? 0)}
+          </span>
+          <SpinButton onClick={() => setPage(1)} disabled={page === 1} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">« 第一頁</SpinButton>
+          <SpinButton onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">‹ 上頁</SpinButton>
+          <span className="text-xs text-zinc-500">{page} / {totalPages}</span>
+          <SpinButton onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">下頁 ›</SpinButton>
+          <SpinButton onClick={() => setPage(totalPages)} disabled={page === totalPages} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">最末頁 »</SpinButton>
+        </div>
+      )}
     </div>
   );
 }
@@ -226,12 +246,5 @@ function F({ label, children, className = "" }: { label: string; children: React
     </label>
   );
 }
-function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <th className={`px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 ${className}`}>{children}</th>;
-}
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`px-3 py-2 ${className}`}>{children}</td>;
-}
-
 const inputCls =
   "rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800";

@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import SpinButton from "@/components/SpinButton";
+import { Table, THead, TBody, Tr, Th, Td, EmptyRow, LoadingRow } from "@/components/DataTable";
+
+const PAGE_SIZE = 20;
 
 type Status = "pending" | "approved_transfer" | "approved_pr" | "shipped" | "received" | "rejected" | "cancelled";
 
@@ -49,6 +52,9 @@ export default function RestockListPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("pending");
+  const [page, setPage] = useState(1);
+
+  useEffect(() => { setPage(1); }, [tab]);
 
   useEffect(() => {
     (async () => {
@@ -97,14 +103,20 @@ export default function RestockListPage() {
     })();
   }, []);
 
-  const filtered = (rows ?? []).filter((r) => {
+  const filtered = useMemo(() => (rows ?? []).filter((r) => {
     if (tab === "all") return true;
     if (tab === "pending") return r.status === "pending";
     if (tab === "approved") return r.status === "approved_transfer" || r.status === "approved_pr" || r.status === "shipped";
     if (tab === "received") return r.status === "received";
     if (tab === "rejected") return r.status === "rejected" || r.status === "cancelled";
     return true;
-  });
+  }), [rows, tab]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const paginated = useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page],
+  );
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-6">
@@ -135,56 +147,65 @@ export default function RestockListPage() {
         ))}
       </div>
 
-      <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
-        <table className="min-w-full text-sm">
-          <thead className="bg-zinc-50 dark:bg-zinc-900">
-            <tr className="text-left text-xs uppercase tracking-wide text-zinc-500">
-              <th className="px-3 py-2">日期</th>
-              <th className="px-3 py-2">店</th>
-              <th className="px-3 py-2 text-right">商品數</th>
-              <th className="px-3 py-2 text-right">總金額</th>
-              <th className="px-3 py-2">狀態</th>
-              <th className="px-3 py-2">連結 / 拒絕原因</th>
-              <th className="px-3 py-2">備註</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {rows === null ? (
-              <tr><td colSpan={7} className="p-6 text-center text-zinc-500">載入中…</td></tr>
-            ) : filtered.length === 0 ? (
-              <tr><td colSpan={7} className="p-6 text-center text-zinc-500">沒有符合條件的申請</td></tr>
-            ) : filtered.map((r) => (
-              <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50">
-                <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-500">{new Date(r.created_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}</td>
-                <td className="px-3 py-2">{r.store_name ?? "—"}</td>
-                <td className="px-3 py-2 text-right font-mono">{r.line_count}</td>
-                <td className="px-3 py-2 text-right font-mono">${r.total_amount.toFixed(0)}</td>
-                <td className="px-3 py-2">
-                  <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[r.status]}`}>
-                    {STATUS_LABEL[r.status]}
-                  </span>
-                </td>
-                <td className="px-3 py-2 text-xs">
-                  {r.linked_transfer_no && (
-                    <Link href={`/wms/outbound?id=${r.linked_transfer_id}`} className="font-mono text-blue-600 hover:underline dark:text-blue-400">
-                      → {r.linked_transfer_no}
-                    </Link>
-                  )}
-                  {r.linked_pr_no && (
-                    <Link href={`/purchase/requests/edit?id=${r.linked_pr_id}`} className="font-mono text-blue-600 hover:underline dark:text-blue-400">
-                      → {r.linked_pr_no}
-                    </Link>
-                  )}
-                  {r.status === "rejected" && r.rejected_reason && <span className="text-red-600">拒絕：{r.rejected_reason}</span>}
-                </td>
-                <td className="max-w-xs px-3 py-2 text-xs text-zinc-500" title={r.notes ?? ""}>
-                  {r.notes ? r.notes.slice(0, 30) + (r.notes.length > 30 ? "…" : "") : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <Table>
+        <THead>
+          <Th>日期</Th>
+          <Th>店</Th>
+          <Th align="right">商品數</Th>
+          <Th align="right">總金額</Th>
+          <Th>狀態</Th>
+          <Th>連結 / 拒絕原因</Th>
+          <Th>備註</Th>
+        </THead>
+        <TBody>
+          {rows === null ? (
+            <LoadingRow colSpan={7} />
+          ) : filtered.length === 0 ? (
+            <EmptyRow colSpan={7}>沒有符合條件的申請</EmptyRow>
+          ) : paginated.map((r) => (
+            <Tr key={r.id}>
+              <Td className="whitespace-nowrap text-xs text-zinc-500">{new Date(r.created_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}</Td>
+              <Td>{r.store_name ?? "—"}</Td>
+              <Td align="right" className="font-mono">{r.line_count}</Td>
+              <Td align="right" className="font-mono">${r.total_amount.toFixed(0)}</Td>
+              <Td>
+                <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[r.status]}`}>
+                  {STATUS_LABEL[r.status]}
+                </span>
+              </Td>
+              <Td className="text-xs">
+                {r.linked_transfer_no && (
+                  <Link href={`/wms/outbound?id=${r.linked_transfer_id}`} className="font-mono text-blue-600 hover:underline dark:text-blue-400">
+                    → {r.linked_transfer_no}
+                  </Link>
+                )}
+                {r.linked_pr_no && (
+                  <Link href={`/purchase/requests/edit?id=${r.linked_pr_id}`} className="font-mono text-blue-600 hover:underline dark:text-blue-400">
+                    → {r.linked_pr_no}
+                  </Link>
+                )}
+                {r.status === "rejected" && r.rejected_reason && <span className="text-red-600">拒絕：{r.rejected_reason}</span>}
+              </Td>
+              <Td className="max-w-xs text-xs text-zinc-500">
+                <span title={r.notes ?? ""}>{r.notes ? r.notes.slice(0, 30) + (r.notes.length > 30 ? "…" : "") : "—"}</span>
+              </Td>
+            </Tr>
+          ))}
+        </TBody>
+      </Table>
+
+      {filtered.length > PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
+          <span className="text-xs text-zinc-500">
+            共 {filtered.length} 筆 · 顯示 {(page - 1) * PAGE_SIZE + 1} - {Math.min(page * PAGE_SIZE, filtered.length)}
+          </span>
+          <SpinButton onClick={() => setPage(1)} disabled={page === 1} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">« 第一頁</SpinButton>
+          <SpinButton onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">‹ 上頁</SpinButton>
+          <span className="text-xs text-zinc-500">{page} / {totalPages}</span>
+          <SpinButton onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">下頁 ›</SpinButton>
+          <SpinButton onClick={() => setPage(totalPages)} disabled={page === totalPages} className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800">最末頁 »</SpinButton>
+        </div>
+      )}
     </div>
   );
 }
