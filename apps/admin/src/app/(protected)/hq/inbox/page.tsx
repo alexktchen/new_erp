@@ -11,10 +11,11 @@ import { OrderDetail } from "@/components/OrderDetail";
 import { Modal } from "@/components/Modal";
 import { AidOrderStatusActions } from "@/components/AidOrderStatusActions";
 import { PickModal, type PickWave } from "@/components/PickModal";
+import ExceptionsContent from "@/components/ExceptionsContent";
 import { ORDER_STATUS_LABEL as AID_STATUS_LABEL, type OrderStatus as AidStatus } from "@/lib/orderStatus";
 
 type Stage = "pending" | "in_transit" | "done" | "rejected";
-type SourceTag = "restock" | "transfer" | "aid" | "shortage" | "picking";
+type SourceTag = "restock" | "transfer" | "aid" | "shortage" | "picking" | "exception";
 
 const STAGE_LABEL: Record<Stage, string> = {
   pending: "待處理",
@@ -36,6 +37,7 @@ const SOURCE_LABEL: Record<SourceTag, string> = {
   aid: "互助訂單",
   shortage: "⚠️ 短少訂單",
   picking: "撿貨單",
+  exception: "⚠️ 異常",
 };
 
 const SOURCE_COLOR: Record<SourceTag, string> = {
@@ -44,6 +46,7 @@ const SOURCE_COLOR: Record<SourceTag, string> = {
   aid: "bg-fuchsia-100 text-fuchsia-800 dark:bg-fuchsia-950 dark:text-fuchsia-300",
   shortage: "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300",
   picking: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+  exception: "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300",
 };
 
 const RESOLUTION_LABEL: Record<string, string> = {
@@ -84,6 +87,7 @@ type TransferRaw = {
   source_name: string;
   dest_name: string;
   line_count: number;
+  notes: string | null;
 };
 
 type AidRaw = {
@@ -144,9 +148,16 @@ function classifyRestock(s: RestockRaw["status"]): Stage {
 
 function classifyTransfer(t: TransferRaw): Stage {
   if (t.status === "draft" || t.status === "confirmed") return "pending";
+  // return_to_hq:status=shipped 表示「店家已寄出、HQ 待收」,從 HQ 角度是待處理
+  if (t.status === "shipped" && t.transfer_type === "return_to_hq") return "pending";
   if (t.status === "shipped") return "in_transit";
   if (t.status === "received") return "done";
   return "rejected";
+}
+
+// 退訂單(rpc_create_order_return 產生的 transfer,notes 以「[order return」開頭)
+function isOrderReturnTransfer(notes: string | null | undefined): boolean {
+  return !!notes && notes.startsWith("[order return");
 }
 
 function classifyAid(s: AidStatus): Stage {
@@ -290,11 +301,21 @@ async function fetchTransferRows(
   let q = sb
     .from("transfers")
     .select(
-      "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, shipped_at, received_at, created_at",
+      "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, notes, shipped_at, received_at, created_at",
       { count: "exact" },
     )
     .order("id", { ascending: false });
-  if (stage) q = q.in("status", TRANSFER_STATUS_BY_STAGE[stage]);
+  // stage filter:
+  //   pending     → status in (draft, confirmed) OR (status=shipped AND type=return_to_hq)
+  //   in_transit  → status=shipped AND type<>return_to_hq
+  //   done/rejected → status in (...) 既有邏輯
+  if (stage === "pending") {
+    q = q.or("status.in.(draft,confirmed),and(status.eq.shipped,transfer_type.eq.return_to_hq)");
+  } else if (stage === "in_transit") {
+    q = q.eq("status", "shipped").neq("transfer_type", "return_to_hq");
+  } else if (stage) {
+    q = q.in("status", TRANSFER_STATUS_BY_STAGE[stage]);
+  }
   if (dateFrom) q = q.gte("created_at", `${dateFrom}T00:00:00`);
   if (dateTo) q = q.lte("created_at", `${dateTo}T23:59:59.999`);
   const start = (page - 1) * PAGE_SIZE;
@@ -616,7 +637,7 @@ async function fetchTransferRowsByIds(sb: SBClient, ids: number[]): Promise<Row[
   const { data, error } = await sb
     .from("transfers")
     .select(
-      "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, shipped_at, received_at, created_at",
+      "id, transfer_no, source_location, dest_location, status, transfer_type, shipping_temp, is_air_transfer, hq_notes, notes, shipped_at, received_at, created_at",
     )
     .in("id", ids);
   if (error) throw new Error("transfers: " + error.message);
@@ -774,11 +795,11 @@ function HqInboxContent() {
   const [sourceFilter, setSourceFilter] = useState<SourceTag | "all">(() => {
     if (typeof window === "undefined") return "picking";
     const fromUrl = new URLSearchParams(window.location.search).get("source");
-    if (fromUrl === "restock" || fromUrl === "transfer" || fromUrl === "aid" || fromUrl === "shortage" || fromUrl === "picking" || fromUrl === "all") {
+    if (fromUrl === "restock" || fromUrl === "transfer" || fromUrl === "aid" || fromUrl === "shortage" || fromUrl === "picking" || fromUrl === "exception" || fromUrl === "all") {
       return fromUrl;
     }
     const saved = window.localStorage.getItem("hq-inbox-source");
-    if (saved === "restock" || saved === "transfer" || saved === "aid" || saved === "shortage" || saved === "picking") {
+    if (saved === "restock" || saved === "transfer" || saved === "aid" || saved === "shortage" || saved === "picking" || saved === "exception") {
       return saved;
     }
     // 舊 localStorage 是 "all" → 改成 picking(因為 UI 沒入口了)
@@ -796,7 +817,7 @@ function HqInboxContent() {
   // 跟 ?source= URL param 同步(支援從 /transfers/aid redirect 過來)
   useEffect(() => {
     const src = searchParams.get("source");
-    if (src === "restock" || src === "transfer" || src === "aid" || src === "shortage" || src === "picking") {
+    if (src === "restock" || src === "transfer" || src === "aid" || src === "shortage" || src === "picking" || src === "exception") {
       setSourceFilter(src);
     }
   }, [searchParams]);
@@ -812,6 +833,8 @@ function HqInboxContent() {
 
   // server-side counts: per source × per stage(badge / tab 用)
   const [counts, setCounts] = useState<Record<SourceTag, Record<Stage, number>> | null>(null);
+  // 異常 chip count(由 <ExceptionsContent /> 透過 onCountChange 自報,不走 rpc_inbox_counts)
+  const [exceptionCount, setExceptionCount] = useState<number>(0);
   // server-side total: 當前 (source, stage) 篩選的總數
   const [total, setTotal] = useState(0);
   // 載入狀態
@@ -876,6 +899,7 @@ function HqInboxContent() {
           aid: { ...fallback, ...(raw.aid ?? {}) },
           shortage: { ...fallback, ...(raw.shortage ?? {}) },
           picking: pickingCounts,
+          exception: { ...fallback }, // 由 <ExceptionsContent /> 透過 onCountChange callback 自報、不走 rpc
         };
         setCounts(newCounts);
       } catch {
@@ -911,7 +935,7 @@ function HqInboxContent() {
           });
           if (keysErr) throw keysErr;
           const keysObj = (keysData ?? { rows: [], total: 0 }) as { rows: Array<{ row_key: string; source: SourceTag; stage: Stage; ts: string; source_id: number }>; total: number };
-          const idsBy: Record<SourceTag, number[]> = { restock: [], transfer: [], aid: [], shortage: [], picking: [] };
+          const idsBy: Record<SourceTag, number[]> = { restock: [], transfer: [], aid: [], shortage: [], picking: [], exception: [] };
           // v_hq_inbox 還沒含 picking;若未來 server-side 加進去,picking 鍵也已就位
           for (const k of keysObj.rows) {
             if (idsBy[k.source]) idsBy[k.source].push(Number(k.source_id));
@@ -979,12 +1003,12 @@ function HqInboxContent() {
 
   // source chip counts:依當前 stage,從 cached counts 算出
   const sourceCounts = useMemo(() => {
-    const c: Record<SourceTag, number> = { restock: 0, transfer: 0, aid: 0, shortage: 0, picking: 0 };
+    const c: Record<SourceTag, number> = { restock: 0, transfer: 0, aid: 0, shortage: 0, picking: 0, exception: 0 };
     if (!counts) return c;
     const stages: Stage[] = stage === "all"
       ? ["pending", "in_transit", "done", "rejected"]
       : [stage];
-    for (const s of ["restock", "transfer", "aid", "shortage", "picking"] as SourceTag[]) {
+    for (const s of ["restock", "transfer", "aid", "shortage", "picking", "exception"] as SourceTag[]) {
       for (const stg of stages) c[s] += counts[s][stg];
     }
     return c;
@@ -1286,13 +1310,20 @@ function HqInboxContent() {
     }
   }
 
-  async function handleTransferAction(transferId: number, action: "ship" | "arrive_at_hq" | "delete") {
+  async function handleTransferAction(transferId: number, action: "ship" | "arrive_at_hq" | "delete" | "reject") {
     const labels: Record<typeof action, string> = {
       ship: "從 HQ 出貨(扣庫存、推到「已出貨」)",
       arrive_at_hq: "確認到倉(全收、入 HQ 庫存)",
       delete: "刪除草稿",
+      reject: "取消(拒收、將貨退回 source location)",
     };
-    if (!confirm(`確定:${labels[action]}?`)) return;
+    let reason: string | null = null;
+    if (action === "reject") {
+      reason = prompt(`取消原因(必填,會留 audit log):`);
+      if (!reason || !reason.trim()) return;
+    } else {
+      if (!confirm(`確定:${labels[action]}?`)) return;
+    }
     setBusy(`transfer-${transferId}-${action}`);
     try {
       const sb = getSupabase();
@@ -1310,6 +1341,9 @@ function HqInboxContent() {
       } else if (action === "arrive_at_hq") {
         rpcName = "rpc_transfer_arrive_at_hq_batch";
         params = { p_transfer_ids: [transferId], p_hq_location_id: hqLocId, p_operator: operator };
+      } else if (action === "reject") {
+        rpcName = "rpc_reject_transfer";
+        params = { p_transfer_id: transferId, p_reason: reason, p_operator: operator };
       } else {
         rpcName = "rpc_transfer_batch_delete";
         params = { p_transfer_ids: [transferId], p_operator: operator };
@@ -1457,17 +1491,18 @@ function HqInboxContent() {
 
       {/* === 來源資料夾 chip bar === */}
       <div className="flex flex-wrap items-center gap-2">
-        {(["picking", "restock", "transfer", "aid", "shortage"] as const).map((s) => {
+        {(["picking", "restock", "transfer", "aid", "exception"] as const).map((s) => {
           const active = sourceFilter === s;
           const label = ({
             picking: "📋 撿貨單",
             restock: "📦 補貨申請",
             transfer: "🚚 轉貨單",
             aid: "🤝 互助訂單",
-            shortage: "⚠️ 短少訂單",
+            exception: "⚠️ 異常",
           } as const)[s];
           // chip 顯示「該來源」的待處理數(從 cached counts 算,固定值,跟 stage 切換無關)
-          const count = !counts ? 0 : counts[s].pending;
+          // exception 是 client-side 計算、直接使用 exceptionCount
+          const count = s === "exception" ? exceptionCount : (!counts ? 0 : counts[s].pending);
           return (
             <SpinButton
               key={s}
@@ -1530,6 +1565,10 @@ function HqInboxContent() {
 
       {/* === 主區 === */}
       <div className="flex flex-1 flex-col gap-3 min-w-0">
+        {sourceFilter === "exception" ? (
+          <ExceptionsContent showHeader={false} onCountChange={setExceptionCount} />
+        ) : (
+          <>
 
           {/* Toolbar: 搜尋 + 起迄日 + 閱讀模式 */}
           <div className="flex flex-wrap items-center gap-2">
@@ -1644,6 +1683,16 @@ function HqInboxContent() {
                   )}
                   {sourceFilter === "picking" && (
                     <>
+                      <Link
+                        href={`/picking/print-sign?waveIds=${paginatedRows
+                          .filter((r) => selected.has(r.key) && r.source === "picking")
+                          .map((r) => (r.raw as PickWave).id)
+                          .join(",")}`}
+                        target="_blank"
+                        className="inline-flex items-center rounded border border-blue-300 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300 dark:hover:bg-blue-900"
+                      >
+                        📄 列印簽收單 ({selected.size})
+                      </Link>
                       <RowAction variant="success" onClick={() => batchAction("派貨出倉")} disabled={batchBusy}>派貨出倉 ({selected.size})</RowAction>
                       <RowAction variant="danger" onClick={() => batchAction("取消")} disabled={batchBusy}>取消 ({selected.size})</RowAction>
                     </>
@@ -1740,6 +1789,8 @@ function HqInboxContent() {
               </SpinButton>
             </div>
           )}
+          </>
+        )}
       </div>
 
       {rejectModal && (
@@ -1831,7 +1882,7 @@ function MailRow({
   onOpenAidDetail: (id: number) => void;
   onAidChanged: () => void;
   onShortageAction: (orderId: number, action: "notified" | "cancelled" | "waiting_next_po" | "reallocated") => Promise<void>;
-  onTransferAction: (transferId: number, action: "ship" | "arrive_at_hq" | "delete") => Promise<void>;
+  onTransferAction: (transferId: number, action: "ship" | "arrive_at_hq" | "delete" | "reject") => Promise<void>;
   onPickingDispatch: (w: PickingRaw) => Promise<void>;
   onPickingEdit: (w: PickingRaw) => void;
   onPickingCancel: (w: PickingRaw) => Promise<void>;
@@ -1874,7 +1925,7 @@ function MailRow({
           </Link>
         )}
         {s.linked_transfer_id && (
-          <Link href={`/wms/outbound?id=${s.linked_transfer_id}`} className="ml-2 font-mono text-blue-600 hover:underline dark:text-blue-400">
+          <Link href={`/hq/inbox?source=transfer&id=${s.linked_transfer_id}`} className="ml-2 font-mono text-blue-600 hover:underline dark:text-blue-400">
             · {s.linked_transfer_no ?? `轉貨單 #${s.linked_transfer_id}`}
           </Link>
         )}
@@ -1901,8 +1952,21 @@ function MailRow({
     }
   } else if (row.source === "transfer") {
     const t = row.raw;
+    const isOrderReturn = isOrderReturnTransfer(t.notes);
     idText = t.transfer_no;
-    title = <>{t.source_name} <span className="text-zinc-400 mx-1">→</span> {t.dest_name}</>;
+    title = (
+      <>
+        {t.source_name} <span className="text-zinc-400 mx-1">→</span> {t.dest_name}
+        {isOrderReturn && (
+          <span
+            className="ml-2 inline-block rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+            title="由客戶退訂單建立"
+          >
+            🔁 退訂單
+          </span>
+        )}
+      </>
+    );
     subtitle = (
       <>
         {t.line_count} 項
@@ -2120,10 +2184,11 @@ function TransferActions({
   transfer: TransferRaw;
   hqLocId: number | null;
   busy: string | null;
-  onAction: (transferId: number, action: "ship" | "arrive_at_hq" | "delete") => Promise<void>;
+  onAction: (transferId: number, action: "ship" | "arrive_at_hq" | "delete" | "reject") => Promise<void>;
 }) {
   const isBusy = busy?.startsWith(`transfer-${transfer.id}`) ?? false;
   const isHqDest = hqLocId !== null && transfer.dest_location === hqLocId;
+  const isOrderReturn = isOrderReturnTransfer(transfer.notes);
   const buttons: React.ReactNode[] = [];
 
   // draft: 可刪除
@@ -2154,8 +2219,21 @@ function TransferActions({
     );
   }
 
-  // shipped + dest=HQ → 到倉
+  // shipped + dest=HQ → 到倉(退訂單多加一個「取消」、label 改成「確認入倉」)
   if (transfer.status === "shipped" && isHqDest) {
+    if (isOrderReturn) {
+      buttons.push(
+        <RowAction
+          key="reject"
+          variant="danger"
+          onClick={() => onAction(transfer.id, "reject")}
+          disabled={isBusy}
+          title="拒收、將貨退回原寄出 location"
+        >
+          取消
+        </RowAction>,
+      );
+    }
     buttons.push(
       <RowAction
         key="arrive"
@@ -2163,7 +2241,7 @@ function TransferActions({
         onClick={() => onAction(transfer.id, "arrive_at_hq")}
         disabled={isBusy}
       >
-        到倉
+        {isOrderReturn ? "確認入倉" : "到倉"}
       </RowAction>,
     );
   }
