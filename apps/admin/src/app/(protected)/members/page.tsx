@@ -15,7 +15,7 @@ import type { OrderStatus } from "@/lib/orderStatus";
 const PENDING_STATUSES: OrderStatus[] = ["pending", "confirmed", "shipping", "ready"];
 
 type Status = "active" | "inactive" | "blocked" | "merged" | "deleted";
-type SortKey = "updated_at" | "member_no" | "name";
+type SortKey = "updated_at" | "member_no" | "name" | "home_store_id" | "joined_at" | "last_visit_at" | "external_source";
 type SortDir = "asc" | "desc";
 
 type MemberRow = {
@@ -29,6 +29,10 @@ type MemberRow = {
   updated_at: string;
   joined_at: string;
   last_visit_at: string | null;
+  external_source: string | null;
+  external_id: string | null;
+  home_store_id: number | null;
+  takeout_store_name_hint: string | null;
 };
 
 /** 顯示手機，若是 LIFF auto-register 的 placeholder (line:Uxxxx) 則視為未填 */
@@ -129,7 +133,7 @@ function MembersListBody() {
       try {
         let q = getSupabase()
           .from("members")
-          .select("id, member_no, name, phone, avatar_url, tier_id, status, updated_at, joined_at, last_visit_at", { count: "exact" })
+          .select("id, member_no, name, phone, avatar_url, tier_id, status, updated_at, joined_at, last_visit_at, external_source, external_id, home_store_id, takeout_store_name_hint", { count: "exact" })
           .order(sortBy, { ascending: sortDir === "asc" })
           .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
 
@@ -227,12 +231,20 @@ function MembersListBody() {
             {loading ? "載入中…" : total === 0 ? "共 0 筆" : `共 ${total} 筆（顯示 ${fromIdx}-${toIdx}）`}
           </p>
         </div>
-        <SpinButton
-          onClick={() => setModal({ mode: "new" })}
-          className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
-        >
-          新增會員
-        </SpinButton>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/members/import"
+            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+          >
+            批次匯入
+          </Link>
+          <SpinButton
+            onClick={() => setModal({ mode: "new" })}
+            className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          >
+            新增會員
+          </SpinButton>
+        </div>
       </header>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -278,27 +290,33 @@ function MembersListBody() {
         <THead>
           <ThSort label="編號" col="member_no" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
           <ThSort label="姓名" col="name" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
+          <ThSort label="取貨店" col="home_store_id" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} />
           <Th>手機</Th>
           <Th align="right">訂單數</Th>
           <Th align="right">未取貨金額</Th>
           <Th align="right">儲值</Th>
-          <Th align="right">加入時間</Th>
-          <Th align="right">最後登入</Th>
+          <ThSort label="加入時間" col="joined_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
+          <ThSort label="最後登入" col="last_visit_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
           <ThSort label="更新" col="updated_at" sortBy={sortBy} sortDir={sortDir} onToggle={toggleSort} align="right" />
           <Th>{""}</Th>
         </THead>
         <TBody>
           {rows === null ? (
-            <SkeletonRows cols={10} />
+            <SkeletonRows cols={11} />
           ) : rows.length === 0 ? (
-            <EmptyRow colSpan={10}>
+            <EmptyRow colSpan={11}>
               {total === 0 && !query ? "還沒有會員，按「新增會員」開始建立。" : "沒有符合條件的會員。"}
             </EmptyRow>
           ) : (
             rows.map((r) => {
               const bal = balances.get(r.id);
+              const store = r.home_store_id ? stores.find((s) => s.id === r.home_store_id) : null;
               return (
-                <Tr key={r.id}>
+                <Tr
+                  key={r.id}
+                  onClick={() => setModal({ mode: "detail", memberId: r.id, memberNo: r.member_no })}
+                  className="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                >
                   <Td className="font-mono">
                     <SpinButton
                       onClick={() => setModal({ mode: "detail", memberId: r.id, memberNo: r.member_no })}
@@ -324,7 +342,27 @@ function MembersListBody() {
                         </div>
                       )}
                       <span>{r.name ?? "—"}</span>
+                      {r.external_source === "lele" && (
+                        <span
+                          title={r.external_id ? `樂樂顧客代號 ${r.external_id}` : "樂樂匯入"}
+                          className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-normal text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                        >
+                          樂樂
+                        </span>
+                      )}
                     </div>
+                  </Td>
+                  <Td className="text-xs">
+                    {store ? (
+                      <span>{store.name}</span>
+                    ) : r.takeout_store_name_hint ? (
+                      <span className="text-zinc-500" title="樂樂標籤、尚未對應到 store">
+                        {r.takeout_store_name_hint}
+                        <span className="ml-1 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">hint</span>
+                      </span>
+                    ) : (
+                      <span className="text-zinc-400">—</span>
+                    )}
                   </Td>
                   <Td className="font-mono text-xs">{displayPhone(r.phone)}</Td>
                   <Td align="right" className="font-mono">{bal?.orderCount ?? 0}</Td>
@@ -345,12 +383,14 @@ function MembersListBody() {
                     <div className="flex items-center justify-end gap-3">
                       <Link
                         href={`/pickup?q=${encodeURIComponent(r.member_no)}`}
+                        onClick={(e) => e.stopPropagation()}
                         className="text-xs text-emerald-600 hover:underline dark:text-emerald-400"
                       >
                         🔎 查訂單
                       </Link>
                       <SpinButton
-                        onClick={async () => {
+                        onClick={async (e) => {
+                          e.stopPropagation();
                           const { data } = await getSupabase()
                             .from("members")
                             .select("id, member_no, phone, name, gender, birthday, email, tier_id, home_store_id, status, notes")
