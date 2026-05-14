@@ -200,6 +200,14 @@ const TRANSFER_STATUS_BY_STAGE: Record<Stage, string[]> = {
   done: ["received"],
   rejected: ["cancelled"],
 };
+const TRANSFER_STATUS_LABEL: Record<string, string> = {
+  draft: "草稿",
+  confirmed: "已確認",
+  shipped: "已出貨",
+  received: "已收貨",
+  cancelled: "已取消",
+  closed: "已結案",
+};
 const AID_STATUS_BY_STAGE: Record<Stage, AidStatus[]> = {
   pending: ["pending", "confirmed"],
   in_transit: ["shipping"],
@@ -226,18 +234,30 @@ type SBClient = ReturnType<typeof getSupabase>;
 
 // 撈某張表（restock_request_lines / transfer_items / customer_order_items / picking_wave_items）
 // 對應每張單的 items 摘要：「品名×qty、品名×qty…」（最多前 4 個 SKU，其餘 +N）
+// 對 transfer_items 傳 includeFreeFormCols=true：自由轉貨行用 description 取代 sku label，並把估價附在後面
 async function fetchItemsSummaryMap(
   sb: SBClient,
   table: string,
   idCol: string,
   ids: number[],
   qtyCol: string,
+  includeFreeFormCols = false,
 ): Promise<Map<number, string>> {
   if (ids.length === 0) return new Map();
-  const { data } = await sb.from(table).select(`${idCol}, sku_id, ${qtyCol}`).in(idCol, ids);
-  const lines = (data ?? []) as unknown as Record<string, number | null>[];
+  const cols = includeFreeFormCols
+    ? `${idCol}, sku_id, ${qtyCol}, description, estimated_amount`
+    : `${idCol}, sku_id, ${qtyCol}`;
+  const { data } = await sb.from(table).select(cols).in(idCol, ids);
+  type Line = Record<string, number | string | null>;
+  const lines = (data ?? []) as unknown as Line[];
   const skuIds = Array.from(
-    new Set(lines.map((l) => Number(l.sku_id)).filter((x) => Number.isFinite(x)))
+    new Set(
+      lines
+        // 自由轉貨行有 description 就不靠 sku label
+        .filter((l) => !includeFreeFormCols || !l.description)
+        .map((l) => Number(l.sku_id))
+        .filter((x) => Number.isFinite(x))
+    )
   );
   let skuLabelMap = new Map<number, string>();
   if (skuIds.length > 0) {
@@ -264,12 +284,21 @@ async function fetchItemsSummaryMap(
   const partsMap = new Map<number, string[]>();
   for (const l of lines) {
     const id = Number(l[idCol]);
-    const skuId = Number(l.sku_id);
     const qty = Number(l[qtyCol] ?? 0);
-    if (!Number.isFinite(id) || !Number.isFinite(skuId)) continue;
-    const label = skuLabelMap.get(skuId) ?? `#${skuId}`;
+    if (!Number.isFinite(id)) continue;
+    let label: string;
+    let suffix = "";
+    if (includeFreeFormCols && typeof l.description === "string" && l.description) {
+      label = l.description;
+      const est = Number(l.estimated_amount ?? 0);
+      if (est > 0) suffix = `（估 $${est.toFixed(0)}）`;
+    } else {
+      const skuId = Number(l.sku_id);
+      if (!Number.isFinite(skuId)) continue;
+      label = skuLabelMap.get(skuId) ?? `#${skuId}`;
+    }
     const arr = partsMap.get(id) ?? [];
-    arr.push(`${label}×${qty}`);
+    arr.push(`${label}×${qty}${suffix}`);
     partsMap.set(id, arr);
   }
   const result = new Map<number, string>();
@@ -363,6 +392,7 @@ async function fetchTransferRows(
   page: number,
   dateFrom: string,
   dateTo: string,
+  transferKind: "all" | "store_to_store" | "return_to_hq" | "hq_to_store" | "aid_handoff" = "all",
 ): Promise<{ rows: Row[]; total: number }> {
   let q = sb
     .from("transfers")
@@ -382,6 +412,7 @@ async function fetchTransferRows(
   } else if (stage) {
     q = q.in("status", TRANSFER_STATUS_BY_STAGE[stage]);
   }
+  if (transferKind !== "all") q = q.eq("transfer_type", transferKind);
   if (dateFrom) q = q.gte("created_at", `${dateFrom}T00:00:00`);
   if (dateTo) q = q.lte("created_at", `${dateTo}T23:59:59.999`);
   const start = (page - 1) * PAGE_SIZE;
@@ -405,7 +436,7 @@ async function fetchTransferRows(
     }
   }
 
-  const itemsMap = await fetchItemsSummaryMap(sb, "transfer_items", "transfer_id", tIds, "qty_shipped");
+  const itemsMap = await fetchItemsSummaryMap(sb, "transfer_items", "transfer_id", tIds, "qty_shipped", true);
 
   const rows: Row[] = trs.map((t) => ({
     key: `transfer-${t.id}`,
@@ -733,7 +764,7 @@ async function fetchTransferRowsByIds(sb: SBClient, ids: number[]): Promise<Row[
       tLineMap.set(it.transfer_id, (tLineMap.get(it.transfer_id) ?? 0) + 1);
     }
   }
-  const itemsMap = await fetchItemsSummaryMap(sb, "transfer_items", "transfer_id", trs.map((t) => t.id), "qty_shipped");
+  const itemsMap = await fetchItemsSummaryMap(sb, "transfer_items", "transfer_id", trs.map((t) => t.id), "qty_shipped", true);
   return trs.map((t) => ({
     key: `transfer-${t.id}`,
     source: "transfer" as const,
@@ -911,6 +942,9 @@ function HqInboxContent() {
   // Aid 專屬篩選 (source=aid 時才顯示)
   const [aidModeFilter, setAidModeFilter] = useState<"all" | "air" | "via_warehouse">("all");
   const [aidStatusFilter, setAidStatusFilter] = useState<string>("");
+  // Transfer 專屬篩選 (source=transfer 時才顯示)
+  type TransferKind = "all" | "store_to_store" | "return_to_hq" | "hq_to_store" | "aid_handoff";
+  const [transferKindFilter, setTransferKindFilter] = useState<TransferKind>("all");
   const [page, setPage] = useState(1);
 
   // server-side counts: per source × per stage(badge / tab 用)
@@ -1043,7 +1077,7 @@ function HqInboxContent() {
           if (sourceFilter === "restock") {
             res = await fetchRestockRows(sb, stageArg, page, dateFrom, dateTo);
           } else if (sourceFilter === "transfer") {
-            res = await fetchTransferRows(sb, stageArg, page, dateFrom, dateTo);
+            res = await fetchTransferRows(sb, stageArg, page, dateFrom, dateTo, transferKindFilter);
           } else if (sourceFilter === "aid") {
             res = await fetchAidRows(sb, stageArg, page, dateFrom, dateTo, aidModeFilter, aidStatusFilter);
           } else if (sourceFilter === "picking") {
@@ -1068,7 +1102,7 @@ function HqInboxContent() {
     return () => {
       cancelled = true;
     };
-  }, [sourceFilter, stage, page, dateFrom, dateTo, aidModeFilter, aidStatusFilter, reloadTick]);
+  }, [sourceFilter, stage, page, dateFrom, dateTo, aidModeFilter, aidStatusFilter, transferKindFilter, reloadTick]);
 
   // stage tab counts:依當前 sourceFilter,從 cached counts 算出
   const stageCounts = useMemo(() => {
@@ -1135,7 +1169,7 @@ function HqInboxContent() {
   // 任何 server 端篩選變動 → 回到第 1 頁(避免 page 超出範圍)
   useEffect(() => {
     setPage(1);
-  }, [stage, sourceFilter, aidModeFilter, aidStatusFilter, dateFrom, dateTo]);
+  }, [stage, sourceFilter, aidModeFilter, aidStatusFilter, transferKindFilter, dateFrom, dateTo]);
 
   // 計算 group key for each row
   function getGroupKey(r: Row): { key: string; label: string } {
@@ -1703,6 +1737,36 @@ function HqInboxContent() {
         </div>
       )}
 
+      {/* Transfer 專屬篩選 — 選 轉貨單 才出現 */}
+      {sourceFilter === "transfer" && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs dark:border-blue-900 dark:bg-blue-950/30">
+          <span className="font-semibold text-blue-700 dark:text-blue-300">類型:</span>
+          {(
+            [
+              { v: "all", label: "全部" },
+              { v: "hq_to_store", label: "🚚 總倉派貨" },
+              { v: "store_to_store", label: "🔄 自由轉貨" },
+              { v: "return_to_hq", label: "↩ 退貨回總倉" },
+            ] as { v: typeof transferKindFilter; label: string }[]
+          ).map((opt) => {
+            const active = transferKindFilter === opt.v;
+            return (
+              <SpinButton
+                key={opt.v}
+                onClick={() => setTransferKindFilter(opt.v)}
+                className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
+                  active
+                    ? "border-blue-700 bg-blue-700 text-white"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                }`}
+              >
+                {opt.label}
+              </SpinButton>
+            );
+          })}
+        </div>
+      )}
+
       {/* === 主區 === */}
       <div className="flex flex-1 flex-col gap-3 min-w-0">
         {sourceFilter === "exception" ? (
@@ -2065,9 +2129,7 @@ function MailRow({
   onToggleSelect: () => void;
 }) {
   const isPending = row.stage === "pending";
-  const sourceCls = SOURCE_COLOR[row.source];
   const stageCls = STAGE_COLOR[row.stage];
-  const sourceText = SOURCE_LABEL[row.source];
   const stageText = STAGE_LABEL[row.stage];
   const accent = ({
     restock: "border-l-indigo-500",
@@ -2076,6 +2138,45 @@ function MailRow({
     shortage: "border-l-rose-500",
     picking: "border-l-emerald-500",
   } as const)[row.source];
+
+  // source chip:transfer 依 transfer_type 細分,其他用 SOURCE_LABEL/COLOR
+  // 註：互助訂單派貨實際走 hq_to_store + store_to_store（transfer_no 前綴 AT-），
+  // 不是 aid_handoff。aid_handoff transfer_type 目前沒任何 RPC 產生，故不放 mapping。
+  let sourceCls = SOURCE_COLOR[row.source];
+  let sourceText: string = SOURCE_LABEL[row.source];
+  let sourceTitle: string | undefined;
+  if (row.source === "transfer") {
+    const t = row.raw;
+    const isOrderReturn = isOrderReturnTransfer(t.notes);
+    const isAidTransfer = t.transfer_no.startsWith("AT-");
+    if (isOrderReturn) {
+      sourceCls = "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300";
+      sourceText = "🔁 退訂單";
+      sourceTitle = "由客戶退訂單建立";
+    } else if (isAidTransfer) {
+      sourceCls = "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-950 dark:text-fuchsia-300";
+      sourceText = "🤝 互助派貨";
+      sourceTitle = "互助訂單派貨（rpc_ship_aid_order 產生）";
+    } else {
+      switch (t.transfer_type) {
+        case "store_to_store":
+          sourceCls = "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300";
+          sourceText = "🔄 自由轉貨";
+          sourceTitle = "店與店之間自由轉貨（虛擬 SKU + 備註）";
+          break;
+        case "return_to_hq":
+          sourceCls = "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300";
+          sourceText = "↩ 退貨回總倉";
+          sourceTitle = "店端發起退貨回總倉";
+          break;
+        case "hq_to_store":
+          sourceCls = "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300";
+          sourceText = "🚚 總倉派貨";
+          sourceTitle = "總倉派貨到分店（撿貨單 wave）";
+          break;
+      }
+    }
+  }
 
   let idText: string;
   let title: React.ReactNode;
@@ -2128,14 +2229,6 @@ function MailRow({
     title = (
       <>
         {t.source_name} <span className="text-zinc-400 mx-1">→</span> {t.dest_name}
-        {isOrderReturn && (
-          <span
-            className="ml-2 inline-block rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-            title="由客戶退訂單建立"
-          >
-            🔁 退訂單
-          </span>
-        )}
       </>
     );
     subtitle = (
@@ -2143,7 +2236,7 @@ function MailRow({
         {t.line_count} 項
         {t.is_air_transfer && <span className="ml-1">· ✈ 空運</span>}
         {t.shipping_temp && <span className="ml-1">· {t.shipping_temp}</span>}
-        <span className="ml-1 text-[10px] text-zinc-400">· {t.status}</span>
+        <span className="ml-1 text-[10px] text-zinc-400">· {TRANSFER_STATUS_LABEL[t.status] ?? t.status}</span>
       </>
     );
     timeIso = t.created_at;
@@ -2315,8 +2408,11 @@ function MailRow({
       </div>
 
       {/* source chip + 未讀 dot (sm+) */}
-      <div className="hidden sm:block w-24 shrink-0 pt-0.5">
-        <span className={`inline-flex w-fit items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium ${sourceCls}`}>
+      <div className="hidden sm:block w-28 shrink-0 pt-0.5">
+        <span
+          className={`inline-flex w-fit items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium ${sourceCls}`}
+          title={sourceTitle}
+        >
           {isPending && <span className="h-1.5 w-1.5 rounded-full bg-current opacity-80" aria-hidden />}
           {sourceText}
         </span>
