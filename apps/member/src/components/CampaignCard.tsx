@@ -148,13 +148,13 @@ export default function CampaignCard({
             {campaign.name}
           </h3>
           <div className="flex items-baseline justify-between gap-2">
-            <div className="flex flex-col">
+            <div className="flex items-baseline gap-2">
               <span className="brand-gradient-text text-[28px] font-extrabold tabular-nums leading-none">
                 {priceText}
               </span>
-              {campaign.ordered_qty > 0 && (
-                <span className="mt-1 text-[13px] text-[var(--tertiary-label)] font-medium">
-                  已售出 {campaign.ordered_qty} 件
+              {campaign.order_count > 0 && (
+                <span className="text-[14px] font-medium text-[var(--tertiary-label)]">
+                  {campaign.order_count} 筆訂單
                 </span>
               )}
             </div>
@@ -220,13 +220,13 @@ export default function CampaignCard({
             </div>
           );
         })()}
-        <div className="flex items-baseline justify-between gap-2">
+        <div className="flex items-baseline gap-2">
           <div className="brand-gradient-text text-[24px] font-extrabold tabular-nums leading-none">
             {priceText}
           </div>
-          {campaign.ordered_qty > 0 && (
-            <div className="text-[12px] text-[var(--tertiary-label)] font-medium">
-              已售出 {campaign.ordered_qty}
+          {campaign.order_count > 0 && (
+            <div className="text-[12px] font-medium text-[var(--tertiary-label)]">
+              {campaign.order_count} 筆訂單
             </div>
           )}
         </div>
