@@ -145,9 +145,16 @@ export default function CampaignCard({
             {campaign.name}
           </h3>
           <div className="flex items-baseline justify-between gap-2">
-            <span className="brand-gradient-text text-[28px] font-extrabold tabular-nums leading-none">
-              {priceText}
-            </span>
+            <div className="flex flex-col">
+              <span className="brand-gradient-text text-[28px] font-extrabold tabular-nums leading-none">
+                {priceText}
+              </span>
+              {campaign.ordered_qty > 0 && (
+                <span className="mt-1 text-[13px] text-[var(--tertiary-label)] font-medium">
+                  已售出 {campaign.ordered_qty} 件
+                </span>
+              )}
+            </div>
             <span className="text-[13px] text-[var(--secondary-label)]">
               共 {campaign.item_count} 項
             </span>
@@ -209,8 +216,15 @@ export default function CampaignCard({
             </div>
           );
         })()}
-        <div className="brand-gradient-text text-[24px] font-extrabold tabular-nums leading-none">
-          {priceText}
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="brand-gradient-text text-[24px] font-extrabold tabular-nums leading-none">
+            {priceText}
+          </div>
+          {campaign.ordered_qty > 0 && (
+            <div className="text-[12px] text-[var(--tertiary-label)] font-medium">
+              已售出 {campaign.ordered_qty}
+            </div>
+          )}
         </div>
         {campaign.end_at && (
           <div className="inline-flex items-center gap-1 rounded-md bg-[var(--brand-soft)] px-1.5 py-0.5 text-[12px] font-semibold tabular-nums text-[var(--brand-strong)]">

@@ -46,6 +46,7 @@ type Item = {
   image_url: string | null;
   unit_price: number;
   cap_qty: number | null;
+  ordered_qty: number;
 };
 
 export default function CampaignDetailPage() {
@@ -229,8 +230,15 @@ export default function CampaignDetailPage() {
                           {it.variant_name && (
                             <div className="text-[13px] text-[var(--secondary-label)]">{it.variant_name}</div>
                           )}
-                          <div className="mt-0.5 text-[18px] font-bold tabular-nums text-[var(--brand-strong)] leading-none">
-                            ${Number(it.unit_price).toLocaleString()}
+                          <div className="mt-1 flex items-baseline gap-2">
+                            <div className="text-[18px] font-bold tabular-nums text-[var(--brand-strong)] leading-none">
+                              ${Number(it.unit_price).toLocaleString()}
+                            </div>
+                            {it.ordered_qty > 0 && (
+                              <div className="text-[12px] text-[var(--tertiary-label)]">
+                                已售出 {it.ordered_qty}
+                              </div>
+                            )}
                           </div>
                         </div>
                         {q > 0 && (
@@ -555,8 +563,15 @@ function BuySheet({
                           {it.variant_name}
                         </div>
                       )}
-                      <div className="mt-0.5 text-[18px] font-bold tabular-nums text-[var(--brand-strong)] leading-none">
-                        ${Number(it.unit_price).toLocaleString()}
+                      <div className="mt-1 flex items-baseline gap-2">
+                        <div className="text-[18px] font-bold tabular-nums text-[var(--brand-strong)] leading-none">
+                          ${Number(it.unit_price).toLocaleString()}
+                        </div>
+                        {it.ordered_qty > 0 && (
+                          <div className="text-[12px] text-[var(--tertiary-label)]">
+                            已售出 {it.ordered_qty}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <Stepper
