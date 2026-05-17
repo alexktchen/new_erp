@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
 import PageShell from "@/components/PageShell";
+import Spinner, { LoadingScreen } from "@/components/Spinner";
 import { PushNotificationManager } from "@/components/PushNotificationManager";
 import { usePushNotification } from "@/lib/usePushNotification";
 
@@ -168,7 +169,7 @@ export default function MePage() {
   if (loading) {
     return (
       <PageShell title="會員中心">
-        <p className="px-5 pt-4 text-[15px] text-[var(--tertiary-label)]">載入中…</p>
+        <LoadingScreen />
       </PageShell>
     );
   }
@@ -245,9 +246,9 @@ export default function MePage() {
               <button
                 onClick={generatePwaCode}
                 disabled={generating}
-                className="flex-shrink-0 rounded-full bg-[var(--ios-blue)] px-3 py-1.5 text-[13px] font-medium text-white active:opacity-80 disabled:opacity-50"
+                className="flex flex-shrink-0 items-center gap-1.5 rounded-full bg-[var(--ios-blue)] px-3 py-1.5 text-[13px] font-medium text-white active:opacity-80 disabled:opacity-50"
               >
-                {generating ? "..." : "PWA 碼"}
+                {generating ? <Spinner size={15} onColor /> : "PWA 碼"}
               </button>
             ) : pushState.isSupported && !pushState.subscription ? (
               <button
@@ -470,9 +471,9 @@ export default function MePage() {
               <button
                 type="submit"
                 disabled={saving}
-                className="flex-1 rounded-xl bg-[var(--ios-blue)] py-3 text-[16px] font-semibold text-white active:opacity-80 disabled:opacity-50"
+                className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[var(--ios-blue)] py-3 text-[16px] font-semibold text-white active:opacity-80 disabled:opacity-50"
               >
-                {saving ? "儲存中…" : "儲存"}
+                {saving ? <Spinner size={18} onColor /> : "儲存"}
               </button>
             </div>
           </form>
