@@ -56,13 +56,20 @@ type PivotRow = {
   neg_order_ids: number[];
 };
 
-type ViewBy = "pickup_date" | "order_date" | "campaign";
-type Metric = "item_qty" | "order_count" | "amount";
+type ViewBy = "order_date" | "campaign";
+type Metric = "item_qty" | "amount";
 
-// 把舊 LS 的 "count" 視為 "item_qty" (用戶真正想要的、之前命名誤導)
+// 把舊 LS / URL 殘留的 "count" / "order_count" 視為 "item_qty"
 function normalizeMetric(v: string | undefined | null): Metric | null {
-  if (v === "item_qty" || v === "order_count" || v === "amount") return v;
-  if (v === "count") return "item_qty"; // legacy migration
+  if (v === "item_qty" || v === "amount") return v;
+  if (v === "count" || v === "order_count") return "item_qty"; // legacy
+  return null;
+}
+
+// 「取貨日」分組已下架（2026-05-21）— 舊 LS / URL 殘留 fallback 到 campaign
+function normalizeViewBy(v: string | undefined | null): ViewBy | null {
+  if (v === "order_date" || v === "campaign") return v;
+  if (v === "pickup_date") return "campaign";
   return null;
 }
 
@@ -140,7 +147,7 @@ function PivotContent() {
 
   const [campaignIds, setCampaignIds] = useState<string[]>(initialCampaignIds);
   const [viewBy, setViewBy] = useState<ViewBy>(
-    (searchParams.get("viewBy") as ViewBy) || "campaign",
+    normalizeViewBy(searchParams.get("viewBy")) ?? "campaign",
   );
   const [dateFrom, setDateFrom] = useState(
     normalizeMonth(searchParams.get("from")) ?? def.from,
@@ -150,6 +157,9 @@ function PivotContent() {
   const [storeId, setStoreId] = useState(searchParams.get("storeId") ?? "");
   const [metric, setMetric] = useState<Metric>(
     normalizeMetric(searchParams.get("metric")) ?? "item_qty",
+  );
+  const [closedOnly, setClosedOnly] = useState<boolean>(
+    searchParams.get("closedOnly") === "1",
   );
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -196,12 +206,14 @@ function PivotContent() {
           status: OrderStatus[];
           storeId: string;
           metric: Metric;
+          closedOnly: boolean;
         }>;
         if (!searchParams.get("campaignIds") && Array.isArray(saved.campaignIds)) {
           setCampaignIds(saved.campaignIds);
         }
-        if (!searchParams.get("viewBy") && saved.viewBy) {
-          setViewBy(saved.viewBy);
+        if (!searchParams.get("viewBy")) {
+          const v = normalizeViewBy(saved.viewBy);
+          if (v) setViewBy(v);
         }
         if (!searchParams.get("from")) {
           const m = normalizeMonth(saved.dateFrom);
@@ -220,6 +232,9 @@ function PivotContent() {
         if (!searchParams.get("metric")) {
           const m = normalizeMetric(saved.metric);
           if (m) setMetric(m);
+        }
+        if (!searchParams.get("closedOnly") && typeof saved.closedOnly === "boolean") {
+          setClosedOnly(saved.closedOnly);
         }
       }
     } catch {
@@ -243,12 +258,13 @@ function PivotContent() {
           status: Array.from(statusSet),
           storeId,
           metric,
+          closedOnly,
         }),
       );
     } catch {
       /* noop */
     }
-  }, [hydrated, campaignIds, viewBy, dateFrom, dateTo, statusSet, storeId, metric]);
+  }, [hydrated, campaignIds, viewBy, dateFrom, dateTo, statusSet, storeId, metric, closedOnly]);
 
   // 分店帳號鎖
   const branchStoreId = useUserBranchStoreId(stores);
@@ -303,6 +319,7 @@ function PivotContent() {
           p_campaign_ids: campaignIds.length ? campaignIds.map((x) => Number(x)) : null,
           p_store_id: storeId ? Number(storeId) : null,
           p_statuses: statusArr,
+          p_closed_only: closedOnly ? true : null,
         });
         if (cancelled) return;
         if (rpcErr) {
@@ -322,7 +339,7 @@ function PivotContent() {
     return () => {
       cancelled = true;
     };
-  }, [hydrated, campaignIds, viewBy, dateFrom, dateTo, statusSet, storeId]);
+  }, [hydrated, campaignIds, viewBy, dateFrom, dateTo, statusSet, storeId, closedOnly]);
 
   const storeMap = useMemo(() => new Map(stores.map((s) => [s.id, s])), [stores]);
   const campaignMap = useMemo(() => new Map(campaigns.map((c) => [c.id, c])), [campaigns]);
@@ -427,24 +444,17 @@ function PivotContent() {
   }, [pivot]);
 
   // metric 取值 helper
-  // 訂單數淨值＝有效訂單數 − 取消/逾期/轉出 訂單數
-  const cellOrderCount = (c: CellAgg): number => c.posOrders.size - c.negOrders.size;
   const cellTouched = (c: CellAgg): number => c.posOrders.size + c.negOrders.size;
   const cellAllOrderIds = (c: CellAgg): number[] => [...c.posOrders, ...c.negOrders];
   const cellValue = (cell: CellAgg | undefined): number => {
     if (!cell) return 0;
-    if (metric === "item_qty") return cell.qtySum;
-    if (metric === "order_count") return cellOrderCount(cell);
-    return cell.amount;
+    return metric === "item_qty" ? cell.qtySum : cell.amount;
   };
   const fmtCellValue = (v: number): string => {
     if (metric === "amount") return fmtAmount(v);
-    // item_qty / order_count 都顯示數字 (qty 可能小數、round 2 位後去 trailing 0)
-    if (metric === "item_qty") {
-      const r = Math.round(v * 100) / 100;
-      return String(r);
-    }
-    return String(v);
+    // item_qty 可能小數、round 2 位後去 trailing 0
+    const r = Math.round(v * 100) / 100;
+    return String(r);
   };
 
   // Grand totals — 依 metric 取值
@@ -454,12 +464,7 @@ function PivotContent() {
     for (const g of pivot.groups) {
       for (const [, entry] of g.skus) {
         for (const [sid, cell] of entry.perStore) {
-          const v =
-            metric === "item_qty"
-              ? cell.qtySum
-              : metric === "order_count"
-              ? cell.posOrders.size - cell.negOrders.size
-              : cell.amount;
+          const v = metric === "item_qty" ? cell.qtySum : cell.amount;
           perStore.set(sid, (perStore.get(sid) ?? 0) + v);
           grand += v;
         }
@@ -564,14 +569,13 @@ function PivotContent() {
           )}
         </div>
 
-        {/* viewBy: 取貨日 / 訂單日 / 開團 */}
+        {/* viewBy: 訂單日 / 開團 */}
         <select
           value={viewBy}
           onChange={(e) => setViewBy(e.target.value as ViewBy)}
           className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
           title="樞紐表 row 的分組維度"
         >
-          <option value="pickup_date">分組：取貨日</option>
           <option value="order_date">分組：訂單日</option>
           <option value="campaign">分組：開團（收單期間）</option>
         </select>
@@ -582,8 +586,6 @@ function PivotContent() {
           title={
             viewBy === "campaign"
               ? "依開團模式：套用至 campaign 收單月份 (end_at)"
-              : viewBy === "pickup_date"
-              ? "依取貨日：套用至訂單 pickup_deadline 月份"
               : "依訂單日：套用至訂單 created_at 月份"
           }
         >
@@ -699,7 +701,7 @@ function PivotContent() {
         </div>
       )}
 
-      {/* Metric toggle: 品項數 / 訂單數 / 訂單金額 */}
+      {/* Metric toggle: 品項數 / 訂單金額 */}
       <div className="flex items-center gap-2 text-sm">
         <span className="text-zinc-500">數值：</span>
         <div className="inline-flex rounded-md border border-zinc-300 dark:border-zinc-700">
@@ -715,17 +717,6 @@ function PivotContent() {
             品項數
           </SpinButton>
           <SpinButton
-            onClick={() => setMetric("order_count")}
-            className={`border-l border-zinc-300 px-3 py-1.5 text-sm transition-colors dark:border-zinc-700 ${
-              metric === "order_count"
-                ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                : "bg-white text-zinc-700 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
-            }`}
-            title="不重複訂單數 (COUNT DISTINCT order_id)"
-          >
-            訂單數
-          </SpinButton>
-          <SpinButton
             onClick={() => setMetric("amount")}
             className={`rounded-r-md border-l border-zinc-300 px-3 py-1.5 text-sm transition-colors dark:border-zinc-700 ${
               metric === "amount"
@@ -737,6 +728,19 @@ function PivotContent() {
             訂單金額
           </SpinButton>
         </div>
+
+        {/* 只看已收單 toggle — campaign.status ∈ closed/ordered/receiving/ready/completed */}
+        <SpinButton
+          onClick={() => setClosedOnly((v) => !v)}
+          className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+            closedOnly
+              ? "border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300"
+              : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+          }`}
+          title="只看已過收單階段（closed / ordered / receiving / ready / completed）的開團"
+        >
+          只看已收單
+        </SpinButton>
 
         <div className="ml-auto flex items-center gap-1">
           <span className="hidden text-xs text-zinc-400 sm:inline">店別欄</span>
@@ -763,7 +767,7 @@ function PivotContent() {
 
       <div
         ref={scrollRef}
-        className="no-scrollbar overflow-x-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+        className="no-scrollbar max-h-[calc(100vh-280px)] overflow-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
       >
         {loading && pivot.groups.length === 0 ? (
           <p className="p-6 text-center text-sm text-zinc-500">載入中…</p>
@@ -771,24 +775,24 @@ function PivotContent() {
           <p className="p-6 text-center text-sm text-zinc-500">沒有符合條件的訂單。</p>
         ) : (
           <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-            <thead className="bg-zinc-50 dark:bg-zinc-900">
+            <thead className="sticky top-0 z-10 bg-zinc-50 shadow-[0_1px_0_0_rgb(228_228_231)] dark:bg-zinc-900 dark:shadow-[0_1px_0_0_rgb(39_39_42)]">
               <tr>
-                <th className="w-64 px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500">
+                <th className="w-64 bg-zinc-50 px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
                   {viewBy === "campaign" ? "開團" : "日期"}
                 </th>
-                <th className="min-w-[180px] px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500">
+                <th className="min-w-[180px] bg-zinc-50 px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
                   商品品項
                 </th>
                 {pivot.storeIds.map((sid) => (
                   <th
                     key={sid}
-                    className="min-w-[80px] px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-zinc-500"
+                    className="min-w-[80px] bg-zinc-50 px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-900"
                     title={storeMap.get(sid)?.code ?? ""}
                   >
                     {storeMap.get(sid)?.name ?? `店#${sid}`}
                   </th>
                 ))}
-                <th className="px-3 py-2 text-right text-xs font-bold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
+                <th className="bg-zinc-50 px-3 py-2 text-right text-xs font-bold uppercase tracking-wide text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
                   合計
                 </th>
               </tr>
@@ -918,8 +922,6 @@ function PivotContent() {
         說明：Cell 為「該 group × 該品項 × 該店」的
         {metric === "item_qty"
           ? "品項數量加總（Σ qty）"
-          : metric === "order_count"
-          ? "不重複訂單數（COUNT DISTINCT order_id）"
           : "金額合計（Σ qty × unit_price）"}
         ，點數字看訂單清單。
       </p>
