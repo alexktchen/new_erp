@@ -121,7 +121,6 @@ export function OrderDetail({
   const [items, setItems] = useState<ItemRow[] | null>(null);
   const [timeline, setTimeline] = useState<TimelineStep[] | null>(null);
   const [staffNames, setStaffNames] = useState<Map<string, string>>(new Map());
-  const [pickupReady, setPickupReady] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [transferOpen, setTransferOpen] = useState(false);
@@ -207,15 +206,6 @@ export function OrderDetail({
       const tl = await buildTimeline(headData, skuIds, onNavigate);
       if (!cancelled) setTimeline(tl);
 
-      // ========== 載入 pickup_ready (基於分店收貨 transfer 實際狀態) ==========
-      const { data: prData } = await sb
-        .from("v_order_pickup_ready")
-        .select("pickup_ready")
-        .eq("order_id", orderId)
-        .maybeSingle();
-      if (!cancelled) {
-        setPickupReady(((prData as { pickup_ready: boolean } | null)?.pickup_ready) ?? false);
-      }
     })();
     return () => { cancelled = true; };
   }, [orderId, reloadTick]);
@@ -356,7 +346,8 @@ export function OrderDetail({
 
   // 互助單：有來源單 + 至少一個 aid_transfer 品項（對齊 rpc_return_aid_order 的判定）
   const isAidOrder = head.transferred_from_order_id != null && items.some((it) => it.source === "aid_transfer");
-  const canTransfer = ["pending", "confirmed", "reserved", "ready"].includes(head.status);
+  // 貨還沒到分店不能轉單：source 必須 status='ready' (跟 DB rpc_transfer_order_* 一致)
+  const canTransfer = head.status === "ready";
   const canCancel = ["pending", "confirmed", "shipping"].includes(head.status);
   // 一般顧客訂單退回總倉（rpc_create_order_return）— 互助單不走這條（貨應退回原 source 店）
   const canReturn = !isAidOrder && ["shipping", "ready", "partially_completed", "completed", "expired"].includes(head.status);
@@ -420,11 +411,7 @@ export function OrderDetail({
     setReloadTick((n) => n + 1);
   }
   const pickableItems = items.filter((it) => ["pending", "reserved", "ready"].includes(it.status));
-  // 取貨判斷改用 v_order_pickup_ready (基於分店收貨 transfer 實際狀態)
-  // 不再依賴 customer_orders.status === 'ready'（status 同步可能漏推）
-  const canPickup = pickableItems.length > 0
-    && !["completed","expired","cancelled","transferred_out"].includes(head.status)
-    && pickupReady;
+  const canPickup = pickableItems.length > 0 && head.status === "ready";
   const memberLabel = head.member
     ? `${head.member.name ?? "—"} (${head.member.member_no})`
     : `(${head.nickname_snapshot ?? "—"})`;
