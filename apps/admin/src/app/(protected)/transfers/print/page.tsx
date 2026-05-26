@@ -180,6 +180,14 @@ function Body() {
     return () => { cancelled = true; };
   }, [transferId, paramError]);
 
+  // PDF 存檔 / 列印對話框預設檔名 → 用轉貨單號 (而非通用的 /transfers/print)
+  useEffect(() => {
+    if (!tx) return;
+    const original = document.title;
+    document.title = tx.transfer_no;
+    return () => { document.title = original; };
+  }, [tx]);
+
   // 資料載入完成 → 自動跳列印
   useEffect(() => {
     if (tx && items) {
