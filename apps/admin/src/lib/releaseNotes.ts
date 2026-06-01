@@ -5,7 +5,12 @@
 // 的判斷依據 —— 只要最新一筆的 id 跟使用者上次勾選「不再顯示」的 id 不同，
 // 公告就會再次自動跳出、鈴鐺也會亮紅點。
 
+import type { MenuKey } from "@/lib/menuSections";
+
 export type ReleaseTag = "feature" | "improvement" | "fix" | "tutorial";
+
+/** 公告大分類：教學影片 / 優化更新（公告詳細頁用此分兩大區） */
+export type ReleaseCategory = "tutorial" | "update";
 
 export type ReleaseMedia = {
   /**
@@ -34,6 +39,10 @@ export type ReleaseNote = {
   items: { tag: ReleaseTag; text: string }[];
   /** 操作教學圖（GIF / 截圖），顯示於完整公告頁 */
   media?: ReleaseMedia[];
+  /** 大分類：教學影片 or 優化更新（決定公告頁放哪一區） */
+  category: ReleaseCategory;
+  /** 屬於哪個左側 menu 功能（公告頁依此分組），對齊 menuSections.ts */
+  menu: MenuKey;
 };
 
 /** 完整公告頁的路徑 */
@@ -42,8 +51,35 @@ export const RELEASE_NOTES_PAGE = "/release-notes";
 // 最新的放最前面
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    id: "2026-07-01-member-merge",
+    date: "2026-07-01",
+    category: "tutorial",
+    menu: "members",
+    title: "📥 教學：把「虛擬會員」合併進 LINE 會員（訂單會一起搬）",
+    items: [
+      {
+        tag: "tutorial",
+        text: "客人原本都用「虛擬會員」加單，之後來門市取貨時才註冊綁定 LINE — 這時到該虛擬會員的會員資料頁，點「🔗 合併到已綁 LINE 會員」，搜尋並選擇對應的 LINE 會員後確認，訂單 / 儲值金 / 點數 / 卡片 / 標籤都會一起併到 LINE 會員。",
+      },
+      {
+        tag: "tutorial",
+        text: "注意：目標（已綁 LINE）會員若本身已經有訂單，則無法合併，請改選一個尚無訂單的 LINE 會員作為目標。合併後來源會被標為「已合併」，且不可還原。完整操作見下方影片。",
+      },
+    ],
+    media: [
+      {
+        src: "/release-notes/member-merge.mp4",
+        poster: "/release-notes/member-merge.png",
+        alt: "會員合併教學：開虛擬會員、點合併到已綁 LINE 會員、搜尋並選擇、填原因、確認，訂單與資料併入 LINE 會員",
+        caption: "會員合併教學：① 開虛擬會員 → ② 點「合併到已綁 LINE 會員」→ ③ 搜尋並選 LINE 會員 → ④ 填原因確認 → ⑤ 訂單/儲值/點數都併入。",
+      },
+    ],
+  },
+  {
     id: "2026-06-01-onboarding",
     date: "2026-06-01",
+    category: "tutorial",
+    menu: "general",
     title: "📱 會員 App 新手教學：安裝 App ＋ LINE 登入",
     items: [
       {
@@ -67,6 +103,8 @@ export const RELEASE_NOTES: ReleaseNote[] = [
   {
     id: "2026-06-01",
     date: "2026-06-01",
+    category: "update",
+    menu: "general",
     title: "🔔 新增更新公告通知，系統有更新不再錯過",
     items: [
       {
@@ -95,6 +133,21 @@ export const RELEASE_NOTES: ReleaseNote[] = [
 
 /** 最新一則公告（陣列第一筆） */
 export const LATEST_RELEASE: ReleaseNote | undefined = RELEASE_NOTES[0];
+
+/** 取某分類、某 menu 功能的公告（保持原本由新到舊的順序） */
+export function notesBy(category: ReleaseCategory, menu: MenuKey): ReleaseNote[] {
+  return RELEASE_NOTES.filter((n) => n.category === category && n.menu === menu);
+}
+
+/** 某分類下，每個 menu 各有幾則（給索引顯示數量 / 判斷是否「尚無」） */
+export function countByMenu(category: ReleaseCategory): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const n of RELEASE_NOTES) {
+    if (n.category !== category) continue;
+    out[n.menu] = (out[n.menu] ?? 0) + 1;
+  }
+  return out;
+}
 
 /** localStorage key：儲存使用者按下「不再顯示」時最新公告的 id */
 export const RELEASE_NOTES_DISMISS_KEY = "new_erp-release-notes-dismissed";
