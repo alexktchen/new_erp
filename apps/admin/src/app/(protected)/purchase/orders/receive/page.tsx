@@ -9,7 +9,7 @@
 //   5. 分店分配預設折疊(可選擇先收貨,稍後到派貨工作台處理)
 //   6. Sticky 底部 summary footer
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
@@ -97,6 +97,10 @@ function PageContent() {
   const [submitting, setSubmitting] = useState(false);
   const [invoiceNo, setInvoiceNo] = useState("");
   const [notes, setNotes] = useState("");
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [reloading, setReloading] = useState(false); // 送出成功後重新載入中：期間鎖住送出，避免用舊資料重複進貨
+  const submitLock = useRef(false); // 同步防重入鎖（React state 非同步，擋不住同一 tick 連點）
 
   useEffect(() => {
     if (!poId) {
@@ -104,6 +108,7 @@ function PageContent() {
       return;
     }
     let cancelled = false;
+    setError(null); // 每次（重新）載入先清掉舊錯誤
     (async () => {
       try {
         const sb = getSupabase();
@@ -226,11 +231,19 @@ function PageContent() {
           setPriorGRs(priorRows);
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+          setSuccessMsg(null); // 重載失敗就別再顯示「已完成」誤導
+        }
+      } finally {
+        if (!cancelled) {
+          setReloading(false);        // 重載結束（成功或失敗）解除 UI 鎖
+          submitLock.current = false; // 釋放同步防重入鎖
+        }
       }
     })();
     return () => { cancelled = true; };
-  }, [poId]);
+  }, [poId, reloadKey]);
 
   function updateForm(idx: number, patch: Partial<ArrivalForm>) {
     setForms((cur) => {
@@ -342,8 +355,10 @@ function PageContent() {
   }, [forms, totals]);
 
   async function submit() {
-    if (!forms) return;
+    if (!forms || submitLock.current) return; // 同步防重入：擋同一 tick 連點與重載空檔
+    submitLock.current = true;
     setError(null);
+    setSuccessMsg(null);
     setSubmitting(true);
     try {
       const arrivals = forms
@@ -385,13 +400,38 @@ function PageContent() {
       if (rpcErr) throw new Error(translateRpcError(rpcErr));
 
       const result = data as { gr_no: string; wave_code: string | null };
-      alert(
-        `✅ 進貨完成!\n進貨單:${result.gr_no}` +
-          (result.wave_code ? `\n撿貨波次:${result.wave_code}` : "")
+      setSuccessMsg(
+        `✅ 已完成進貨:進貨單 ${result.gr_no}` +
+          (result.wave_code ? `／撿貨波次 ${result.wave_code}` : "") +
+          "。可繼續在本頁收下一項。"
       );
-      router.push("/wms/receiving");
+      // 本地立即套用本次到貨：累計已收 += 本次實到、清空本次輸入。
+      // 增量用「實際送進 RPC 的 arrivals 快照」計算（非即時畫面 state），
+      // 避免 RPC 進行中使用者改動輸入導致補償錯誤；即使隨後 reload 失敗，剩餘量仍正確、不會重複進貨。
+      const receivedByItem = new Map(arrivals.map((a) => [a.po_item_id, a.qty_received]));
+      setForms((cur) =>
+        cur
+          ? cur.map((f) => ({
+              ...f,
+              qty_already_received: f.qty_already_received + (receivedByItem.get(f.po_item_id) ?? 0),
+              // 清空所有「本次收貨」欄位，回到乾淨的下一筆狀態（unit_cost 是 PO 成本、保留）。
+              // 否則 reload 失敗 fallback 時，舊的差異原因/批號/效期會殘留並隨下一筆送出。
+              qty_received: "0",
+              qty_damaged: "0",
+              variance_reason: "",
+              batch_no: "",
+              expiry_date: "",
+              allocations: f.allocations.map((a) => ({ ...a, qty: "0" })),
+            }))
+          : cur
+      );
+      setInvoiceNo("");
+      setNotes("");
+      setReloading(true); // UI 鎖：顯示「更新中…」；submitLock 維持上鎖到 reload 完成才釋放
+      setReloadKey((k) => k + 1); // 重新載入 PO（權威資料）:更新累計已收/剩餘/進度與歷史 GR
     } catch (e) {
       setError(translateRpcError(e));
+      submitLock.current = false; // 失敗：釋放鎖讓使用者修正後重試
     } finally {
       setSubmitting(false);
     }
@@ -512,14 +552,16 @@ function PageContent() {
         <SpinButton
           type="button"
           onClick={fillAllArrived}
-          className="rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          disabled={submitting || reloading}
+          className="rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           全部填剩餘量
         </SpinButton>
         <SpinButton
           type="button"
           onClick={clearAllArrived}
-          className="rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          disabled={submitting || reloading}
+          className="rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           全部清空
         </SpinButton>
@@ -528,6 +570,18 @@ function PageContent() {
       {error && (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
           {error}
+        </div>
+      )}
+
+      {successMsg && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
+          <span>{successMsg}</span>
+          <Link
+            href="/wms/receiving"
+            className="shrink-0 rounded-md border border-emerald-300 px-3 py-1 text-xs hover:bg-emerald-100 dark:border-emerald-800 dark:hover:bg-emerald-900"
+          >
+            完成、返回進貨待辦 →
+          </Link>
         </div>
       )}
 
@@ -717,10 +771,10 @@ function PageContent() {
               <SpinButton
                 type="button"
                 onClick={submit}
-                disabled={!canSubmit || submitting}
+                disabled={!canSubmit || submitting || reloading}
                 className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:disabled:bg-zinc-700"
               >
-                {submitting ? "處理中…" : "確認進貨"}
+                {submitting ? "處理中…" : reloading ? "更新中…" : "確認進貨"}
               </SpinButton>
             </div>
           </div>
