@@ -14,6 +14,9 @@ const PAGE_SIZE = 20;
 
 type Status = "pending" | "approved_transfer" | "approved_pr" | "shipped" | "received" | "rejected" | "cancelled";
 
+// 一個商品底下可有多個品項（規格），品項各自帶數量
+type ItemGroup = { productName: string; variants: string[] };
+
 type Row = {
   id: number;
   requesting_store_id: number;
@@ -28,7 +31,7 @@ type Row = {
   created_at: string;
   line_count: number;
   total_amount: number;
-  items_summary: string;
+  item_groups: ItemGroup[];
 };
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -76,8 +79,9 @@ export default function RestockListPage() {
       if (err) { setError(err.message); return; }
       const reqRows = (data ?? []) as unknown as Array<Row & { stores?: { name: string } }>;
       const ids = reqRows.map((r) => r.id);
-      // 取 line count + total + items summary（含 sku_code + 商品名）
-      const lineMap = new Map<number, { count: number; total: number; summary: string }>();
+      // 取 line count + total；品項依商品分組（一個商品可帶多個品項/規格）
+      const lineMap = new Map<number, { count: number; total: number }>();
+      const groupMap = new Map<number, ItemGroup[]>();
       if (ids.length > 0) {
         const { data: lineData } = await sb
           .from("restock_request_lines")
@@ -87,7 +91,7 @@ export default function RestockListPage() {
 
         // 撈 SKU + 商品名（restock_request_lines.sku_id 有 FK 但兩階段 fetch 較穩）
         const skuIds = Array.from(new Set(lines.map((l) => l.sku_id))).filter((x) => x != null);
-        let skuLabelMap = new Map<number, string>();
+        let skuInfoMap = new Map<number, { productKey: string; productName: string; variantName: string | null; skuCode: string }>();
         if (skuIds.length > 0) {
           const { data: skus } = await sb
             .from("skus")
@@ -100,32 +104,40 @@ export default function RestockListPage() {
             const { data: prods } = await sb.from("products").select("id, name").in("id", prodIds);
             prodNameMap = new Map(((prods ?? []) as { id: number; name: string }[]).map((p) => [p.id, p.name]));
           }
-          skuLabelMap = new Map(
+          skuInfoMap = new Map(
             skuArr.map((s) => {
-              // 品名 + 品相一起顯示（品相有值才接，無則退回 sku_code）
               const prodName = s.product_id != null ? prodNameMap.get(s.product_id) ?? null : null;
-              const base = prodName ?? s.sku_code;
-              const label = s.variant_name ? `${base} / ${s.variant_name}` : base;
-              return [s.id, label];
+              return [s.id, {
+                productKey: s.product_id != null ? `p${s.product_id}` : `s${s.id}`,
+                productName: prodName ?? s.sku_code,
+                variantName: s.variant_name,
+                skuCode: s.sku_code,
+              }];
             })
           );
         }
 
-        const partsMap = new Map<number, string[]>();
+        // 每張申請：依商品 key 分組，同商品的多個品項收在一起
+        const grpTmp = new Map<number, Map<string, ItemGroup>>();
         for (const l of lines) {
-          const slot = lineMap.get(l.request_id) ?? { count: 0, total: 0, summary: "" };
+          const slot = lineMap.get(l.request_id) ?? { count: 0, total: 0 };
           slot.count += 1;
           slot.total += Number(l.qty) * Number(l.unit_price);
           lineMap.set(l.request_id, slot);
-          const label = skuLabelMap.get(l.sku_id) ?? `#${l.sku_id}`;
-          const parts = partsMap.get(l.request_id) ?? [];
-          parts.push(`${label}×${Number(l.qty)}`);
-          partsMap.set(l.request_id, parts);
+
+          const info = skuInfoMap.get(l.sku_id);
+          const productName = info?.productName ?? `#${l.sku_id}`;
+          const productKey = info?.productKey ?? `s${l.sku_id}`;
+          // 品項標籤：品相有值用品相，無則退回 sku_code
+          const variantLabel = `${info?.variantName ?? info?.skuCode ?? `#${l.sku_id}`}×${Number(l.qty)}`;
+
+          const g = grpTmp.get(l.request_id) ?? new Map<string, ItemGroup>();
+          const existing = g.get(productKey);
+          if (existing) existing.variants.push(variantLabel);
+          else g.set(productKey, { productName, variants: [variantLabel] });
+          grpTmp.set(l.request_id, g);
         }
-        for (const [rid, parts] of partsMap) {
-          const slot = lineMap.get(rid);
-          if (slot) slot.summary = parts.join("、");
-        }
+        for (const [rid, g] of grpTmp) groupMap.set(rid, Array.from(g.values()));
       }
       // 取 transfer / pr 編號
       const transferIds = reqRows.map((r) => r.linked_transfer_id).filter((x): x is number => !!x);
@@ -146,7 +158,7 @@ export default function RestockListPage() {
         store_name: r.stores?.name ?? null,
         line_count: lineMap.get(r.id)?.count ?? 0,
         total_amount: lineMap.get(r.id)?.total ?? 0,
-        items_summary: lineMap.get(r.id)?.summary ?? "",
+        item_groups: groupMap.get(r.id) ?? [],
         linked_transfer_no: r.linked_transfer_id ? xferMap.get(r.linked_transfer_id) ?? null : null,
         linked_pr_no: r.linked_pr_id ? prMap.get(r.linked_pr_id) ?? null : null,
       })));
@@ -219,6 +231,7 @@ export default function RestockListPage() {
           <Th>日期</Th>
           <Th>店</Th>
           <Th align="right">商品數</Th>
+          <Th>商品</Th>
           <Th>品項</Th>
           <Th align="right">總金額</Th>
           <Th>狀態</Th>
@@ -228,71 +241,93 @@ export default function RestockListPage() {
         </THead>
         <TBody>
           {rows === null ? (
-            <LoadingRow colSpan={9} />
+            <LoadingRow colSpan={10} />
           ) : filtered.length === 0 ? (
-            <EmptyRow colSpan={9}>沒有符合條件的申請</EmptyRow>
-          ) : paginated.map((r) => (
-            <Tr
-              key={r.id}
-              onClick={() => setDetailId(r.id)}
-              className="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-950"
-            >
-              <Td className="whitespace-nowrap text-xs text-zinc-500">{new Date(r.created_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}</Td>
-              <Td>{r.store_name ?? "—"}</Td>
-              <Td align="right" className="font-mono">{r.line_count}</Td>
-              <Td className="max-w-md text-xs text-zinc-600 dark:text-zinc-300">
-                <span title={r.items_summary} className="line-clamp-2">{r.items_summary || "—"}</span>
-              </Td>
-              <Td align="right" className="font-mono">${r.total_amount.toFixed(0)}</Td>
-              <Td>
-                <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[r.status]}`}>
-                  {STATUS_LABEL[r.status]}
-                </span>
-              </Td>
-              <Td className="text-xs">
-                {r.linked_transfer_no && (
-                  canFollowLinks ? (
-                    <Link
-                      href={`/hq/inbox?source=transfer&id=${r.linked_transfer_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-                    >
-                      → {r.linked_transfer_no}
-                    </Link>
-                  ) : (
-                    <span className="font-mono text-zinc-600 dark:text-zinc-300">→ {r.linked_transfer_no}</span>
-                  )
-                )}
-                {r.linked_pr_no && (
-                  canFollowLinks ? (
-                    <Link
-                      href={`/purchase/requests/edit?id=${r.linked_pr_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-                    >
-                      → {r.linked_pr_no}
-                    </Link>
-                  ) : (
-                    <span className="font-mono text-zinc-600 dark:text-zinc-300">→ {r.linked_pr_no}</span>
-                  )
-                )}
-                {r.status === "rejected" && r.rejected_reason && <span className="text-red-600">拒絕：{r.rejected_reason}</span>}
-              </Td>
-              <Td className="max-w-xs text-xs text-zinc-500">
-                <span title={r.notes ?? ""}>{r.notes ? r.notes.slice(0, 30) + (r.notes.length > 30 ? "…" : "") : "—"}</span>
-              </Td>
-              <Td align="right">
-                {r.status === "pending" && (
-                  <SpinButton
-                    onClick={(e) => { e.stopPropagation(); return handleDelete(r); }}
-                    className="rounded-md border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+            <EmptyRow colSpan={10}>沒有符合條件的申請</EmptyRow>
+          ) : paginated.flatMap((r) => {
+            // 每個品項獨立一列；同商品的多個品項用 rowSpan 併「商品」欄，
+            // 申請層級欄位（日期/店/金額/狀態/連結/備註/操作）rowSpan 併整張申請。
+            const groups = r.item_groups.length > 0 ? r.item_groups : [{ productName: "—", variants: ["—"] }];
+            const totalLines = groups.reduce((s, g) => s + Math.max(1, g.variants.length), 0);
+            return groups.flatMap((g, gi) => {
+              const variants = g.variants.length > 0 ? g.variants : ["—"];
+              return variants.map((v, vi) => {
+                const firstOfRequest = gi === 0 && vi === 0;
+                const firstOfGroup = vi === 0;
+                return (
+                  <Tr
+                    key={`${r.id}:${gi}:${vi}`}
+                    onClick={() => setDetailId(r.id)}
+                    className="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-950"
                   >
-                    刪除
-                  </SpinButton>
-                )}
-              </Td>
-            </Tr>
-          ))}
+                    {firstOfRequest && (
+                      <>
+                        <Td rowSpan={totalLines} className="whitespace-nowrap align-top text-xs text-zinc-500">{new Date(r.created_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })}</Td>
+                        <Td rowSpan={totalLines} className="align-top">{r.store_name ?? "—"}</Td>
+                        <Td rowSpan={totalLines} align="right" className="align-top font-mono">{r.line_count}</Td>
+                      </>
+                    )}
+                    {firstOfGroup && (
+                      <Td rowSpan={variants.length} className="max-w-[14rem] break-words align-top text-xs font-medium text-zinc-700 dark:text-zinc-200">{g.productName}</Td>
+                    )}
+                    <Td className="max-w-[16rem] break-words align-top text-xs text-zinc-600 dark:text-zinc-300">{v}</Td>
+                    {firstOfRequest && (
+                      <>
+                        <Td rowSpan={totalLines} align="right" className="align-top font-mono">${r.total_amount.toFixed(0)}</Td>
+                        <Td rowSpan={totalLines} className="align-top">
+                          <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[r.status]}`}>
+                            {STATUS_LABEL[r.status]}
+                          </span>
+                        </Td>
+                        <Td rowSpan={totalLines} className="align-top text-xs">
+                          {r.linked_transfer_no && (
+                            canFollowLinks ? (
+                              <Link
+                                href={`/hq/inbox?source=transfer&id=${r.linked_transfer_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+                              >
+                                → {r.linked_transfer_no}
+                              </Link>
+                            ) : (
+                              <span className="font-mono text-zinc-600 dark:text-zinc-300">→ {r.linked_transfer_no}</span>
+                            )
+                          )}
+                          {r.linked_pr_no && (
+                            canFollowLinks ? (
+                              <Link
+                                href={`/purchase/requests/edit?id=${r.linked_pr_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+                              >
+                                → {r.linked_pr_no}
+                              </Link>
+                            ) : (
+                              <span className="font-mono text-zinc-600 dark:text-zinc-300">→ {r.linked_pr_no}</span>
+                            )
+                          )}
+                          {r.status === "rejected" && r.rejected_reason && <span className="text-red-600">拒絕：{r.rejected_reason}</span>}
+                        </Td>
+                        <Td rowSpan={totalLines} className="max-w-xs align-top text-xs text-zinc-500">
+                          <span title={r.notes ?? ""}>{r.notes ? r.notes.slice(0, 30) + (r.notes.length > 30 ? "…" : "") : "—"}</span>
+                        </Td>
+                        <Td rowSpan={totalLines} align="right" className="align-top">
+                          {r.status === "pending" && (
+                            <SpinButton
+                              onClick={(e) => { e.stopPropagation(); return handleDelete(r); }}
+                              className="rounded-md border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                            >
+                              刪除
+                            </SpinButton>
+                          )}
+                        </Td>
+                      </>
+                    )}
+                  </Tr>
+                );
+              });
+            });
+          })}
         </TBody>
       </Table>
 
