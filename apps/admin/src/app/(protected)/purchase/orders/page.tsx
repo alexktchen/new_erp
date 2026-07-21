@@ -69,7 +69,8 @@ type PivotItem = {
   received: number;
 };
 
-type PivotSkuAgg = { sku_id: number; label: string; ordered: number; received: number; poNos: Set<string> };
+// pos: po_id -> po_no（保留 id 讓來源 PO 可連到詳細頁）
+type PivotSkuAgg = { sku_id: number; label: string; ordered: number; received: number; pos: Map<number, string> };
 type PivotGroup = {
   supplier_id: number;
   supplier_name: string;
@@ -182,27 +183,46 @@ export default function PurchaseOrdersListPage() {
         });
 
         // 2. 透過 purchase_order_items + purchase_request_items 找來源 PR + 商品/品項
+        // 500 張 PO 的品項列數很容易破 PostgREST 1000 列上限，且一次 .in() 塞幾百個
+        // id 會撐爆 URL — 一律 chunk + fetchAllRows 分頁（同下方樞紐檢視的作法）。
+        const chunk = <T,>(arr: T[], n: number): T[][] => {
+          const out: T[][] = [];
+          for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+          return out;
+        };
         const poIds = baseList.map((p) => p.id);
         const poToPR = new Map<number, number>();
         const poItemMap = new Map<number, number[]>(); // po_id -> sku_ids[]
-        if (poIds.length) {
-          const { data: poiRows } = await supabase
-            .from("purchase_order_items")
-            .select("id, po_id, sku_id")
-            .in("po_id", poIds);
+        {
+          const poiRows: { id: number; po_id: number; sku_id: number }[] = [];
+          for (const c of chunk(poIds, 200)) {
+            const rows = await fetchAllRows<{ id: number; po_id: number; sku_id: number }>(
+              () =>
+                supabase
+                  .from("purchase_order_items")
+                  .select("id, po_id, sku_id")
+                  .in("po_id", c)
+                  .order("id", { ascending: true }),
+            );
+            poiRows.push(...rows);
+          }
           const poiToPo = new Map<number, number>();
-          for (const r of poiRows ?? []) {
+          for (const r of poiRows) {
             poiToPo.set(r.id, r.po_id);
             if (!poItemMap.has(r.po_id)) poItemMap.set(r.po_id, []);
             poItemMap.get(r.po_id)!.push(r.sku_id);
           }
-          const poiIds = (poiRows ?? []).map((r) => r.id);
-          if (poiIds.length) {
-            const { data: priRows } = await supabase
-              .from("purchase_request_items")
-              .select("po_item_id, pr_id")
-              .in("po_item_id", poiIds);
-            for (const r of priRows ?? []) {
+          const poiIds = poiRows.map((r) => r.id);
+          for (const c of chunk(poiIds, 200)) {
+            const priRows = await fetchAllRows<{ po_item_id: number | null; pr_id: number | null }>(
+              () =>
+                supabase
+                  .from("purchase_request_items")
+                  .select("po_item_id, pr_id")
+                  .in("po_item_id", c)
+                  .order("po_item_id", { ascending: true }),
+            );
+            for (const r of priRows) {
               const po = r.po_item_id ? poiToPo.get(r.po_item_id) : null;
               if (po && r.pr_id) poToPR.set(po, r.pr_id);
             }
@@ -214,11 +234,12 @@ export default function PurchaseOrdersListPage() {
           new Set(Array.from(poItemMap.values()).flat()),
         );
         const skuToProduct = new Map<number, string>();
-        if (allSkuIds.length) {
-          const { data: skuRows } = await supabase
+        for (const c of chunk(allSkuIds, 300)) {
+          const { data: skuRows, error: skuErr } = await supabase
             .from("skus")
             .select("id, products!inner(name)")
-            .in("id", allSkuIds);
+            .in("id", c);
+          if (skuErr) throw new Error(skuErr.message);
           type SkuLite = {
             id: number;
             products: { name: string } | { name: string }[] | null;
@@ -240,11 +261,12 @@ export default function PurchaseOrdersListPage() {
         }
         const prIds = Array.from(new Set(Array.from(poToPR.values())));
         const prMap = new Map<number, string>();
-        if (prIds.length) {
-          const { data: prRows } = await supabase
+        for (const c of chunk(prIds, 200)) {
+          const { data: prRows, error: prErr } = await supabase
             .from("purchase_requests")
             .select("id, pr_no")
-            .in("id", prIds);
+            .in("id", c);
+          if (prErr) throw new Error(prErr.message);
           for (const r of prRows ?? []) prMap.set(r.id, r.pr_no);
         }
         for (const p of baseList) {
@@ -688,12 +710,12 @@ export default function PurchaseOrdersListPage() {
       sup.poIds.add(it.po_id);
       let sk = sup.skus.get(it.sku_id);
       if (!sk) {
-        sk = { sku_id: it.sku_id, label: it.sku_label, ordered: 0, received: 0, poNos: new Set() };
+        sk = { sku_id: it.sku_id, label: it.sku_label, ordered: 0, received: 0, pos: new Map() };
         sup.skus.set(it.sku_id, sk);
       }
       sk.ordered += it.ordered;
       sk.received += it.received;
-      sk.poNos.add(it.po_no);
+      sk.pos.set(it.po_id, it.po_no);
     }
     return Array.from(bySup.values())
       .map((sup) => {
@@ -939,7 +961,6 @@ export default function PurchaseOrdersListPage() {
               />
               <Th>來源 PR</Th>
               <Th>狀態</Th>
-              <Th>商品</Th>
               <Th align="right">品項</Th>
               <SortTh
                 col="total"
@@ -971,13 +992,13 @@ export default function PurchaseOrdersListPage() {
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
             {pos === null ? (
               <tr>
-                <td colSpan={11}>
+                <td colSpan={10}>
                   <LoadingBlock />
                 </td>
               </tr>
             ) : pageRows.length === 0 ? (
               <tr>
-                <td colSpan={11} className="p-6 text-center text-zinc-500">
+                <td colSpan={10} className="p-6 text-center text-zinc-500">
                   {filtersActive ? "沒有符合條件的 PO" : `尚無${PO_TERM_ZH}`}
                 </td>
               </tr>
@@ -988,7 +1009,7 @@ export default function PurchaseOrdersListPage() {
                   className="bg-zinc-50 dark:bg-zinc-950"
                 >
                   <td
-                    colSpan={11}
+                    colSpan={10}
                     className="px-4 py-2 text-xs font-semibold text-zinc-700 dark:text-zinc-200"
                   >
                     📂 {g.label}
@@ -1194,8 +1215,8 @@ function PoPivot({ groups, loading }: { groups: PivotGroup[]; loading: boolean }
                       >
                         {outstanding}
                       </td>
-                      <td className="px-3 py-1.5 font-mono text-xs text-zinc-500">
-                        {Array.from(s.poNos).sort().join("、")}
+                      <td className="px-3 py-1.5 font-mono text-xs">
+                        <PoLinks pos={s.pos} />
                       </td>
                     </tr>
                   );
@@ -1232,7 +1253,7 @@ function PoPivot({ groups, loading }: { groups: PivotGroup[]; loading: boolean }
                     </span>
                   </div>
                   <div className="mt-0.5 font-mono text-[11px] text-zinc-400">
-                    PO {Array.from(s.poNos).sort().join("、")}
+                    PO <PoLinks pos={s.pos} />
                   </div>
                 </li>
               );
@@ -1241,6 +1262,28 @@ function PoPivot({ groups, loading }: { groups: PivotGroup[]; loading: boolean }
         </div>
       ))}
     </div>
+  );
+}
+
+// 樞紐裡的來源 PO 單號清單：每個單號連到 PO 詳細頁
+function PoLinks({ pos }: { pos: Map<number, string> }) {
+  const entries = Array.from(pos.entries()).sort((a, b) =>
+    a[1].localeCompare(b[1]),
+  );
+  return (
+    <>
+      {entries.map(([id, no], i) => (
+        <span key={id}>
+          {i > 0 && <span className="text-zinc-400">、</span>}
+          <Link
+            href={`/purchase/orders/edit?id=${id}`}
+            className="text-blue-600 hover:underline dark:text-blue-400"
+          >
+            {no}
+          </Link>
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -1299,26 +1342,14 @@ function PORow({
           </span>
         )}
       </Td>
-      <Td className="max-w-[220px]">
-        {po.product_names.length === 0 ? (
-          <span className="text-xs text-zinc-400">—</span>
-        ) : (
-          <div
-            className="truncate text-xs"
-            title={po.product_names.join("、")}
-          >
-            {po.product_names.slice(0, 2).join("、")}
-            {po.product_names.length > 2 && (
-              <span className="ml-1 rounded bg-zinc-100 px-1 text-[10px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                +{po.product_names.length - 2}
-              </span>
-            )}
-          </div>
-        )}
-      </Td>
       <Td className="text-right text-xs">
         {po.item_count > 0 ? (
-          <span className="font-mono">{po.item_count}</span>
+          <span
+            className="cursor-help font-mono underline decoration-dotted decoration-zinc-400 underline-offset-2"
+            title={po.product_names.join("、")}
+          >
+            {po.item_count}
+          </span>
         ) : (
           <span className="text-zinc-400">—</span>
         )}
