@@ -8,9 +8,9 @@ type Tab = {
   href: string;
   label: string;
   showBadge?: boolean;
-  /** 凸起中央鍵（現貨專區）：畫成往上浮出 bar 的品牌漸層圓鈕 */
+  /** 凸起中央鍵（現貨專區）：往上浮出 bar 的圓鈕，內容固定是包子媽 logo，不吃 icon */
   raised?: boolean;
-  icon: (active: boolean) => React.ReactNode;
+  icon?: (active: boolean) => React.ReactNode;
 };
 
 const stroke = (active: boolean) => (active ? "currentColor" : "currentColor");
@@ -43,12 +43,7 @@ const tabs: Tab[] = [
     href: "/spot",
     label: "現貨專區",
     raised: true,
-    icon: () => (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} className="h-7 w-7">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3 8.5 12 4l9 4.5v7L12 20l-9-4.5v-7Z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="m3 8.5 9 4.5 9-4.5M12 13v7" />
-      </svg>
-    ),
+    // icon 省略：凸起鍵畫的是包子媽 logo（見下方 raised 分支）
   },
   {
     href: "/notifications",
@@ -101,21 +96,35 @@ export default function MemberTabBar() {
               <li key={t.href} className="flex-1">
                 <Link
                   href={t.href}
-                  className={`flex flex-col items-center justify-center gap-1 px-1 pb-2.5 pt-2.5 text-[12px] font-semibold transition-colors duration-200 ${
-                    active ? "text-[var(--brand-strong)]" : "text-[var(--ios-gray)]"
+                  className={`flex flex-col items-center justify-center gap-1 px-1 pb-2.5 pt-2.5 text-[12px] transition-colors duration-200 ${
+                    active
+                      ? "font-extrabold text-[var(--brand-strong)]"
+                      : "font-semibold text-[var(--ios-gray)]"
                   }`}
                 >
                   {/* 外層維持和其他 tab 相同的 h-9 佔位，label 基線才會齊；
-                      圓鈕用 absolute 往上溢出，凸出 bar 上緣約 14px。 */}
+                      圓鈕用 absolute 往上溢出，凸出 bar 上緣約 14px。
+                      內容是包子媽 logo —— logo 本身不會變色，所以 active 改用
+                      外圈品牌漸層細邊 + 更深的陰影來表示。 */}
                   <span className="relative flex h-9 w-14 items-center justify-center">
                     <span
-                      className={`brand-gradient absolute -top-6 flex h-14 w-14 items-center justify-center rounded-full text-white ring-4 ring-white transition-all duration-300 ${
+                      className={`absolute -top-6 flex h-14 w-14 items-center justify-center rounded-full ring-4 ring-white transition-all duration-300 ${
                         active
-                          ? "scale-100 shadow-[0_10px_22px_-6px_rgba(158,47,80,0.75)]"
-                          : "scale-95 shadow-[0_6px_16px_-6px_rgba(158,47,80,0.5)]"
+                          ? "brand-gradient scale-110 p-1 shadow-[0_0_0_3px_rgba(158,47,80,0.28),0_14px_26px_-6px_rgba(158,47,80,0.85)]"
+                          : "scale-90 bg-white p-[3px] shadow-[0_6px_16px_-8px_rgba(0,0,0,0.35)]"
                       }`}
                     >
-                      {t.icon(active)}
+                      {/* 未選取時 logo 去彩度 + 壓透明度，對齊其他四格「灰→品牌色」的
+                          既有規則；選取時放大、上彩、外掛品牌漸層邊與光暈。 */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src="/brand/logo.jpg"
+                        alt=""
+                        aria-hidden
+                        className={`h-full w-full rounded-full object-cover transition-all duration-300 ${
+                          active ? "" : "opacity-55 grayscale"
+                        }`}
+                      />
                     </span>
                   </span>
                   <span>{t.label}</span>
@@ -137,7 +146,7 @@ export default function MemberTabBar() {
                     active ? "bg-[var(--brand-soft)] scale-100" : "bg-transparent scale-90"
                   }`}
                 >
-                  {t.icon(active)}
+                  {t.icon?.(active)}
                   {showBadge && (
                     <span
                       className="absolute right-1 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[var(--ios-red)] px-1 text-[11px] font-semibold leading-none text-white ring-2 ring-white"
