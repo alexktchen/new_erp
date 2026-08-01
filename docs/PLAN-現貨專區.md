@@ -4,8 +4,8 @@
 > 分支：`claude/merchant-products-cross-store-hide-5c9v47`
 >
 > **上線前還差一步（要人做）**：設環境變數 `NEXT_PUBLIC_LINE_OA_ID`，或在 admin
-> `/stores` 幫各店填「LINE@ ID」。兩者都空的話，詳情頁底部的「用 LINE 詢問店家」
-> 那條不會出現（其餘功能正常）。見 §5.5。
+> `/stores` 幫各店填「LINE@ ID」。兩者都空的話按鈕還是在，但只能「複製訊息」
+> 讓使用者自己貼，不會直接開對話。見 §5.5。
 
 ---
 
@@ -82,7 +82,9 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
 - **點卡片 → `/spot/[id]` 詳情頁**（2026-08-01 加）：大圖、品名、金額或鎖頭、
   可提供數量／釋出分店／剩餘時間／商品編號、商品說明，底部常駐「用 LINE 詢問店家」。
   LINE CTA 從卡片移到詳情頁 —— 一張小卡上疊兩個可點區域太容易誤觸。
-- 卡片不顯示到期倒數（2026-08-01 拿掉，太吵）；要看剩餘時間進詳情頁
+  商品說明要走 `cleanCampaignText`：後台 TipTap 存的是 HTML，直接印會露出
+  `<p>`/`<br>` 標籤字樣。
+- 到期倒數**只有列表卡片不顯示**（2026-08-01 拿掉，卡片上太吵）；詳情頁的「剩餘時間」列保留
 - 空狀態：📦「目前沒有店家釋出現貨」／分頁下是「你的店目前沒有現貨」
 - 下拉重新整理
 - 未登入 / session 過期 → redirect 回 `/`
@@ -148,7 +150,8 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
 | **PWA / 一般瀏覽器** | `line.me/R/oaMessage/{basicId}/?{text}` universal link | 跳去 LINE 開對話並預填，使用者自己按送出 |
 
 實作在 `lib/lineInquiry.ts` 的 `sendLineInquiry()`，退路是一路往下掉：
-`liff.sendMessages` →（失敗）`liff.openWindow(external)` →（失敗）`location.href` 導頁。
+`liff.sendMessages` →（失敗）`liff.openWindow(external)` →（失敗）`location.href` 導頁
+→（連 LINE@ id 都沒有）複製訊息到剪貼簿。
 
 ⚠ **兩個前提**：
 1. LIFF app 要開 **`chat_message.write`** scope，否則 `sendMessages` 一定 reject
@@ -171,8 +174,12 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
    有了它，功能第一天就能動，不必等 23 間店逐間填。
 2. **admin `/stores` 表單加一個「LINE@ ID」欄位**（寫進既有的 `line_oa_basic_id`），
    之後哪間店要用自己的 LINE@ 就自己填，填了就覆蓋預設值。
-3. 解析順序：`該會員所在店的 line_oa_basic_id` → `NEXT_PUBLIC_LINE_OA_ID` → 都沒有就**不顯示 CTA 按鈕**
-   （寧可少一顆按鈕，也不要點下去跳到空白）。
+3. 解析順序：`該會員所在店的 line_oa_basic_id` → `NEXT_PUBLIC_LINE_OA_ID` → 都沒有就
+   **複製訊息到剪貼簿**，請使用者自己貼給店家。
+
+   ⚠ 原本這裡的規則是「都沒有就不顯示 CTA 按鈕」。實際上線後 20 間店的
+   `line_oa_basic_id` 全是 NULL、env 也沒設 → 按鈕整個不見，看起來像功能壞掉。
+   **2026-08-01 改成按鈕一律出現**，最差也要留一條路（複製）給使用者走。
 
 `line_oa_basic_id` 要一併從後端回給前端（放在 `list_spot_products` 的 response，
 只回會員所在店那一間的，不外流其他店的聯絡方式）。
@@ -224,7 +231,7 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
 | A4 | **跨店卡** | 畫面沒有任何金額；**raw response 的 `unit_price` 是 `null`** |
 | A5 | 本店 LINE 詢問 | 開 LINE 對話，訊息含品名 + `金額：$xxx` |
 | A6 | **跨店 LINE 詢問** | 開 LINE 對話，訊息含品名 +「（◯◯店釋出）」，**不含任何金額**，結尾是「請問可以幫我調貨嗎？」 |
-| A7 | LINE@ 沒設定 | PWA 下詳情頁底部詢問列不出現（不是點了跳空白）；**LIFF 下仍要出現**（sendMessages 不需要 LINE@ id） |
+| A7 | LINE@ 沒設定 | 按鈕**照樣出現**：LIFF 下直送成功；PWA 下退到複製訊息。不能整顆消失 |
 | A12 | LIFF 送訊息 | 在 LINE 內開 App → 按詢問 → 文字直接進對話、人留在 App，顯示「已送出詢問訊息」 |
 | A8 | 板上 0 則 | `/spot` 空狀態（`/shop` 已無現貨區塊，見 §6） |
 | A9 | 被認領光 / 到期 | 該筆自動從 App 消失 |
