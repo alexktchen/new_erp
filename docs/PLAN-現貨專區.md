@@ -4,8 +4,8 @@
 > 分支：`claude/merchant-products-cross-store-hide-5c9v47`
 >
 > **上線前還差一步（要人做）**：設環境變數 `NEXT_PUBLIC_LINE_OA_ID`，或在 admin
-> `/stores` 幫各店填「LINE@ ID」。兩者都空的話，現貨卡上的「LINE 詢問」按鈕
-> 不會出現（其餘功能正常）。見 §5.5。
+> `/stores` 幫各店填「LINE@ ID」。兩者都空的話，詳情頁底部的「用 LINE 詢問店家」
+> 那條不會出現（其餘功能正常）。見 §5.5。
 
 ---
 
@@ -73,13 +73,16 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
 │ 上海小籠湯包 │ 日夜藍莓護眼  │
 │ 可提供 3 包  │ 可提供 1 盒   │
 │ $149         │🔒跨店·金額不顯示│
-│ ⏱ 02天06:16  │ ⏱ 01天03:44   │
-│ [💬 LINE 詢問]│[💬 LINE 詢問] │
 └──────────────┴──────────────┘
+        整張卡可點 → /spot/[id]
 ```
 
 - 排序：本店的一律排前面（看得到金額、真的拿得到貨），其餘最新在前
 - 分頁：`全部` / `〈本店名〉`
+- **點卡片 → `/spot/[id]` 詳情頁**（2026-08-01 加）：大圖、品名、金額或鎖頭、
+  可提供數量／釋出分店／剩餘時間／商品編號、商品說明，底部常駐「用 LINE 詢問店家」。
+  LINE CTA 從卡片移到詳情頁 —— 一張小卡上疊兩個可點區域太容易誤觸。
+- 卡片不顯示到期倒數（2026-08-01 拿掉，太吵）；要看剩餘時間進詳情頁
 - 空狀態：📦「目前沒有店家釋出現貨」／分頁下是「你的店目前沒有現貨」
 - 下拉重新整理
 - 未登入 / session 過期 → redirect 回 `/`
@@ -104,7 +107,11 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
 
 ### 5.1 觸發方式
 
-卡片上一顆明確的 CTA 按鈕「💬 LINE 詢問」，**不是整張卡可點** —— 避免滑動時誤觸把人彈出 App。
+**在 `/spot/[id]` 詳情頁底部常駐一條「💬 用 LINE 詢問店家」**。
+
+原本 CTA 放在列表卡片上，2026-08-01 改成整張卡連到詳情頁、CTA 移進詳情頁 ——
+一張小卡上疊兩個可點區域（進詳情 vs 跳 LINE）太容易誤觸，而且詳情頁才有空間
+把品名、數量、到期時間攤開讓人看清楚再決定要不要問。
 
 ### 5.2 訊息範本
 
@@ -131,14 +138,27 @@ tab active 判斷是 `pathname.startsWith(t.href)`。所以現貨專區**必須�
 所以跨店那則的收尾才改成「請問可以幫我調貨嗎？」而不是「還有貨嗎」。
 這同時也守住金額隱藏 —— 價格由自己的店回報，不會從別店的報價外洩。
 
-### 5.4 Deep link
+### 5.4 兩種跑法：PWA 與 LIFF 走不同路（2026-08-01）
 
-```
-https://line.me/R/oaMessage/{basicId}/?{encodeURIComponent(text)}
-```
-- `basicId` 要含 `@`（URL 編碼成 `%40`）
-- LINE app 內、外部瀏覽器、PWA standalone 都吃這個 universal link
-- 用一般 `<a href target="_blank">` 即可，不需要 LIFF SDK 分支
+這個 App 有兩種載入型態，送訊息的方式不一樣，**不能只寫一條**：
+
+| 型態 | 做法 | 使用者體感 |
+|---|---|---|
+| **LIFF**（LINE 內建瀏覽器） | `liff.sendMessages([{type:'text',text}])` | 文字直接進 LINE 對話，**人留在 App 裡**，不被踢走 |
+| **PWA / 一般瀏覽器** | `line.me/R/oaMessage/{basicId}/?{text}` universal link | 跳去 LINE 開對話並預填，使用者自己按送出 |
+
+實作在 `lib/lineInquiry.ts` 的 `sendLineInquiry()`，退路是一路往下掉：
+`liff.sendMessages` →（失敗）`liff.openWindow(external)` →（失敗）`location.href` 導頁。
+
+⚠ **兩個前提**：
+1. LIFF app 要開 **`chat_message.write`** scope，否則 `sendMessages` 一定 reject
+   （會自動掉到 universal link，功能不會壞，只是體驗差一截）。
+2. `sendMessages` 送進的是「開啟這個 LIFF 的那個聊天室」。從 OA 聊天室 / 圖文選單
+   進來就是送給該 OA；從其他入口進來沒有 chat context，一樣掉到 universal link。
+
+`basicId` 要含 `@`（URL 編碼成 `%40`）；`buildLineOaMessageUrl` 會自動補。
+
+非同步偵測 LIFF 還沒回來之前一律先當 PWA —— 那條路哪裡都能用，不會卡住。
 
 ### 5.5 ⚠ 資料前置（會擋到上線）
 
@@ -163,14 +183,15 @@ https://line.me/R/oaMessage/{basicId}/?{encodeURIComponent(text)}
 
 | 檔案 | 動作 | 說明 |
 |---|---|---|
-| `supabase/functions/liff-api/index.ts` | 改 | action `list_released_products` → **`list_spot_products`**；response 加 `my_store_line_oa_id`。線上目前沒有任何前端用舊名，改名零風險。改完重新部署 |
-| `apps/member/src/app/spot/page.tsx` | 新增 | 現貨專區主頁（由 `/shop/released` 搬過來改名） |
+| `supabase/functions/liff-api/index.ts` | 改 | action `list_released_products` → **`list_spot_products`**；response 加 `my_store_line_oa_id`。2026-08-01 再加 **`get_spot_product`**（單筆詳情，上架條件與列表一致，知道 id 也繞不過去）。改完重新部署 |
+| `apps/member/src/app/spot/page.tsx` | 新增 | 現貨專區列表頁（由 `/shop/released` 搬過來改名） |
+| `apps/member/src/app/spot/[id]/page.tsx` | 新增 | 現貨商品詳情頁（2026-08-01）；底部常駐 LINE 詢問列 |
 | `apps/member/src/app/shop/released/page.tsx` | 刪除 | 還沒進 main、沒人收藏過網址，直接改名不留 redirect |
-| `apps/member/src/components/SpotProductCard.tsx` | 改名 | 由 `ReleasedProductCard` 而來；type `ReleasedProduct` → `SpotProduct`；加「💬 LINE 詢問」CTA |
+| `apps/member/src/components/SpotProductCard.tsx` | 改名 | 由 `ReleasedProductCard` 而來；type `ReleasedProduct` → `SpotProduct`。2026-08-01 整張卡改成連到 `/spot/[id]`，卡上的 LINE CTA 移進詳情頁 |
 | `apps/member/src/lib/lineInquiry.ts` | 新增 | 組訊息文字 + `line.me/R/oaMessage` URL；本店/跨店兩種範本都在這裡，單一真相來源 |
 | `apps/member/src/components/MemberTabBar.tsx` | 改 | 4 tab → 5 tab，中間插入現貨專區凸起圓鈕 |
 | `apps/member/src/components/PageShell.tsx` | 改 | `TOP_LEVEL_PATHS` 加 `/spot`；`paddingBottom` 92px → 104px |
-| `apps/member/src/app/shop/page.tsx` | 改 | 區塊標題「店家釋出 📦」→「現貨專區 📦」；預覽張數 6 → **4**；右上連結改「去現貨專區 ›」指向 `/spot` |
+| `apps/member/src/app/shop/page.tsx` | 改 | ~~加現貨導流區塊~~ → **2026-08-01 已移除**：有了中間 tab 之後這塊是重複入口，`/shop` 回到只管團購（連 `list_spot_products` 的呼叫也一起拿掉，不再多打一支 API） |
 | `apps/admin/src/app/(protected)/stores/page.tsx` | 改 | 表單加「LINE@ ID」欄位（寫 `line_oa_basic_id`），含 `Store` type 與存檔路徑 |
 | `apps/member/.env` / Vercel | 設定 | 加 `NEXT_PUBLIC_LINE_OA_ID` |
 | `docs/TEST-member-released-products.md` | 改名 | → `docs/TEST-member-spot-zone.md`，內容同步 |
@@ -187,7 +208,7 @@ https://line.me/R/oaMessage/{basicId}/?{encodeURIComponent(text)}
 3. `lineInquiry.ts` + `SpotProductCard`（含兩種訊息範本）
 4. `/shop/released` → `/spot`
 5. `MemberTabBar` 5 格凸起鍵 + `PageShell` padding 與 `TOP_LEVEL_PATHS`
-6. `/shop` 區塊改名、縮 4 張、改連結
+6. ~~`/shop` 區塊改名、縮 4 張、改連結~~ → 後來整塊移除（見 §6、§9）
 7. `npx tsc --noEmit` + `next build`（member 與 admin 都要）+ 只看新檔的 lint
 8. 更新測試文件、commit、push
 
@@ -203,10 +224,12 @@ https://line.me/R/oaMessage/{basicId}/?{encodeURIComponent(text)}
 | A4 | **跨店卡** | 畫面沒有任何金額；**raw response 的 `unit_price` 是 `null`** |
 | A5 | 本店 LINE 詢問 | 開 LINE 對話，訊息含品名 + `金額：$xxx` |
 | A6 | **跨店 LINE 詢問** | 開 LINE 對話，訊息含品名 +「（◯◯店釋出）」，**不含任何金額**，結尾是「請問可以幫我調貨嗎？」 |
-| A7 | LINE@ 沒設定 | CTA 按鈕不出現（不是點了跳空白） |
-| A8 | 板上 0 則 | `/spot` 空狀態；`/shop` 的現貨區塊整塊不出現 |
+| A7 | LINE@ 沒設定 | PWA 下詳情頁底部詢問列不出現（不是點了跳空白）；**LIFF 下仍要出現**（sendMessages 不需要 LINE@ id） |
+| A12 | LIFF 送訊息 | 在 LINE 內開 App → 按詢問 → 文字直接進對話、人留在 App，顯示「已送出詢問訊息」 |
+| A8 | 板上 0 則 | `/spot` 空狀態（`/shop` 已無現貨區塊，見 §6） |
 | A9 | 被認領光 / 到期 | 該筆自動從 App 消失 |
 | A10 | 迴歸 | `/shop` 團購列表、banner、排序、`/orders`、`/notifications`、`/me` 全部照舊 |
+| A11 | 詳情頁 | 點卡片進得去；直接用網址開已下架 / 別租戶的 id 一律 404 落到空狀態 |
 
 ---
 
@@ -215,7 +238,8 @@ https://line.me/R/oaMessage/{basicId}/?{encodeURIComponent(text)}
 **已決策（2026-08-01 與 Alex 對過）**
 - 中間 tab 樣式 → **凸起中央鍵**
 - 會員互動 → **不直接下單，點了用 LINE 詢問店家**
-- `/shop` 首頁橫向區塊 → **保留，縮成 4 張**
+- `/shop` 首頁橫向區塊 → 原本決定「保留，縮成 4 張」，**2026-08-01 改為整塊移除**：
+  中間 tab 上線後這塊變成重複入口，商品頁回到只管團購。
 
 **未決（施工中若沒回覆就照下面預設走）**
 - `NEXT_PUBLIC_LINE_OA_ID` 要填哪個 LINE@ → 預設填 包子媽生鮮小舖 主帳號
