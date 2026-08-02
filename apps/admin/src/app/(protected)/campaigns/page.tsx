@@ -21,6 +21,7 @@ import { Table, THead, TBody, Tr, Th, Td, EmptyRow, LoadingRow } from "@/compone
 import Spinner, { LoadingBlock } from "@/components/Spinner";
 import { CampaignThumb } from "@/components/CampaignThumb";
 import { campaignCoverUrl, type CampaignCoverItem } from "@/lib/campaignCover";
+import { exportLeleXls, type LeleCampaign, type LeleTruncation, type LeleSkip } from "@/lib/exportLeleXls";
 import FbPublishModal from "@/components/FbPublishModal";
 import FbBulkPublishModal from "@/components/FbBulkPublishModal";
 import { useRole, isAdmin } from "@/lib/role";
@@ -182,6 +183,17 @@ export default function CampaignsListPage() {
   const [bulkEndAt, setBulkEndAt] = useState("");
   const [endAtErr, setEndAtErr] = useState<string | null>(null);
 
+  // 匯出樂樂上架檔（依「開團時間」start_at 區間；預設近 7 天）
+  const [leleOpen, setLeleOpen] = useState(false);
+  const [leleFrom, setLeleFrom] = useState(() => localDateKey(addDays(startOfDay(new Date()), -7)));
+  const [leleTo, setLeleTo] = useState(() => localDateKey(startOfDay(new Date())));
+  const [leleErr, setLeleErr] = useState<string | null>(null);
+  // 匯出中：擋住重複觸發（含關閉 modal 再開一次），也擋住關閉以免截斷提示看不到
+  const [leleBusy, setLeleBusy] = useState(false);
+  const [leleWarn, setLeleWarn] = useState<LeleTruncation[] | null>(null);
+  // 款式太多、匯出會造成價格錯位而整團沒匯出的團（嚴重度高於 leleWarn）
+  const [leleSkip, setLeleSkip] = useState<LeleSkip[] | null>(null);
+
   const [view, setView] = useState<View>(() => {
     if (typeof window === "undefined") return "list";
     const saved = window.localStorage.getItem("campaigns:view");
@@ -250,6 +262,92 @@ export default function CampaignsListPage() {
       }
     } catch (e) {
       setEndAtErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // 匯出樂樂上架檔：撈區間內的團 + 明細 → 交給 lib 產 BIFF8 .xls 下載
+  async function runExportLele() {
+    if (leleBusy) return; // 併發保險：即使關掉 modal 再開一次也不會跑第二份
+    setLeleErr(null);
+    setLeleWarn(null);
+    setLeleSkip(null);
+    if (!leleFrom || !leleTo) { setLeleErr("請選擇開團時間的起日與迄日"); return; }
+    if (leleFrom > leleTo) { setLeleErr("起日不能晚於迄日"); return; }
+    type CampRow = { id: number; campaign_no: string; name: string; description: string | null; end_at: string | null };
+    type ItemRow = {
+      campaign_id: number; id: number; sort_order: number; unit_price: number;
+      skus: { sku_code: string; variant_name: string | null };
+    };
+    setLeleBusy(true);
+    try {
+      const sb = getSupabase();
+      const from = new Date(`${leleFrom}T00:00:00`).toISOString();
+      const to = new Date(`${leleTo}T23:59:59.999`).toISOString();
+      // 已取消的團不匯；__INTERNAL_RESTOCK__ 不是真的團（與本頁其他查詢一致）
+      const camps = await fetchAll<CampRow>(() =>
+        sb.from("group_buy_campaigns")
+          .select("id, campaign_no, name, description, end_at")
+          .neq("campaign_no", "__INTERNAL_RESTOCK__")
+          .neq("status", "cancelled")
+          .gte("start_at", from)
+          .lte("start_at", to)
+          .order("start_at", { ascending: true })
+          .order("id", { ascending: true }));
+
+      // 明細分批撈（沿用本頁 chunk 慣例，避免 .in() 把 URL 塞爆）
+      const ids = camps.map((c) => c.id);
+      const itemRows: ItemRow[] = [];
+      for (let i = 0; i < ids.length; i += 500) {
+        const chunk = ids.slice(i, i + 500);
+        const part = await fetchAll<ItemRow>(() =>
+          sb.from("campaign_items")
+            .select("campaign_id, id, sort_order, unit_price, skus!inner(sku_code, variant_name)")
+            .in("campaign_id", chunk)
+            .order("id", { ascending: true }));
+        itemRows.push(...part);
+      }
+
+      const byCampaign = new Map<number, LeleCampaign["items"]>();
+      for (const it of itemRows) {
+        const arr = byCampaign.get(it.campaign_id) ?? [];
+        arr.push({
+          id: it.id,
+          sort_order: it.sort_order,
+          unit_price: it.unit_price,
+          variant_name: it.skus?.variant_name ?? null,
+          sku_code: it.skus?.sku_code ?? "",
+        });
+        byCampaign.set(it.campaign_id, arr);
+      }
+
+      const payload: LeleCampaign[] = camps.map((c) => ({
+        campaign_no: c.campaign_no,
+        name: c.name,
+        description: c.description,
+        end_at: c.end_at,
+        items: byCampaign.get(c.id) ?? [],
+      }));
+
+      const fname = `樂樂上架_${leleFrom.replace(/-/g, "")}-${leleTo.replace(/-/g, "")}.xls`;
+      const { exported, truncated, skipped } = await exportLeleXls(payload, fname);
+      if (skipped.length > 0) setLeleSkip(skipped);
+      if (truncated.length > 0) setLeleWarn(truncated);
+      if (exported === 0) {
+        // 全部被跳過 vs 本來就沒東西可匯，要講不一樣的話（前者沒有產生檔案）
+        setLeleErr(
+          skipped.length > 0
+            ? `這個區間的 ${skipped.length} 個團全部因為款式太多無法匯出，沒有產生檔案。`
+            : `${leleFrom} ~ ${leleTo} 這個區間沒有可匯出的開團（已排除「已取消」與沒有商品明細的團）。`,
+        );
+        return;
+      }
+      // 有團被跳過或描述被截斷 → 檔案照常下載，但 modal 留著把發生什麼事講清楚
+      if (skipped.length > 0 || truncated.length > 0) return;
+      setLeleOpen(false);
+    } catch (e) {
+      setLeleErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLeleBusy(false);
     }
   }
 
@@ -681,6 +779,13 @@ export default function CampaignsListPage() {
             >
               🔁 批次建立
             </SpinButton>
+            <SpinButton
+              onClick={() => { setLeleErr(null); setLeleWarn(null); setLeleSkip(null); setLeleOpen(true); }}
+              disabled={leleBusy}
+              className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              匯出樂樂
+            </SpinButton>
             <Link href="/products?mode=campaign" className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200">
               + 從商品開團
             </Link>
@@ -1051,6 +1156,79 @@ export default function CampaignsListPage() {
                 className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900"
               >
                 確定套用
+              </SpinButton>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={leleOpen}
+        onClose={() => { if (!leleBusy) setLeleOpen(false); }}
+        title="匯出樂樂上架檔"
+        maxWidth="max-w-md"
+      >
+        {leleOpen && (
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
+              依「開團時間」區間匯出，產生樂樂團購可直接上傳的 Excel 97-2003（.xls）。
+              已取消的開團、以及還沒加商品的開團不會匯出。
+            </p>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-zinc-600 dark:text-zinc-400">開團時間</span>
+              {/* 不互相 min/max 綁死：要把區間整段往後移時會被鎖住選不動，改由下方驗證擋 */}
+              <DatePicker value={leleFrom} onChange={setLeleFrom} popover="fixed" />
+              <span className="text-zinc-400">～</span>
+              <DatePicker value={leleTo} onChange={setLeleTo} popover="fixed" />
+            </div>
+            {leleErr && <p className="text-xs text-rose-600">{leleErr}</p>}
+            {leleSkip && leleSkip.length > 0 && (
+              <div className="rounded-md border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+                <p className="font-medium">
+                  ⚠️ 以下 {leleSkip.length} 個團「沒有匯出」，因為款式太多超過樂樂單欄上限。
+                  硬匯出會造成款式與價格錯位、上架成錯誤價格，所以直接排除。
+                  請先把商品拆成多個團再匯出：
+                </p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                  {leleSkip.map((s) => (
+                    <li key={s.campaign_no}>
+                      {s.campaign_no}｜{s.name}｜{s.itemCount} 款（{s.reason}）
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {leleWarn && leleWarn.length > 0 && (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                <p className="font-medium">
+                  檔案已下載。但下列 {leleWarn.length} 團的「商品描述」超過樂樂單格上限 255 字元，已自動截斷：
+                </p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                  {leleWarn.map((t) => (
+                    <li key={t.campaign_no}>
+                      {t.campaign_no}｜{t.name}（原本 {t.originalLength} 字元，只保留前 255）
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1.5">
+                  文案若不能被砍，請先把這幾團的商品描述縮到 255 字元內再重新匯出。
+                </p>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <SpinButton
+                onClick={() => setLeleOpen(false)}
+                disabled={leleBusy}
+                className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                {leleWarn || leleSkip ? "關閉" : "取消"}
+              </SpinButton>
+              <SpinButton
+                onClick={runExportLele}
+                disabled={leleBusy}
+                className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-900"
+              >
+                匯出
               </SpinButton>
             </div>
           </div>
