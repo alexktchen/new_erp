@@ -45,6 +45,14 @@ curl -sS --cacert /root/.ccr/ca-bundle.crt \
 - 部署完務必驗證：`OPTIONS` preflight 回 200 帶 CORS、無 auth 的 `POST` 回函式自家的 401（代表函式真的在跑，不是 gateway 404）。gateway 404（`{"code":"NOT_FOUND"}`）在前端會被 supabase-js 包成 `Failed to send a request to the Edge Function` — 這句 = 函式**根本沒部署**，不是程式 bug。
 - 列出線上已部署函式：`GET https://api.supabase.com/v1/projects/$REF/functions`。repo 有 `supabase/functions/<x>/` 不代表線上有 — 新函式一定要手動部署。
 
+### Secrets API 回的是雜湊，不是密文本體
+
+`GET /v1/projects/{ref}/secrets` 回傳的 `value` 是 SHA-256 雜湊，**不是真值** —
+拿去簽 JWT 會一直 `invalid jwt signature`，別在這裡鬼打牆。
+要拿能驗過 `PROJECT_JWT_SECRET` 的密鑰，用 `GET /v1/projects/{ref}/postgrest` 的
+`jwt_secret`（= Dashboard 的 Legacy JWT Secret）。`DEFAULT_TENANT_ID` 真值是
+`00000000-0000-0000-0000-000000000001`（見 HANDOFF），不要信 secrets API 回的值。
+
 ### 重寫 function 前，先 grep 歷史 migration
 
 `supabase/migrations/` 是 append-only，同一支 function / view 常被多支 migration 用 `CREATE OR REPLACE` 修過。若直接基於「最早建立的版本」改寫，會把後面散落的多個修法整個蓋掉，產生 regression。
@@ -77,6 +85,39 @@ LIFF ↔ 網頁互推的迴圈，第二次還沒登入就給文字指引（請�
 
 debug 提醒：`line-oauth-start` 用 curl 打回 302 → LINE login page **不代表沒問題** —
 這條路在一般瀏覽器本來就會過，400 只在真的 LINE webview 裡才會出現。
+
+### LIFF app 的 Endpoint URL 必須跟會員站同網域，中間不能跨網域轉址
+
+LIFF 登入（`access.line.me/liff/v1/authorize`）會把**當下的網址**當 `redirect_uri` 送出去。
+只要那個網址不在 LIFF app 註冊的 Endpoint URL 底下，LINE 就回 **400 Bad Request**。
+
+2026-08-03 實測（同一支 LIFF，只換 `redirect_uri`）：
+
+```
+redirect_uri=<LIFF app 註冊的 endpoint>        → HTTP 200（正常登入頁）
+redirect_uri=https://new-erp-admin.vercel.app/ → HTTP 400 ← 會員看到的那頁
+```
+
+當時的坑：LIFF `2009883687-NZX6xXEW` 的 endpoint 被指到一個 Cloudflare Worker
+（`line-richmenu-branches.www161616.workers.dev`），那支 worker 又 302 到
+`new-erp-admin.vercel.app/orders`。**一跨出網域，LIFF context 就沒了**
+（`isInClient()` 變 false、沒有 auto login、LINE 還會跳「此為外部網站」），
+接下來任何登入動作都是 400。
+
+所以：要在 LIFF 內轉址，一律轉去 **`https://liff.line.me/{另一支 endpoint 正確的 LIFF_ID}`**，
+不要直接 302 到別的網域。查一支 LIFF 的 endpoint：
+
+```bash
+curl -s https://liff.line.me/<LIFF_ID> | grep liffEndpointUrl
+```
+
+驗 redirect_uri 會不會被擋（不用真的手機）：
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -L \
+  "https://access.line.me/liff/v1/authorize?app_id=<LIFF_ID>&state=x&response_type=code\
+&code_challenge_method=S256&code_challenge=<43字元>&liff_sdk_version=2.29.2&redirect_uri=<URL編碼>"
+```
 
 ---
 
