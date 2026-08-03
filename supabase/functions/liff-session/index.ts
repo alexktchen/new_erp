@@ -19,12 +19,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { corsHeaders } from "../_shared/cors.ts";
-import { signJwtHs256 } from "../_shared/jwt.ts";
+import { signSessionToken } from "../_shared/session.ts";
 import { verifyIdToken } from "../_shared/line.ts";
 import { autoRegister } from "../_shared/auto-register.ts";
 import { resolveStore } from "../_shared/store-resolve.ts";
 
-const SESSION_TTL_SEC = 60 * 60 * 24 * 30; // 30 天
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -103,12 +102,10 @@ Deno.serve(async (req) => {
     }
 
     // 4) 簽 JWT
-    const now = Math.floor(Date.now() / 1000);
-    const jwt = await signJwtHs256({
+    const jwt = await signSessionToken({
       iss: "supabase",
       role: "authenticated",
       aud: "authenticated",
-      exp: now + SESSION_TTL_SEC,
       tenant_id: tenantId,
       store_id: storeNumericId,
       store_code: storeCode,
