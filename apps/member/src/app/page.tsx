@@ -405,9 +405,18 @@ export default function LandingPage() {
       const token = genPairToken();
       localStorage.setItem(PAIR_TOKEN_KEY, token);
 
-      const targetUrl = liffId
-        ? liffAppUrl(liffId, storeId, token)
-        : lineOauthStartUrl(storeId, token);
+      // PWA 一律走 OAuth，不走 LIFF。
+      //
+      // LIFF 那條在 PWA 上沒有任何好處：PWA 開外部連結用的是 iOS 的
+      // in-app browser，不是 LINE app —— 沒有自動登入，到頭來一樣要跑一次
+      // LINE 授權。卻多繞一次 liff.line.me 跳轉（2026-08-03 實測會停在白畫面），
+      // 而且致命的是 pair 掛在 URL 的 liff.state 上，liff.login() 一走就被沖掉，
+      // 後端永遠收不到，pwa_auth_codes 也就永遠不會寫入
+      // （實測 liff_session_ok 的 pair_written 一直是 null）。
+      //
+      // OAuth 這條的 pair 是編進 state JWT，由 line-oauth-callback 解出後
+      // 直接寫進 pwa_auth_codes —— 全程在後端，前端 URL 怎麼變都沖不掉。
+      const targetUrl = lineOauthStartUrl(storeId, token);
 
       // ⚠️ 這裡**不要**用 a.target="_blank"。
       // iOS 的 standalone PWA 對程式化開新視窗不可靠：可能靜默失敗（畫面
@@ -425,7 +434,7 @@ export default function LandingPage() {
       logClientError(
         "pwa_login_started",
         "PWA 觸發 LINE 登入",
-        { store: storeId, via: liffId ? "liff" : "oauth" },
+        { store: storeId, via: "oauth" },
         "info",
       );
       // 讓使用者知道「回來這裡就會自動完成」，否則切回來看到原本的登入頁
@@ -627,18 +636,19 @@ export default function LandingPage() {
           <div className="card space-y-4 p-6 text-center">
             <Spinner size={28} />
             <p className="text-[17px] font-bold text-[var(--foreground)]">
-              請在 LINE 完成登入
+              請完成 LINE 登入
             </p>
             <p className="text-[14px] leading-relaxed text-[var(--secondary-label)]">
               完成後請回到本 App，我們會自動帶您進入，不需要輸入任何驗證碼。
             </p>
-            {/* iOS 從 LINE 回來的路不只一條，而使用者不見得找得到 —— 明講兩種 */}
+            {/* 回來的路不只一條，而使用者不見得找得到 —— 明講兩種。
+                改走 OAuth 後多數情況是在瀏覽器視窗完成，關掉即可回到這裡 */}
             <div className="w-full rounded-xl bg-[var(--fill-quaternary,rgba(120,120,128,0.08))] p-3 text-left text-[13px] leading-relaxed text-[var(--secondary-label)]">
               回來的方式：
               <br />
-              1. 點 LINE 畫面左上角的「◀ 包子媽生鮮小舖」
+              1. 點登入畫面左上角的「✕」或「◀」關閉
               <br />
-              2. 或關閉 LINE，從手機桌面重新點開本 App
+              2. 或從手機桌面重新點開本 App
             </div>
             {/* LINE 沒被開起來時的自救 —— 沒有這顆就只能乾等，
                 而使用者無從判斷是「還沒好」還是「根本沒開」 */}
@@ -647,7 +657,7 @@ export default function LandingPage() {
                 href={pwaLoginUrl}
                 className="block w-full rounded-xl bg-[#06C755] px-4 py-3 text-[15px] font-semibold text-white transition active:scale-[0.98]"
               >
-                LINE 沒有開啟？點這裡再試一次
+                登入畫面沒開啟？點這裡再試一次
               </a>
             )}
             <button
@@ -787,7 +797,7 @@ export default function LandingPage() {
                   )}
                   {standalone && (
                     <p className="text-[12px] text-[var(--tertiary-label)]">
-                      將在 LINE app 中完成登入，再回到此 PWA App。
+                      將開啟 LINE 登入頁，完成後自動回到此 App。
                     </p>
                   )}
                 </div>
