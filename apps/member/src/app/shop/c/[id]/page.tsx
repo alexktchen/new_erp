@@ -8,8 +8,10 @@ import { callLiffApi } from "@/lib/supabase";
 import PageShell from "@/components/PageShell";
 import Spinner from "@/components/Spinner";
 import Countdown from "@/components/Countdown";
+import ViewCount from "@/components/ViewCount";
 import { cleanCampaignText } from "@/lib/text";
 import { getCampaignHint } from "@/lib/campaignHints";
+import { logCaught } from "@/lib/clientLog";
 
 /** 把 children 渲染到 document.body（保證 fixed 相對 viewport）。 */
 function Portal({ enabled, children }: { enabled: boolean; children: React.ReactNode }) {
@@ -26,6 +28,8 @@ type CampaignDetail = {
   status: string;
   end_at: string | null;
   pickup_deadline: string | null;
+  /** 總瀏覽次數。後端未部署 track_campaign_view 前可能沒有這個欄位。 */
+  view_count?: number;
 };
 
 type Item = {
@@ -56,6 +60,8 @@ export default function CampaignDetailPage() {
   const [qtyMap, setQtyMap] = useState<Record<number, number>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  // 瀏覽次數：先用列表 hint 的值墊著，detail / track 回來再蓋掉（含本次瀏覽）
+  const [viewCount, setViewCount] = useState<number>(() => hint?.view_count ?? 0);
 
   // confirm sheet
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -88,6 +94,9 @@ export default function CampaignDetailPage() {
         setCampaign(d.campaign);
         setItems(d.items);
         setHeroImages(d.hero_images ?? []);
+        if (typeof d.campaign.view_count === "number") {
+          setViewCount(d.campaign.view_count);
+        }
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       } finally {
@@ -95,6 +104,29 @@ export default function CampaignDetailPage() {
       }
     })();
   }, [id, router]);
+
+  // 記一次瀏覽，並拿回含本次的最新計數。
+  // 同會員同商品 30 分鐘內在後端去重，所以「返回列表再點進來」不會灌水。
+  const trackedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!id || trackedRef.current === id) return;
+    const s = getSession();
+    if (!s || !s.memberId) return;
+    trackedRef.current = id;
+    (async () => {
+      try {
+        const r = await callLiffApi<{ view_count: number }>(s.token, {
+          action: "track_campaign_view",
+          campaign_id: id,
+        });
+        if (typeof r.view_count === "number") setViewCount(r.view_count);
+      } catch (e) {
+        // 瀏覽數是附加資訊，記不到不能影響購物；但要留痕，
+        // 否則「數字一直是 0」只會在會員手機上重現得出來。
+        logCaught("track_campaign_view_failed", e, { campaign_id: id });
+      }
+    })();
+  }, [id]);
 
   const totalQty = useMemo(
     () => Object.values(qtyMap).reduce((s, n) => s + (n || 0), 0),
@@ -203,6 +235,9 @@ export default function CampaignDetailPage() {
                   </div>
                 )}
               </div>
+              <ViewCount count={viewCount} size="md" />
+
+
               {displayDescription && (() => {
                 const desc = cleanCampaignText(displayDescription);
                 if (!desc) return null;
