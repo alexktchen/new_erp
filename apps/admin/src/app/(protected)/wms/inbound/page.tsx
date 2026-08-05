@@ -16,31 +16,37 @@ import { translateRpcError } from "@/lib/rpcError";
 import { useUserBranchStoreId } from "@/lib/useDefaultStoreFromUser";
 import { fetchAllRows } from "@/lib/fetchAllRows";
 import { fanoutPickupNotifications } from "@/lib/pickupNotify";
+import { TransferOrdersModal, type ModalSkuLine } from "@/components/TransferOrdersModal";
 
 type Location = { id: number; name: string };
 type StoreLite = { id: number; location_id: number | null };
 type StoreRow = { id: number; name: string; location_id: number | null };
 // codes：本張 transfer 涵蓋的品項編號(sku_code) / 商品編號(product_code)，僅供搜尋比對用
 // items：拆開的品項行（key = 合併同品相用的識別；自由轉貨掛虛擬 SKU，要用 description 當 key）
-type ItemLine = { key: string; name: string; qty: number };
+// product = 只有商品名（不含規格），給群組標題用；name = 商品名 / 規格，明細表用
+type ItemLine = { key: string; skuId: number | null; product: string; name: string; skuCode: string | null; qty: number };
+// extraQty：這張單裡「沒有訂單對應」的件數（派出量 − 訂單需求量），見下方查詢註解
 type ItemSummary = {
   lines: number;
   totalQty: number;
   names: string[];
   codes: string[];
   items: ItemLine[];
+  extraQty: number;
 };
 
 // 列表上的一個可收合群組（product 模式＝同品相，wave 模式＝同撿貨單號）
 type Group = {
   key: string;
   label: string;
+  labelTitle: string; // hover 才看得到的完整品名 / 規格清單
   subLabel: string;
   mono: boolean; // label 是單號 → 等寬字
   transfers: Transfer[];
   totalQty: number;
   sortCode: string;
   waveDate: string | null; // 配送日，用來標「逾期 / 今天」
+  extraQty: number;        // 這組總共被總倉多給幾件
 };
 
 export default function TransfersInboxPage() {
@@ -54,6 +60,10 @@ export default function TransfersInboxPage() {
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [opening, setOpening] = useState<Transfer | null>(null);
+  // 點數量開的「訂單明細」彈窗：看這幾件分別是誰的訂單、多給的幾件沒人訂
+  const [ordersFor, setOrdersFor] = useState<
+    { transferId: number; transferNo: string; skuLines: ModalSkuLine[] } | null
+  >(null);
   const [locationFilter, setLocationFilter] = useState<number | "all">("all");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [doneLimit, setDoneLimit] = useState(50);
@@ -245,6 +255,9 @@ export default function TransfersInboxPage() {
           );
           const skuIds = Array.from(new Set(items.map((it) => it.sku_id)));
           const skuNameMap = new Map<number, string>();
+          // 群組標題只用商品名（同商品的多個規格會被去重成一筆），規格留給展開的明細
+          const skuProductMap = new Map<number, string>();
+          const skuOnlyCodeMap = new Map<number, string>();
           // sku_code = 品項編號、product_code = 商品編號（products embed）；供搜尋比對
           const skuCodeMap = new Map<number, string>();
           if (skuIds.length > 0) {
@@ -265,11 +278,13 @@ export default function TransfersInboxPage() {
             for (const s of skuRows) {
               const label = `${s.product_name ?? ""}${s.variant_name ? ` / ${s.variant_name}` : ""}`.trim() || `#${s.id}`;
               skuNameMap.set(s.id, label);
+              skuProductMap.set(s.id, (s.product_name ?? "").trim() || label);
+              if (s.sku_code) skuOnlyCodeMap.set(s.id, s.sku_code);
               const code = [s.sku_code, s.products?.product_code].filter(Boolean).join(" ").trim();
               if (code) skuCodeMap.set(s.id, code);
             }
           }
-          const emptySummary = (): ItemSummary => ({ lines: 0, totalQty: 0, names: [], codes: [], items: [] });
+          const emptySummary = (): ItemSummary => ({ lines: 0, totalQty: 0, names: [], codes: [], items: [], extraQty: 0 });
           for (const tid of transferIds) summary.set(tid, emptySummary());
           for (const it of items) {
             const cur = summary.get(it.transfer_id) ?? emptySummary();
@@ -279,10 +294,30 @@ export default function TransfersInboxPage() {
             const desc = it.description?.trim();
             const name = desc || (skuNameMap.get(it.sku_id) ?? `#${it.sku_id}`);
             cur.names.push(`${name} × ${qty}`);
-            cur.items.push({ key: desc ? `d:${desc}` : `s:${it.sku_id}`, name, qty });
+            cur.items.push({
+              key: desc ? `d:${desc}` : `s:${it.sku_id}`,
+              // 自由轉貨掛在虛擬 SKU 上，對不到顧客訂單 → 不給 skuId
+              skuId: desc ? null : it.sku_id,
+              product: desc || skuProductMap.get(it.sku_id) || name,
+              name,
+              skuCode: desc ? null : skuOnlyCodeMap.get(it.sku_id) ?? null,
+              qty,
+            });
             const code = skuCodeMap.get(it.sku_id);
             if (code) cur.codes.push(code);
             summary.set(it.transfer_id, cur);
+          }
+
+          // 「總倉多給」= 派出量 > 該店該團的訂單需求量（沒有訂單對應的那幾件）。
+          // 不是比 picking_wave_items 的 picked_qty vs qty — 線上 17429 列裡
+          // over_pick 是 0，用那個定義標籤永遠不會亮（見 20260805000040 migration）。
+          // 每張單的件數與彈窗裡「派出 − 訂單合計」同一套 join，兩邊數字保證一致。
+          const { data: overData } = await sb.rpc("rpc_get_over_ship_for_transfers", {
+            p_transfer_ids: transferIds,
+          });
+          for (const [tid, extra] of Object.entries((overData as Record<string, unknown> | null) ?? {})) {
+            const cur = summary.get(Number(tid));
+            if (cur) cur.extraQty = Number(extra) || 0;
           }
         }
 
@@ -401,6 +436,7 @@ export default function TransfersInboxPage() {
           entry = {
             key,
             label: w?.wave_code ?? (wid !== null ? `WAVE-${wid}` : "其他調撥"),
+            labelTitle: "",
             subLabel: w ? `配送日 ${w.wave_date}` : "",
             mono: true,
             transfers: [],
@@ -408,11 +444,13 @@ export default function TransfersInboxPage() {
             // 排序鍵＝撿貨單號（wave_code）；wave_code 已內含日期，字串遞減即最新在前
             sortCode: w?.wave_code ?? (wid !== null ? `WAVE-${wid}` : ""),
             waveDate: w?.wave_date ?? null,
+            extraQty: 0,
           };
           map.set(key, entry);
         }
         entry.transfers.push(t);
         entry.totalQty += itemSummary.get(t.id)?.totalQty ?? 0;
+        entry.extraQty += itemSummary.get(t.id)?.extraQty ?? 0;
       }
       return Array.from(map.values()).sort((a, b) => {
         // 「其他調撥」永遠墊底，其餘依撿貨單號遞減
@@ -435,23 +473,29 @@ export default function TransfersInboxPage() {
       let entry = map.get(key);
       if (!entry) {
         const dest = locations.get(t.dest_location) ?? `#${t.dest_location}`;
-        // 品名不帶數量 — 數量在群組層加總（× 1 + × 14 + × 6 = 共 21 件）
-        const names = Array.from(new Set(lines.map((l) => l.name)));
+        // 標題只列商品名、去重、最多 3 個 — 一張單常含同商品的十幾個規格
+        // （例：「水麥芽手撕蛋糕 / (A)經典原味」…(G)），全列出來標題會佔掉整個畫面。
+        // 規格與 SKU 編號留在展開的明細表。
+        const products = Array.from(new Set(lines.map((l) => l.product)));
+        const shown = products.slice(0, 3).join("、");
         entry = {
           key,
-          label: names.join("、") || "—",
+          label: (products.length > 3 ? `${shown} …+${products.length - 3} 項` : shown) || "—",
+          labelTitle: Array.from(new Set(lines.map((l) => l.name))).join("\n"),
           subLabel: [dest, date ? `配送日 ${date}` : ""].filter(Boolean).join(" · "),
           mono: false,
           transfers: [],
           totalQty: 0,
           // 未收：日期小的（逾期/今天）排前面；已收：日期大的（最近收的）排前面。見下方 sort。
-          sortCode: `${date || "9999-99-99"}|${names.join("、")}|${dest}`,
+          sortCode: `${date || "9999-99-99"}|${products.join("、")}|${dest}`,
           waveDate: date || null,
+          extraQty: 0,
         };
         map.set(key, entry);
       }
       entry.transfers.push(t);
       entry.totalQty += s?.totalQty ?? 0;
+      entry.extraQty += s?.extraQty ?? 0;
     }
     const asc = tab === "unreceived";
     return Array.from(map.values()).sort((a, b) =>
@@ -1001,6 +1045,7 @@ export default function TransfersInboxPage() {
                   <span className="min-w-0">
                     <span className="flex flex-wrap items-center gap-2">
                       <span
+                        title={g.labelTitle || undefined}
                         className={`break-words ${
                           g.mono
                             ? "font-mono text-sm font-bold text-blue-700 dark:text-blue-400"
@@ -1015,6 +1060,9 @@ export default function TransfersInboxPage() {
                         <Pill tone="emerald">✓ 已收到</Pill>
                       )}
                       {dueTag && <Pill tone={dueTag === "逾期" ? "rose" : "amber"}>{dueTag}</Pill>}
+                      {g.extraQty > 0 && (
+                        <Pill tone="blue">🎁 總倉多給 {g.extraQty} 件</Pill>
+                      )}
                     </span>
                     <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
                       {g.subLabel
@@ -1103,11 +1151,36 @@ export default function TransfersInboxPage() {
                               )}
                             </td>
                             <td className="px-3 py-2 align-top">
-                              <div className="break-words text-zinc-900 dark:text-zinc-100" title={summary?.names.join("\n")}>
-                                {summary && summary.lines > 0
-                                  ? summary.items.map((it) => it.name).join("、")
-                                  : "—"}
-                              </div>
+                              {/* 一列一個 SKU（品項編號 + 品名 / 規格 × 數量）— 一張單十幾個規格時
+                                  串成一段會整片糊掉，這裡是唯一該看得到規格的地方 */}
+                              {summary && summary.lines > 0 ? (
+                                <ul className="space-y-0.5">
+                                  {summary.items.map((it, i) => (
+                                    <li key={i} className="break-words text-zinc-900 dark:text-zinc-100">
+                                      {it.skuCode && (
+                                        <span className="mr-1.5 font-mono text-[10px] text-zinc-400">{it.skuCode}</span>
+                                      )}
+                                      {it.name}
+                                      {/* 點數量 → 這幾件分別是誰的訂單 */}
+                                      <SpinButton
+                                        onClick={() =>
+                                          setOrdersFor({
+                                            transferId: t.id,
+                                            transferNo: wave?.wave_code ?? t.transfer_no,
+                                            skuLines: [it],
+                                          })
+                                        }
+                                        className="ml-1 rounded font-semibold tabular-nums text-blue-600 underline decoration-dotted underline-offset-2 hover:text-blue-800 dark:text-blue-400"
+                                        title="看這幾件對應哪幾筆訂單"
+                                      >
+                                        × {it.qty}
+                                      </SpinButton>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="text-zinc-400">—</div>
+                              )}
                               <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
                                 {groupMode === "wave" && (
                                   <span>{locations.get(t.dest_location) ?? `#${t.dest_location}`}</span>
@@ -1133,10 +1206,31 @@ export default function TransfersInboxPage() {
                                 )}
                               </div>
                             </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-right align-top font-semibold tabular-nums">
-                              {summary?.totalQty ?? 0}
+                            <td className="whitespace-nowrap px-3 py-2 text-right align-top">
+                              <SpinButton
+                                onClick={() =>
+                                  setOrdersFor({
+                                    transferId: t.id,
+                                    transferNo: wave?.wave_code ?? t.transfer_no,
+                                    skuLines: summary?.items ?? [],
+                                  })
+                                }
+                                disabled={!summary || summary.lines === 0}
+                                className="font-semibold tabular-nums text-blue-600 underline decoration-dotted underline-offset-2 hover:text-blue-800 disabled:text-zinc-400 disabled:no-underline dark:text-blue-400"
+                                title="看這張單對應哪幾筆訂單"
+                              >
+                                {summary?.totalQty ?? 0}
+                              </SpinButton>
                               {summary && summary.lines > 1 && (
                                 <span className="ml-1 text-[10px] font-normal text-zinc-400">{summary.lines} 項</span>
+                              )}
+                              {summary && summary.extraQty > 0 && (
+                                <div
+                                  className="text-[10px] font-medium text-blue-600 dark:text-blue-400"
+                                  title="派出量比店裡的訂單需求還多，多出來的部分沒有訂單對應"
+                                >
+                                  🎁 多給 {summary.extraQty}
+                                </div>
                               )}
                             </td>
                             <td className="whitespace-nowrap px-3 py-2 text-right align-top">
@@ -1215,6 +1309,15 @@ export default function TransfersInboxPage() {
         </div>
       )}
 
+      {ordersFor && (
+        <TransferOrdersModal
+          transferId={ordersFor.transferId}
+          transferNo={ordersFor.transferNo}
+          skuLines={ordersFor.skuLines}
+          onClose={() => setOrdersFor(null)}
+        />
+      )}
+
       {opening && (
         <TransferReceiveModal
           transfer={opening}
@@ -1245,11 +1348,12 @@ function Th({ children }: { children?: React.ReactNode }) {
 }
 
 // 卡片標題旁的狀態膠囊（待收 / 已收到 / 逾期）
-function Pill({ tone, children }: { tone: "amber" | "emerald" | "rose"; children: React.ReactNode }) {
+function Pill({ tone, children }: { tone: "amber" | "emerald" | "rose" | "blue"; children: React.ReactNode }) {
   const cls = {
     amber: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
     emerald: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
     rose: "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300",
+    blue: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
   }[tone];
   return (
     <span className={`inline-flex shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium ${cls}`}>
