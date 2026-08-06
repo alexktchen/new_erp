@@ -57,9 +57,18 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # deploy-pages 只是跟 Pages 說「上線這包」再輪詢狀態，正常 30~60 秒就結束。
+    # 2026-08-06 遇過 Pages 佇列塞住：狀態卡在 deployment_queued 整整 10 分鐘
+    # （action 預設 timeout 600000ms）才 abort，期間 concurrency group "pages"
+    # 被佔住，後面排隊的 run 一起延後。縮短到 6 分鐘 —— 仍是正常耗時的 6 倍以上，
+    # 但塞住時能快點翻掉重試，不用盯著等。timeout-minutes 是 runner 層的保險，
+    # 避免 action 自己的計時失靈時整個 job 掛著。
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          timeout: 360000
