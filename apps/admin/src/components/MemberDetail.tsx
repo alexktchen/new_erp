@@ -5,6 +5,7 @@ import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { MemberMergeModal } from "@/components/MemberMergeModal";
 import { MemberDeleteModal } from "@/components/MemberDeleteModal";
+import { LineMessageModal } from "@/components/LineMessageModal";
 import { WalletActionModal, type WalletActionMode } from "@/components/WalletActionModal";
 import { Modal } from "@/components/Modal";
 import { OrderDetail } from "@/components/OrderDetail";
@@ -114,6 +115,7 @@ export function MemberDetail({ memberId, onDeleted }: { memberId: number; onDele
   const [reloadTick, setReloadTick] = useState(0);
   const [mergeOpen, setMergeOpen] = useState<false | "guest-to-real" | "real-from-guest">(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [lineMsgOpen, setLineMsgOpen] = useState(false);
   const [mergedFrom, setMergedFrom] = useState<MergedFrom[]>([]);
   const [savingFlags, setSavingFlags] = useState(false);
   const [draftAdminNote, setDraftAdminNote] = useState("");
@@ -325,6 +327,15 @@ export function MemberDetail({ memberId, onDeleted }: { memberId: number; onDele
           </div>
           <div className="font-mono text-xs text-zinc-500">#{member.member_no}</div>
         </div>
+        {hasLine && !isMerged && !isDeleted && (
+          <SpinButton
+            onClick={() => setLineMsgOpen(true)}
+            className="rounded-md border border-green-300 px-3 py-1 text-xs font-medium text-green-700 hover:bg-green-50 dark:border-green-800 dark:text-green-300 dark:hover:bg-green-950"
+            title="透過 LINE 官方帳號直接發訊息給此會員（可附截圖）"
+          >
+            💬 發送 LINE 訊息
+          </SpinButton>
+        )}
         {canMergeOut && (
           <SpinButton
             onClick={() => setMergeOpen("guest-to-real")}
@@ -491,6 +502,15 @@ export function MemberDetail({ memberId, onDeleted }: { memberId: number; onDele
           onDeleted?.();
         }}
       />
+
+      {lineMsgOpen && tenantId && (
+        <LineMessageModal
+          open={true}
+          onClose={() => setLineMsgOpen(false)}
+          member={{ id: member.id, name: member.name, member_no: member.member_no }}
+          tenantId={tenantId}
+        />
+      )}
 
       {/* 訂單明細 — 點訂單分頁的列開啟；關閉時 reload，取貨/取消後餘額與訂單狀態才會同步 */}
       <Modal
