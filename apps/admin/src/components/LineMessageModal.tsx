@@ -159,14 +159,18 @@ export function LineMessageModal({
     // 該店還沒配對的 OA 好友：推不到時要讓店員手動挑
     (async () => {
       if (homeStoreId == null) return;
-      const { data } = await getSupabase()
+      const { data, error: fErr } = await getSupabase()
         .from("store_line_followers")
         .select("line_user_id, display_name, picture_url")
         .eq("store_id", homeStoreId)
         .is("member_id", null)
         .eq("followed", true)
         .limit(50);
-      if (!cancelled) setFollowers((data as Follower[]) ?? []);
+      if (cancelled) return;
+      // 不能吞掉錯誤：查詢失敗時清單會是空的，選單就整個不見，
+      // 畫面上卻什麼都沒說 —— 店員只會覺得「這功能壞了」而無從回報。
+      if (fErr) { setError(`讀取本店 LINE 名冊失敗：${fErr.message}`); return; }
+      setFollowers((data as Follower[]) ?? []);
     })();
     // 樣板用的會員站連結（不需要 LINE token，所以 token 沒設也拿得到）
     (async () => {
@@ -203,8 +207,11 @@ export function LineMessageModal({
   /**
    * 把該會員的可取貨品項畫成一張圖，直接放進附圖欄。
    *
-   * 只取 item.status = 'ready'（可取貨）—— 同一張訂單裡可能混著已取貨 / 未到貨的
-   * 品項，整張塞給顧客會讓他白跑一趟或以為東西少了。
+   * 「可取貨」判斷在**單頭**（status = ready / partially_completed），不在品項 ——
+   * 這個租戶的品項狀態實際上只用 pending（未取）/ picked_up（已取）/ cancelled：
+   * 全庫 5.1 萬筆 pending、ready 只有 3 筆（2026-08-08 查證；一開始篩品項
+   * status='ready' 導致永遠回「沒有可取貨的品項」）。
+   * 所以：單頭已可取貨的訂單裡，「還沒取又沒取消」的品項就是要給顧客看的清單。
    */
   async function buildPickupImage() {
     setBuildingImage(true);
@@ -233,7 +240,9 @@ export function LineMessageModal({
           orderNo: o.order_no,
           campaign: one(o.campaign)?.name ?? null,
           lines: (o.customer_order_items ?? [])
-            .filter((it) => it.status === "ready")
+            // pending/reserved/ready 都是「尚未取貨」的細分（見 lib/orderStatus.ts）；
+            // 排除 picked_up（已拿走）與 cancelled/expired（斷貨，錢跟數量都不能算）
+            .filter((it) => ["pending", "reserved", "ready"].includes(it.status ?? ""))
             .map((it) => ({
               name: one(one(it.skus)?.products ?? null)?.name
                 ?? one(it.skus)?.sku_code
@@ -370,7 +379,8 @@ export function LineMessageModal({
         )}
 
         {/* 推不到 + 該店名冊有人 → 讓店員手動配對 */}
-        {reachable.state === "unreachable" && followers.length > 0 && (
+        {(reachable.state === "unreachable" || reachable.state === "error")
+          && followers.length > 0 && (
           <div className="rounded-md border border-sky-200 bg-sky-50 p-2 dark:border-sky-900 dark:bg-sky-950/40">
             <div className="mb-1 text-xs font-medium text-sky-900 dark:text-sky-200">
               這位會員在本店官方帳號是哪一個？
