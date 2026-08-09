@@ -68,6 +68,14 @@ const NAV: NavGroup[] = [
     ],
   },
   {
+    title: "分析",
+    items: [
+      { href: "/analytics/regions", label: "地區偏好", match: /^\/analytics\/regions/ },
+      { href: "/analytics/members", label: "會員分析", match: /^\/analytics\/members/ },
+      { href: "/analytics/products", label: "商品分析", match: /^\/analytics\/products/ },
+    ],
+  },
+  {
     title: "社群選品",
     items: [
       { href: "/community-candidates", label: "候選池", match: /^\/community-candidates(?!\/calendar)/ },
@@ -115,6 +123,7 @@ const BRANCH_HIDDEN_HREFS = new Set([
 ]);
 const BRANCH_HIDDEN_GROUPS = new Set([
   "社群選品", // 整個 group 隱藏
+  "分析",     // 跨店客群 / 商品分析，加盟店不看別家（比照 /products）
 ]);
 
 function isBranchUser(user: { app_metadata?: Record<string, unknown> } | null | undefined): boolean {
