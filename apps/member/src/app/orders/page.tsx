@@ -1,15 +1,29 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { consumeFragmentToSession, getSession, loginPath } from "@/lib/session";
 import { callLiffApi } from "@/lib/supabase";
 import PageShell from "@/components/PageShell";
 import { LoadingScreen } from "@/components/Spinner";
 import SubTabs from "@/components/SubTabs";
-import OrderCard, { type OrderRow } from "@/components/OrderCard";
+import OrderCard, { orderPhase, type OrderRow } from "@/components/OrderCard";
 
-type Tab = "pending" | "arrived" | "history";
+// 蝦皮式分頁。我們取貨時付現金，所以沒有「待付款」；「待收貨」＝到店「待取貨」。
+// 分桶跟卡片右上角的狀態字共用 orderPhase()，兩邊永遠一致。
+// 「不成立」（斷貨取消）要顯示 —— 團友得知道那筆單為什麼消失（⛔ 斷貨說明）。
+// 「已轉讓」目前先隱藏（連「全部」也不出現），之後要開再把它移出 HIDDEN_PHASES。
+type Tab = "all" | "waiting" | "pickup" | "done" | "void";
+
+const TAB_LABEL: Record<Tab, string> = {
+  all: "全部",
+  waiting: "待到貨",
+  pickup: "待取貨",
+  done: "已完成",
+  void: "不成立",
+};
+
+const HIDDEN_PHASES = new Set(["transferred"]);
 
 function fmtAmount(n: number): string {
   return Number(n ?? 0).toLocaleString();
@@ -18,10 +32,10 @@ function fmtAmount(n: number): string {
 /**
  * 一個分頁的金額加總。
  *
- * 排除 cancelled / expired 的訂單：「未到貨」刻意保留斷貨整單取消的訂單讓客人看得到
- * （listMyOrders 的 filter），那種單不用付錢，算進去總金額就會跟每張卡上的
- * 應付金額加起來對不上。品項層級的斷貨排除已經在 DB 做掉了（20260808000010），
- * 這裡只要顧單頭。
+ * 排除 cancelled / expired 的訂單：「全部」分頁刻意保留斷貨整單取消的訂單讓客人
+ * 看得到（也有自己的「不成立」分頁），那種單不用付錢，算進去總金額就會跟每張卡上的
+ * 應付金額加起來對不上；「不成立」分頁全是這種單，count=0 → 總金額卡整張不顯示。
+ * 品項層級的斷貨排除已經在 DB 做掉了（20260808000010），這裡只要顧單頭。
  */
 function sumOrders(list: OrderRow[]) {
   const active = list.filter((o) => !["cancelled", "expired"].includes(String(o.status ?? "")));
@@ -38,9 +52,8 @@ function sumOrders(list: OrderRow[]) {
 
 export default function OrdersPage() {
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>("pending");
-  const [activeOrders, setActiveOrders] = useState<OrderRow[]>([]);
-  const [historyOrders, setHistoryOrders] = useState<OrderRow[]>([]);
+  const [tab, setTab] = useState<Tab>("all");
+  const [orders, setOrders] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -59,8 +72,14 @@ export default function OrdersPage() {
           callLiffApi<{ orders: OrderRow[] }>(s.token, { action: "list_my_orders", tab: "active" }),
           callLiffApi<{ orders: OrderRow[] }>(s.token, { action: "list_my_orders", tab: "history" }),
         ]);
-        setActiveOrders(active.orders);
-        setHistoryOrders(history.orders);
+        // 「全部」要照時間混排，不是先進行中再歷史；隱藏的階段在這裡就過濾掉
+        setOrders(
+          [...active.orders, ...history.orders]
+            .filter((o) => !HIDDEN_PHASES.has(orderPhase(o).phase))
+            .sort(
+              (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+            ),
+        );
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       } finally {
@@ -69,22 +88,31 @@ export default function OrdersPage() {
     })();
   }, [router]);
 
-  const pending = activeOrders.filter((o) => !o.arrived);
-  const arrived = activeOrders.filter((o) => o.arrived);
-  const display = tab === "pending" ? pending : tab === "arrived" ? arrived : historyOrders;
-  const emptyLabel = tab === "pending" ? "未到貨" : tab === "arrived" ? "已到貨" : "已完成";
+  const buckets = useMemo(() => {
+    const b: Record<Tab, OrderRow[]> = { all: orders, waiting: [], pickup: [], done: [], void: [] };
+    for (const o of orders) {
+      const { phase } = orderPhase(o);
+      // orders 進來前已濾掉 HIDDEN_PHASES（已轉讓），剩下的都有自己的分頁
+      if (phase !== "transferred") b[phase].push(o);
+    }
+    return b;
+  }, [orders]);
+
+  const display = buckets[tab];
   const totals = sumOrders(display);
 
   return (
     <PageShell title="我的訂單">
       <SubTabs
+        variant="scroll"
         value={tab}
         onChange={(v) => setTab(v as Tab)}
-        options={[
-          { value: "pending", label: "未到貨", count: pending.length },
-          { value: "arrived", label: "已到貨", count: arrived.length },
-          { value: "history", label: "訂單紀錄", count: historyOrders.length },
-        ]}
+        options={(Object.keys(TAB_LABEL) as Tab[]).map((t) => ({
+          value: t,
+          label: TAB_LABEL[t],
+          // 「全部」不掛數字；待到貨/待取貨掛數字提醒還有幾筆
+          count: t === "all" || t === "done" ? undefined : buckets[t].length,
+        }))}
       />
 
       <div className="space-y-3 px-4 pt-3 pb-6">
@@ -95,7 +123,7 @@ export default function OrdersPage() {
           <div className="card flex items-center justify-between gap-3 px-4 py-3">
             <div className="min-w-0">
               <div className="text-[16px] text-[var(--foreground)]">
-                {tab === "history" ? "訂單總金額" : "應付總金額"}
+                {tab === "done" ? "訂單總金額" : "應付總金額"}
               </div>
               <div className="mt-0.5 text-[13px] text-[var(--secondary-label)]">
                 共 {totals.count} 筆訂單
@@ -128,7 +156,7 @@ export default function OrdersPage() {
               📦
             </div>
             <p className="mt-4 text-[16px] font-semibold text-[var(--foreground)]">
-              目前沒有{emptyLabel}訂單
+              {tab === "all" ? "目前沒有訂單" : `目前沒有「${TAB_LABEL[tab]}」的訂單`}
             </p>
           </div>
         )}
