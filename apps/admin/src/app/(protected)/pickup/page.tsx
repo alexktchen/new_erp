@@ -16,6 +16,7 @@ import { publicProductUrl } from "@/lib/campaignCover";
 import { parseReturnNote } from "@/lib/returnNote";
 import { fetchReprintableEvents, pickupEventLabel, type PickupEventRow } from "@/lib/pickupReceipt";
 import { itemDisplayName } from "@/lib/skuLabel";
+import { CutoffChip } from "@/components/CampaignCutoff";
 
 type Member = {
   id: number;
@@ -38,7 +39,7 @@ type OpenOrder = {
   transferred_from_order_id: number | null; // 互助轉入單才有；用來判斷是否走「退回原店」
   last_notify_pickup_at: string | null;
   notify_pickup_count: number;
-  campaign: { id: number; campaign_no: string; name: string } | null;
+  campaign: { id: number; campaign_no: string; name: string; cutoff_date: string | null } | null;
   store: { id: number; name: string } | null;
   items: {
     id: number;
@@ -194,7 +195,7 @@ function PickupPageContent() {
         .from("customer_orders")
         .select(
           `id, order_no, status, pickup_deadline, pickup_store_id, discount_amount, ready_at, transferred_from_order_id, last_notify_pickup_at, notify_pickup_count, member_id,
-           campaign:group_buy_campaigns(id, campaign_no, name),
+           campaign:group_buy_campaigns(id, campaign_no, name, cutoff_date),
            store:stores!customer_orders_pickup_store_id_fkey(id, name),
            items:customer_order_items(id, sku_id, qty, unit_price, status, sku:skus(variant_name, product_name, product:products(images)))`,
         )
@@ -802,6 +803,7 @@ function PickupPageContent() {
                                 <div className="min-w-0 flex-1 text-sm">
                                   <div className="flex flex-wrap items-baseline gap-2">
                                     <span>{o.campaign?.name ?? "(未知活動)"}</span>
+                                    <CutoffChip date={o.campaign?.cutoff_date} />
                                     {o.status === "partially_completed" && (
                                       <span className="rounded bg-teal-100 px-2 py-0.5 text-[10px] font-medium text-teal-800 dark:bg-teal-950 dark:text-teal-300">
                                         部分已取
@@ -894,8 +896,9 @@ function PickupPageContent() {
                             />
                             <OrderThumb order={o} />
                             <div className="min-w-0 flex-1 text-sm">
-                              <div className="flex items-baseline gap-2">
+                              <div className="flex flex-wrap items-baseline gap-2">
                                 <span>{o.campaign?.name ?? "(未知活動)"}</span>
+                                <CutoffChip date={o.campaign?.cutoff_date} />
                                 {o.status === "partially_completed" && (
                                   <span className="rounded bg-teal-100 px-2 py-0.5 text-[10px] font-medium text-teal-800 dark:bg-teal-950 dark:text-teal-300">
                                     部分已取
@@ -1099,17 +1102,18 @@ function PickupPageContent() {
                   const partial = g.items.length < pickedItemsOf(g.order).length;
                   return (
                     <div key={g.order.id} className="text-sm">
-                      <div className="mb-1">
+                      <div className="mb-1 flex flex-wrap items-baseline gap-2">
                         <span>{g.order.campaign?.name ?? "(未知活動)"}</span>
-                        <span className="ml-2 text-[10px] text-zinc-500">取貨店：{g.order.store?.name ?? "—"}</span>
+                        <CutoffChip date={g.order.campaign?.cutoff_date} />
+                        <span className="text-[10px] text-zinc-500">取貨店：{g.order.store?.name ?? "—"}</span>
                         {evs.length > 0 && (
-                          <span className="ml-2 text-[10px] text-emerald-700 dark:text-emerald-400">
+                          <span className="text-[10px] text-emerald-700 dark:text-emerald-400">
                             {pickupEventLabel(evs[evs.length - 1])}
                             {evs.length > 1 && `（共 ${evs.length} 次）`}
                           </span>
                         )}
                         {partial && (
-                          <span className="ml-2 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                          <span className="rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
                             只印 {g.items.length}/{pickedItemsOf(g.order).length} 項
                           </span>
                         )}
@@ -1180,9 +1184,10 @@ function PickupPageContent() {
                   const pickItems = pickableItems(o);
                   return (
                     <div key={o.id} className="text-sm">
-                      <div className="mb-1">
+                      <div className="mb-1 flex flex-wrap items-baseline gap-2">
                         <span>{o.campaign?.name ?? "(未知活動)"}</span>
-                        <span className="ml-2 text-[10px] text-zinc-500">取貨店：{o.store?.name ?? "—"}</span>
+                        <CutoffChip date={o.campaign?.cutoff_date} />
+                        <span className="text-[10px] text-zinc-500">取貨店：{o.store?.name ?? "—"}</span>
                       </div>
                       <ul className="ml-4 space-y-0.5 text-xs">
                         {pickItems.map((it) => (
