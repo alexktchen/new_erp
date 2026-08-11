@@ -219,6 +219,52 @@ confirmed**，變成重複單（線上已抓到 5 位客人中獎，其中 3 位
   `is_order_item_pickup_ready` 會回 false，反而多一道要人工解除的關卡。
   維持 `confirmed` 就好，下一批貨收進來時會自然重算。
 
+### 把貨配給客人之後，【內部】xx 店的現貨池要跟著扣
+
+RR- /【內部】xx 店的單**就是店端的現貨池帳本**，不是純顯示用的 —— 轉單給客人時
+`rpc_transfer_order_partial` 會從它身上扣（等量 → 整行 `cancelled`、部分 → `qty` 遞減）。
+所以任何「把店內的貨配掉」的新路徑都必須一起扣池子，否則店員看到的可轉出量是假的：
+2026-08-11 忠順進 10 包、自動配單配掉 8 包給團購客人，池子還掛著 ×10 ——
+真的全部轉出去就是 8 位團友撲空 + 庫存扣成負的。
+
+扣的量要用**兩層上限**夾住（`_trim_internal_pool`，20260811000030）：
+
+```
+trim = LEAST(本次配出量, GREATEST(池子未取量 − (on_hand − 已承諾未取), 0))
+```
+
+- `GREATEST(..., 0)`：貨是走該團自己的波次進來的時候 `on_hand` 同時蓋得住池子和
+  團購單 → trim = 0，不會誤吃店家本來就有的現貨。
+- `LEAST(本次配出量, ...)`：只收拾自己造成的超額，不要順手做全域收斂。
+
+扣法比照 `_settle_restock_ride_along`：整行吃掉 → `cancelled`，只吃一部分 → **拆行**
+（被配走的另開一列 `cancelled`，折扣按數量比例分攤），一律標 `[已配給團購單]`。
+不要直接改 `qty` 了事 —— cancelled 列前端會畫刪除線，店家才看得到「那 8 包去哪了」。
+收尾一樣要接 `_close_orders_all_items_settled`。
+
+### 「這批貨到店了沒」要看單頭 status，不要用 is_order_item_pickup_ready 當判準
+
+閘門是 **qty-blind** 的（Path C 只問「本店有沒有收過這個 SKU」），所以同一個 SKU
+只要到過一次，**後面還沒出貨的批次也會一起回 true**。拿它當「到貨了沒」的判準，
+盤點類的查詢會把在途的貨算成已到。
+
+2026-08-11 用它盤「現貨池超額掛帳」時就被騙了兩次：
+
+| 判準 | 算出來的壞帳 | 實際 |
+|---|---|---|
+| `pool_qty > on_hand − 已承諾`（沒濾到貨） | 395 組 / 2,804 件 | 幾乎全是**還沒到貨**的 RR- 單 |
+| 上式 + `is_order_item_pickup_ready` | 79 組 / 221 件 | 仍混入沒出貨的批次 |
+| 上式 + `co.status IN ('ready','partially_completed')` | **26 組 / 68 件** | ✅ 真的壞帳 |
+
+RR- ride-along 單在補貨到店**之前**就存在（單頭 `pending`/`confirmed`），
+要 restock 收貨後才被 `_settle_restock_ride_along` 推 `ready`。所以對容器單來說
+**單頭 status 才是可靠的到貨訊號**，`_trim_internal_pool` 也只吃 ready/部分取貨的池子
+（20260811000040）。
+
+連帶注意呼叫順序：`rpc_receive_transfer` 裡自動配單那段（邏輯 E）**必須排在
+邏輯 D/D2 之後** —— ride-along 單要先被推 ready，池子收斂才吃得到它，
+否則整支會靜默失效（掛在邏輯 C 尾巴時就是這樣）。
+
 ---
 
 ## 補貨申請 (restock_requests)
