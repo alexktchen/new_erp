@@ -5,11 +5,9 @@
 - 工作資料夾：`D:\1人公司-codex\new_erp_partial_pr`
 - 分支：`codex/partial-pr-review-20260812`
 - 來源：最新 `origin/main` 上套入 Claude 半成品後由 Codex 複審修正
-- 尚未 commit
-- 尚未 push
+- 已 commit 並 push 到 PR #684
 - 尚未部署
-- 尚未套 migration
-- 尚未碰正式 Supabase
+- 已套正式 migration（只套本案 RPC 與權限補丁）
 
 ## 本輪要解的問題
 
@@ -24,6 +22,7 @@
 檔案：
 
 - `supabase/migrations/20260812020000_rpc_create_partial_pr_from_items.sql`
+- `supabase/migrations/20260812021000_revoke_anon_partial_pr_rpc.sql`
 
 內容：
 
@@ -41,6 +40,8 @@
 - 重算原 PR 與新 PR 的 `total_amount`
 
 注意：原本 Claude migration 檔名是 `20260812000000_rpc_create_partial_pr_from_items.sql`，會與最新 main 既有 `20260812000000_po_stockout_split_and_restore.sql` 撞號。Codex 已改成 `20260812020000...`。
+
+正式庫套用後發現 `anon` 仍有 explicit EXECUTE grant。已用 append-only 補丁 `20260812021000_revoke_anon_partial_pr_rpc.sql` 移除 `anon` 權限，保留 `authenticated` / `service_role` / owner 權限。
 
 ### 2. 新增驗證腳本
 
@@ -167,14 +168,18 @@ DB 交叉驗證另確認：`raw_line`/`notes`/`parse_confidence`/`source_campaig
 
 過程中需老闆手動處理一步：staging 新專案的 `custom_access_token_hook` 預設未啟用，導致 JWT 缺頂層 `tenant_id`；已於 Dashboard 啟用。**這是 staging 環境差異，正式庫本來就開著。**
 
-### 目前狀態（未變）
+### 目前狀態（2026-08-12 23:41 更新）
 
-- **未 commit**（HEAD 仍為 `4986b50`）
-- **未 push**
+- 已 commit：`aee71be Add partial PR split workflow`
+- 已開 PR：`https://github.com/lt-foods/new_erp/pull/684`
 - **未 git pull**
 - **未部署**（正式站、Vercel 皆未動）
-- **未套 migration 到正式庫**
-- 專案程式碼**零改動**：驗證與驗收全程未修改任何 migration / 前端 / SQL
+- 已套正式 migration 到 `anfyoeviuhmzzrhilwtm`：
+  - `20260812020000_rpc_create_partial_pr_from_items`
+  - `20260812021000_revoke_anon_partial_pr_rpc`
+- 正式 RPC 已確認存在：`rpc_create_partial_pr_from_items(bigint,bigint[],uuid)`
+- 正式 RPC 權限已確認：`authenticated` / `service_role` / `postgres`，無 `anon`
+- 尚未 merge PR #684；因此正式前端尚未上線
 
 ### 非專案檔的一項改動（報備）
 
@@ -187,7 +192,7 @@ DB 交叉驗證另確認：`raw_line`/`notes`/`parse_confidence`/`source_campaig
 
 ### 下一步（可進入部署決策）
 
-四層驗證（Codex 靜態 ×2 輪 P0=0 / 編譯 / DB 15-15 / 前端 12-12）皆已通過。
+四層驗證（Codex 靜態 ×2 輪 P0=0 / 編譯 / DB 15-15 / 前端 12-12）皆已通過。正式 DB migration 也已套完，下一步是 merge PR #684 觸發 GitHub Pages 部署，部署後做最小 smoke test。
 仍未驗證：正式資料規模下的效能、多人同時編輯同一張 PR 的併發（後者已列為已知限制，且是既有 ✕ 本來就做得到的事，非本功能新增）。
 
 ## 另案提醒
