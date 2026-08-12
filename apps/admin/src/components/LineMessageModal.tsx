@@ -51,10 +51,15 @@ type Follower = { line_user_id: string; display_name: string | null; picture_url
 //
 // ⚠ 連結一律用會員站自己的網址，不要換成 https://liff.line.me/...
 //   （LIFF endpoint 目前跨網域，會員點進去登入會爆，見 CLAUDE.md）。
-const TEMPLATES: { label: string; build: (ordersUrl: string) => string }[] = [
+const TEMPLATES: { label: string; build: (ordersUrl: string, memberName: string | null) => string }[] = [
   {
     label: "📦 到貨通知",
-    build: (ordersUrl) => `您好，您有貨到了！\n查看訂單：${ordersUrl}`,
+    build: (ordersUrl, memberName) => `親愛的${memberName?.trim() || "貴賓"} 您好～❤️
+您的商品已經到貨囉！
+有空的時候再過來取貨就可以了，
+我們已經幫您準備好囉 😊
+
+查看訂單：${ordersUrl}`,
   },
 ];
 
@@ -491,7 +496,7 @@ export function LineMessageModal({
               <SpinButton
                 key={t.label}
                 onClick={() => {
-                  const next = t.build(ordersUrl);
+                  const next = t.build(ordersUrl, member.name);
                   // 已經打了字才確認，避免手滑蓋掉寫好的內容
                   if (text.trim() && !window.confirm("要用樣板取代目前已輸入的訊息嗎？")) return;
                   setText(next);
