@@ -21,10 +21,15 @@ import { useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { fetchAllRows } from "@/lib/fetchAllRows";
 import {
+  addOutcomeMessage,
   buildSkuRows,
   buildStoreColumns,
+  classifyAddOutcome,
   describeDraftDbError,
+  lateCellSnapshot,
+  loadPrefill,
   rowTotal,
+  type PrefillResult,
   type StoreRef,
 } from "@/lib/pickingDraftView";
 import SpinButton from "@/components/SpinButton";
@@ -83,6 +88,9 @@ function Body() {
   // 網址沒帶 ?id= 就沒有東西要載 → 一開始就不是 loading，直接落到下面的錯誤畫面
   const [loading, setLoading] = useState(validId);
   const [error, setError] = useState<string | null>(null);
+  // 加入商品後的說明（帶出來的量被可分配量夾住、或整個沒有需求）。
+  // ⛔ 不能靜默：老闆看到 105 卻不知道那家店其實要 108，會照著印給樓下。
+  const [notice, setNotice] = useState<string | null>(null);
   // 正在輸入、還沒 blur 的格子（key → 使用者打的字）。commit 成功後清掉。
   const [edits, setEdits] = useState<Map<string, string>>(new Map());
   const [nameDraft, setNameDraft] = useState("");
@@ -161,6 +169,7 @@ function Body() {
       }
 
       setError(null);
+      setNotice(null); // 重新整理 = 重新看現況，舊訊息不留著
       setDraft(head as Draft);
       setNameDraft((head as Draft).name);
       setStores(activeStores);
@@ -246,13 +255,23 @@ function Body() {
         if (err) throw err;
         setItems((arr) => arr.map((it) => (it.id === existing.id ? { ...it, qty: n } : it)));
       } else {
-        // 這格還沒有列：加入這樣商品之後才啟用的分店。
+        // 這格還沒有列：加入這樣商品之後才啟用（或才被撈出來）的分店。
         // 品號/品名沿用同商品其他列的快照值；分店名稱取「現在這一欄」的值
         // （這一欄可能來自 stores 現況，也可能來自別列的分店快照，兩者都對）。
-        // 數量快照(snapshot_at / demand / available) 留 NULL ——
-        // 這一格不在當初那次快照裡，切片 B 對照現況時要看得出來。
+        //
+        // ⭐ 數量快照**當下重拍一次**，不留一堆 NULL：
+        //   切片 B 的「對照現況」要拿快照當基準算落差，同一張草稿裡有些格子有基準、
+        //   有些沒有，落差就算不出來。所以這裡照樣去讀一次需求。
+        //   讀失敗**不擋這次改數量**（使用者的意圖是填數字，快照只是附帶的中繼資料），
+        //   但一定要在 snapshot_extra 標記原因 —— ⛔ 不可以讓切片 B 面對裸 NULL 去猜。
         const sibling = items.find((it) => it.sku_id === skuId);
         const col = storeCols.find((c) => c.id === storeId);
+        let pre: PrefillResult | null = null;
+        try {
+          pre = await loadPrefill({ db: sb, fetchAll: fetchAllRows }, skuId);
+        } catch {
+          pre = null; // lateCellSnapshot 會標 demand_lookup: "failed"
+        }
         const { data, error: err } = await sb
           .from("picking_draft_items")
           .insert({
@@ -265,6 +284,7 @@ function Body() {
             snapshot_sku_label: sibling?.snapshot_sku_label ?? null,
             snapshot_store_code: col?.code ?? null,
             snapshot_store_name: col?.name ?? null,
+            ...lateCellSnapshot(pre, storeId, new Date().toISOString()),
             created_by: uid,
             updated_by: uid,
           })
@@ -280,7 +300,7 @@ function Body() {
     }
   }
 
-  // ---- 加入商品：替**所有啟用分店**各建一列（qty 0），這樣矩陣天生就是「所有分店」----
+  // ---- 加入商品：替**所有啟用分店**各建一列，數量帶出「各店還沒派的需求」----
   async function addSku(opt: SkuOption) {
     if (skuRows.some((r) => r.sku_id === opt.id)) {
       setError(`「${opt.product_name}」已經在這張草稿裡了`);
@@ -291,6 +311,25 @@ function Body() {
       return;
     }
     setError(null);
+    setNotice(null);
+
+    // ⛔ 先把需求讀起來。讀不到就**整個中止、商品不加進去**。
+    //   不可以退回「空需求」照樣建 14 個 0 的列 —— 那跟「真的沒人要」長得一模一樣，
+    //   老闆會分不出是壞掉還是真的沒有，然後把錯的清單印給樓下去撿。
+    let pre: PrefillResult;
+    try {
+      pre = await loadPrefill({ db: getSupabase(), fetchAll: fetchAllRows }, opt.id);
+    } catch (e) {
+      setError(
+        addOutcomeMessage({
+          kind: "failed",
+          productName: opt.product_name,
+          reason: describeDraftDbError(e),
+        }),
+      );
+      return; // ⛔ 這個 return 就是 P1-1 的修法：下面那段 insert 根本不會跑到
+    }
+
     try {
       const sb = getSupabase();
       const { tenantId, uid } = await sessionInfo();
@@ -299,26 +338,57 @@ function Body() {
       const { data, error: err } = await sb
         .from("picking_draft_items")
         .insert(
-          stores.map((st) => ({
-            tenant_id: tenantId,
-            draft_id: draftId,
-            sku_id: opt.id,
-            store_id: st.id,
-            qty: 0,
-            snapshot_at: now,
-            snapshot_sku_code: opt.sku_code,
-            snapshot_sku_label: label,
-            // 分店名稱也拍下來：store_id 沒有外鍵，分店被硬刪之後
-            // 畫面與列印都還要說得出「原本要給哪一家」，不能只剩一個 #id
-            snapshot_store_code: st.code,
-            snapshot_store_name: st.name,
-            created_by: uid,
-            updated_by: uid,
-          })),
+          stores.map((st) => {
+            const p = pre.byStore.get(st.id);
+            return {
+              tenant_id: tenantId,
+              draft_id: draftId,
+              sku_id: opt.id,
+              store_id: st.id,
+              // 帶出「這家店還沒派的需求」，已夾在可分配量之內（見 computePrefill）
+              qty: p?.give ?? 0,
+              snapshot_at: now,
+              snapshot_sku_code: opt.sku_code,
+              snapshot_sku_label: label,
+              // 分店名稱也拍下來：store_id 沒有外鍵，分店被硬刪之後
+              // 畫面與列印都還要說得出「原本要給哪一家」，不能只剩一個 #id
+              snapshot_store_code: st.code,
+              snapshot_store_name: st.name,
+              // 快照：加入當下的「未派需求」與「可分配量」，切片 B 對照現況要用
+              snapshot_demand_qty: p?.demandLeft ?? 0,
+              snapshot_available_qty: pre.available,
+              snapshot_close_date: pre.closeDate,
+              // 標明這一格的快照是「加入商品那一刻」拍的。後來才補的格子會標
+              // cell_created_later —— 切片 B 要分得出來，不能靠欄位是不是 NULL 去猜。
+              snapshot_extra: { ...pre.extra, snapshot_source: "add_sku" },
+              created_by: uid,
+              updated_by: uid,
+            };
+          }),
         )
         .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label, snapshot_store_code, snapshot_store_name");
       if (err) throw err;
       setItems((arr) => [...arr, ...((data ?? []) as DraftItem[])]);
+
+      // 帶出來的量與實際需求對不上時一定要講出來。
+      // ⚠ 「查詢正常但沒需求」與上面「讀取失敗」的畫面都是一排 0，只能靠訊息分辨
+      //   → 措辭由 addOutcomeMessage 統一維護，避免哪天改了一句忘了另一句。
+      let demandTotal = 0;
+      let giveTotal = 0;
+      for (const st of stores) {
+        const p = pre.byStore.get(st.id);
+        demandTotal += p?.demandLeft ?? 0;
+        giveTotal += p?.give ?? 0;
+      }
+      setNotice(
+        addOutcomeMessage({
+          kind: classifyAddOutcome(demandTotal, giveTotal),
+          productName: opt.product_name,
+          demandTotal,
+          giveTotal,
+          available: pre.available,
+        }),
+      );
     } catch (e) {
       setError(describeDraftDbError(e));
     }
@@ -328,6 +398,7 @@ function Body() {
   async function removeSku(skuId: number, label: string) {
     if (!confirm(`把「${label}」從這張草稿移除？（只動草稿，不影響任何庫存或訂單）`)) return;
     setError(null);
+    setNotice(null); // 剛才那則「已加入 …」講的可能就是這一樣，留著會對不上
     try {
       const { error: err } = await getSupabase()
         .from("picking_draft_items")
@@ -445,6 +516,20 @@ function Body() {
       {error && (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
           {error}
+        </div>
+      )}
+
+      {notice && (
+        <div className="flex items-start justify-between gap-3 rounded-md border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            aria-label="關閉這則訊息"
+            className="shrink-0 rounded px-1.5 text-sky-700 hover:bg-sky-100 dark:text-sky-300 dark:hover:bg-sky-900"
+          >
+            ✕
+          </button>
         </div>
       )}
 
