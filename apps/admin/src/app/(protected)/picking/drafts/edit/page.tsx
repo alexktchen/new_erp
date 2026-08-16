@@ -30,6 +30,7 @@ import {
   loadPrefill,
   rowTotal,
   type PrefillResult,
+  type SkuExistence,
   type StoreRef,
 } from "@/lib/pickingDraftView";
 import SpinButton from "@/components/SpinButton";
@@ -65,7 +66,7 @@ type SkuOption = {
 
 const cellKey = (skuId: number, storeId: number) => `${skuId}:${storeId}`;
 
-const STORE_STATE_LABEL = { inactive: "已停用", missing: "已刪除" } as const;
+const STORE_STATE_LABEL = { inactive: "已停用", missing: "已刪除", unknown: "無法確認" } as const;
 
 export default function PickingDraftEditPage() {
   return (
@@ -82,9 +83,10 @@ function Body() {
   const [items, setItems] = useState<DraftItem[]>([]);
   const [stores, setStores] = useState<Store[]>([]);
   // 草稿引用到、但已經不在啟用清單裡的分店（停用或被刪）。key = store_id，查不到就是被刪了。
-  const [extraStores, setExtraStores] = useState<Map<number, Store>>(new Map());
+  const [extraStores, setExtraStores] = useState<Map<number, Store> | null>(new Map());
   // 目前 skus 還查得到的 id；null = 這次查不出來 → 一律不標「商品已不存在」
-  const [existingSkuIds, setExistingSkuIds] = useState<Set<number> | null>(null);
+  // 商品存在性：三態（見 SkuExistence）。⛔ 不要用 null 同時表達「異常」與「不標記」
+  const [skuExistence, setSkuExistence] = useState<SkuExistence>({ kind: "unknown" });
   // 網址沒帶 ?id= 就沒有東西要載 → 一開始就不是 loading，直接落到下面的錯誤畫面
   const [loading, setLoading] = useState(validId);
   const [error, setError] = useState<string | null>(null);
@@ -134,23 +136,30 @@ function Body() {
       const missingStoreIds = Array.from(new Set(cells.map((c) => c.store_id))).filter(
         (id) => !activeIds.has(id),
       );
-      const extra = new Map<number, Store>();
+      // ⛔ 查詢失敗要跟「查得到、但這幾家真的被刪了」分開：
+      //   舊版沒有檢查 error，也在 catch 裡 extra.clear()，等於把「查不出來」
+      //   直接說成「這些店都被刪了」。null = 無法確認（欄位標「無法確認」而不是「已刪除」）。
+      let extra: Map<number, Store> | null = new Map<number, Store>();
       if (missingStoreIds.length > 0) {
         try {
           for (let i = 0; i < missingStoreIds.length; i += 200) {
-            const { data: rows } = await sb
+            const { data: rows, error: e } = await sb
               .from("stores")
               .select("id, code, name")
               .in("id", missingStoreIds.slice(i, i + 200));
-            for (const s of (rows ?? []) as Store[]) extra.set(s.id, s);
+            if (e) throw e;
+            for (const s of (rows ?? []) as Store[]) extra.set(Number(s.id), s);
           }
         } catch {
-          extra.clear(); // 查不到就當成「已刪除」標示，欄位照樣會出現
+          extra = null;
         }
       }
 
-      const skuIds = Array.from(new Set(cells.map((c) => c.sku_id)));
-      let alive: Set<number> | null = null;
+      const skuIds = Array.from(new Set(cells.map((c) => Number(c.sku_id))));
+      // 空草稿 = 沒有東西要查，結果就是「確實空集合」——那是事實，不是異常（阿審 P2-1）。
+      // 這樣之後首次加入商品才補得進集合。
+      let existence: SkuExistence = { kind: "known", ids: new Set<number>() };
+      let skuCheckWarning: string | null = null;
       if (skuIds.length > 0) {
         try {
           const found = new Set<number>();
@@ -159,22 +168,38 @@ function Body() {
               .from("skus")
               .select("id")
               .in("id", skuIds.slice(i, i + 200));
-            if (e) throw new Error(e.message);
-            for (const s of (rows ?? []) as { id: number }[]) found.add(s.id);
+            if (e) throw e;
+            for (const s of (rows ?? []) as { id: number }[]) found.add(Number(s.id));
           }
-          alive = found;
+          // ⭐⭐ 一樣都沒對上 ≠「這張草稿的商品全部被刪了」。
+          //   草稿裡的商品都是從 skus 搜出來加進去的，整批對不上遠比「整批被刪」更可能是
+          //   查詢異常（權限、型別、篩選）。這種時候寧可**不標記**，也不要嚇使用者說資料壞了。
+          //   —— 與上一輪修掉的 P1-1 是同一個病：系統異常偽裝成資料狀態。
+          // ⭐ 一樣都沒對上：可能是查詢異常，也可能真的整批被刪了 —— 從前端分不出來。
+          //   ⛔ 不可以靜靜放過（那會讓「真的全被刪」看起來一切正常，阿審 P1），
+          //   也不該武斷說「都被刪了」→ 一律標「無法確認」，並在畫面上說清楚。
+          if (found.size === 0) {
+            existence = { kind: "unknown" };
+            skuCheckWarning =
+              `無法確認這張草稿裡 ${skuIds.length} 樣商品是否還在商品主檔（查詢回傳空的）—— ` +
+              `表格內會標「無法確認」。可能是查詢異常，也可能這些商品真的都被刪了，請通知工程師確認。`;
+          } else {
+            existence = { kind: "known", ids: found };
+          }
         } catch {
-          alive = null; // 查不出來 → 不標記（見 buildSkuRows 的說明）
+          existence = { kind: "unknown" };
+          skuCheckWarning = `無法確認這張草稿裡的商品是否還在商品主檔（查詢失敗）—— 表格內會標「無法確認」。`;
         }
       }
 
       setError(null);
-      setNotice(null); // 重新整理 = 重新看現況，舊訊息不留著
+      // 重新整理 = 重新看現況；若商品存在性查不出來，這裡會帶出可讀提示
+      setNotice(skuCheckWarning);
       setDraft(head as Draft);
       setNameDraft((head as Draft).name);
       setStores(activeStores);
       setExtraStores(extra);
-      setExistingSkuIds(alive);
+      setSkuExistence(existence);
       setItems(cells);
       setEdits(new Map());
     } catch (e) {
@@ -196,12 +221,14 @@ function Body() {
 
   // 一列 = 一樣商品；欄位 = 啟用中的分店 ∪ 這張草稿用到的分店。
   // 兩者都可能含「已停用 / 已刪除」的東西，一律照樣顯示並標示（見 lib/pickingDraftView.ts）。
-  const skuRows = useMemo(() => buildSkuRows(items, existingSkuIds), [items, existingSkuIds]);
+  const skuRows = useMemo(() => buildSkuRows(items, skuExistence), [items, skuExistence]);
   const storeCols = useMemo(
     () => buildStoreColumns(stores, items, extraStores),
     [stores, items, extraStores],
   );
-  const orphanSkuCount = useMemo(() => skuRows.filter((r) => r.missing).length, [skuRows]);
+  const missingSkuCount = useMemo(() => skuRows.filter((r) => r.state === "missing").length, [skuRows]);
+  const unknownSkuCount = useMemo(() => skuRows.filter((r) => r.state === "unknown").length, [skuRows]);
+  const orphanSkuCount = missingSkuCount + unknownSkuCount;
   const orphanStoreCount = useMemo(
     () => storeCols.filter((c) => c.state !== "active").length,
     [storeCols],
@@ -369,6 +396,14 @@ function Body() {
         .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label, snapshot_store_code, snapshot_store_name");
       if (err) throw err;
       setItems((arr) => [...arr, ...((data ?? []) as DraftItem[])]);
+      // ⭐⭐ 這一行是本次 bug 的正解：existingSkuIds 原本只在 load() 算一次，
+      //   加完商品只更新了 items、沒更新它 → 新加的商品必然不在那個舊集合裡，
+      //   於是每一樣剛加進去的商品都被標成「⚠ 此商品已不存在」。
+      //   這樣商品是剛從 skus 搜出來的，存在性無庸置疑 → 直接補進集合。
+      //   （集合是 null＝「這次查不出來」時維持 null，不要無中生有地開始宣稱知道。）
+      setSkuExistence((prev) =>
+        prev.kind === "known" ? { kind: "known", ids: new Set(prev.ids).add(Number(opt.id)) } : prev,
+      );
 
       // 帶出來的量與實際需求對不上時一定要講出來。
       // ⚠ 「查詢正常但沒需求」與上面「讀取失敗」的畫面都是一排 0，只能靠訊息分辨
@@ -537,10 +572,12 @@ function Body() {
         // 草稿不綁外鍵 → 可能引用到已刪除的商品／分店。這裡先總結一句，
         // 表格裡再逐列 / 逐欄標黃，⛔ 不靜默把它們藏起來。
         <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-          這張草稿裡有東西在系統中已經不存在了：
-          {orphanSkuCount > 0 && <> <strong>{orphanSkuCount} 樣商品</strong>已被刪除</>}
+          這張草稿裡有東西跟系統現況對不上：
+          {missingSkuCount > 0 && <> <strong>{missingSkuCount} 樣商品</strong>在商品主檔已查不到</>}
+          {missingSkuCount > 0 && unknownSkuCount > 0 && "、"}
+          {unknownSkuCount > 0 && <> <strong>{unknownSkuCount} 樣商品</strong>無法確認是否還在商品主檔</>}
           {orphanSkuCount > 0 && orphanStoreCount > 0 && "、"}
-          {orphanStoreCount > 0 && <> <strong>{orphanStoreCount} 個分店</strong>已停用或被刪除</>}
+          {orphanStoreCount > 0 && <> <strong>{orphanStoreCount} 個分店</strong>已停用／已刪除／無法確認</>}
           。
           數量都還在（下面標黃色的就是），顯示的是<strong>加入當下的名稱</strong>；
           要移除請按該列的「移除」。
@@ -593,11 +630,14 @@ function Body() {
                   <th className="sticky left-0 z-10 border-r border-zinc-200 bg-white px-3 py-2 text-left font-normal dark:border-zinc-800 dark:bg-zinc-950">
                     <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{row.label}</div>
                     <div className="font-mono text-xs text-zinc-400">{row.code}</div>
-                    {row.missing && (
-                      // 商品在 skus 裡查不到了（草稿不綁外鍵，見 migration 檔頭）。
+                    {row.state !== "active" && (
+                      // 商品在 skus 裡查不到（草稿不綁外鍵，見 migration 檔頭）。
                       // 照樣顯示快照名稱＋明講狀況，⛔ 不靜默跳過這一列。
+                      // ⭐ 「查不到」與「查不出來」是兩件事，字要不一樣。
                       <div className="mt-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
-                        ⚠ 此商品已不存在（顯示的是加入當下的名稱）
+                        {row.state === "missing"
+                          ? "⚠ 此商品已不存在（顯示的是加入當下的名稱）"
+                          : "⚠ 無法確認此商品是否還在商品主檔（顯示的是加入當下的名稱）"}
                       </div>
                     )}
                   </th>
@@ -651,7 +691,7 @@ function Body() {
 
       <p className="text-xs text-zinc-400">
         共 {skuRows.length} 樣商品 × {storeCols.length} 個分店欄位
-        {orphanStoreCount > 0 && `（其中 ${orphanStoreCount} 個已停用／已刪除）`}。
+        {orphanStoreCount > 0 && `（其中 ${orphanStoreCount} 個已停用／已刪除／無法確認）`}。
         「對照現況」「列印」「送到派貨工作台」是後續切片，這一版還沒有。
       </p>
     </div>
