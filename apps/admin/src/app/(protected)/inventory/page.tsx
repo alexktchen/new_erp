@@ -25,6 +25,15 @@ type Balance = {
 };
 type Sku = { id: number; sku_code: string; product_name: string | null; variant_name: string | null; base_unit: string };
 type Reorder = { location_id: number; sku_id: number; safety_stock: number; reorder_point: number };
+// rpc_get_stock_commitment_bulk 的一列：這個 (倉別, SKU) 的貨被誰佔著、還剩幾件能配
+type Commitment = {
+  location_id: number;
+  sku_id: number;
+  promised: number; // 已承諾未取（客人單 ready/部分取貨/shipping）
+  waiting: number;  // confirmed 還在等貨的需求
+  pool: number;     // 【內部】店現貨池（要賣走「轉單給客人」）
+  free: number;     // 可分配＝在庫 − 上面三項（下限 0）
+};
 type Movement = {
   id: number;
   quantity: number;
@@ -85,7 +94,8 @@ export default function InventoryOverviewPage() {
   // 成本只給總倉層級看（分店 store_manager / store_staff 一律遮掉）
   const role = useRole();
   const showCost = canSeeCost(role);
-  const colCount = showCost ? 9 : 8;
+  // 商品/倉別/在庫/已承諾/池子/可分配/在途/(均成本)/最後異動/展開箭頭
+  const colCount = showCost ? 10 : 9;
 
   const [locs, setLocs] = useState<Loc[]>([]);
   const [stores, setStores] = useState<StoreRow[]>([]);
@@ -94,6 +104,10 @@ export default function InventoryOverviewPage() {
   const [search, setSearch] = useState<string>("");
   const [searchInput, setSearchInput] = useState<string>("");
   const [onlyLow, setOnlyLow] = useState<boolean>(false);
+  // 只看「可分配 > 0」的列：店員想知道「現在有哪些貨可以直接配給客人」。
+  // 候選集合由 rpc_list_allocatable_pairs 給（全站 507 組，很小），
+  // 再照 onlyLow 的既有作法撈 stock_balances、前端分頁。
+  const [onlyFree, setOnlyFree] = useState<boolean>(false);
   const [page, setPage] = useState(1);
 
   const [rows, setRows] = useState<Balance[] | null>(null);
@@ -107,6 +121,10 @@ export default function InventoryOverviewPage() {
   const [truncated, setTruncated] = useState(false);
 
   const [expanded, setExpanded] = useState<string | null>(null);
+  // 本頁每列的承諾量拆解（已承諾/等貨/池子/可分配），一頁一次批次取。
+  // 算式留在伺服端（rpc_get_stock_commitment_bulk）—— 前端只顯示，不重算，
+  // 否則等於把自由量公式又抄一份到前端。
+  const [commitMap, setCommitMap] = useState<Map<string, Commitment>>(new Map());
   const [moveCache, setMoveCache] = useState<Map<string, Movement[]>>(new Map());
   const [moveLoading, setMoveLoading] = useState(false);
   // 依商品新增庫存（manual_adjust +N）— 開庫存減抵單前把帳外現貨補進帳用
@@ -139,7 +157,7 @@ export default function InventoryOverviewPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [locationId, search, onlyLow]);
+  }, [locationId, search, onlyLow, onlyFree]);
 
   // 篩選來源（一次載入）
   useEffect(() => {
@@ -191,6 +209,27 @@ export default function InventoryOverviewPage() {
         let count: number;
         let isTruncated = false;
 
+        // 「只看可配給客人」的候選集合。與 onlyLow 可以並用（取交集）。
+        // 全站實測 507 組 / 15 個倉別，一次撈回來很便宜；
+        // 但「全部倉別」時伺服端要走過每間店的訂單一次（~3s），所以有 spinner。
+        let allocSet: Set<string> | null = null;
+        let allocSkuIds: number[] | null = null;
+        if (onlyFree) {
+          const { data: ap, error: apErr } = await sb.rpc("rpc_list_allocatable_pairs", {
+            p_location_id: locationId ? Number(locationId) : null,
+            p_sku_ids: skuIdFilter,
+            p_limit: 20000,
+          });
+          if (apErr) throw apErr;
+          const pairs = (ap as { location_id: number; sku_id: number }[]) ?? [];
+          if (pairs.length === 0) {
+            if (!cancelled) { setRows([]); setTotal(0); setTruncated(false); setCommitMap(new Map()); }
+            return;
+          }
+          allocSet = new Set(pairs.map((p) => `${p.location_id}-${p.sku_id}`));
+          allocSkuIds = Array.from(new Set(pairs.map((p) => p.sku_id)));
+        }
+
         if (onlyLow) {
           // 低庫存：先抓 reorder_rules（受管 SKU 集合、有界），再比對 on_hand
           let rr = sb.from("reorder_rules").select("location_id, sku_id, safety_stock, reorder_point").limit(LOW_STOCK_SCAN_CAP);
@@ -216,11 +255,26 @@ export default function InventoryOverviewPage() {
             .map((b) => ({ ...b, on_hand: num(b.on_hand), reserved: num(b.reserved), in_transit_in: num(b.in_transit_in), avg_cost: num(b.avg_cost) }))
             .filter((b) => {
               const r = ruleByKey.get(`${b.location_id}-${b.sku_id}`);
-              return r != null && b.on_hand <= num(r.reorder_point);
+              if (r == null || b.on_hand > num(r.reorder_point)) return false;
+              // 兩個篩選並用時取交集
+              return allocSet == null || allocSet.has(`${b.location_id}-${b.sku_id}`);
             })
             .sort((a, b) => a.on_hand - b.on_hand);
           count = low.length;
           pageRows = low.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+        } else if (allocSkuIds != null && allocSet != null) {
+          // 只看可配給客人：候選集合已知 → 撈那些 SKU 的餘額，前端分頁
+          //（伺服端 range 分頁在這裡用不了，因為要先按 (倉別,SKU) 過濾）
+          let bq = sb.from("stock_balances").select(balanceCols).in("sku_id", allocSkuIds);
+          if (locationId) bq = bq.eq("location_id", Number(locationId));
+          const { data: bData, error: bErr } = await bq.limit(10000);
+          if (bErr) throw bErr;
+          const hit = ((bData as unknown as Balance[]) ?? [])
+            .map((b) => ({ ...b, on_hand: num(b.on_hand), reserved: num(b.reserved), in_transit_in: num(b.in_transit_in), avg_cost: num(b.avg_cost) }))
+            .filter((b) => allocSet!.has(`${b.location_id}-${b.sku_id}`))
+            .sort((a, b) => b.on_hand - a.on_hand);
+          count = hit.length;
+          pageRows = hit.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
         } else {
           let bq = sb
             .from("stock_balances")
@@ -247,23 +301,39 @@ export default function InventoryOverviewPage() {
         setTotal(count);
         setTruncated(isTruncated);
 
-        // 補 sku + reorder_rules（僅本頁可見列）
+        // 補 sku + reorder_rules + 承諾量拆解（僅本頁可見列）
         const skuIds = Array.from(new Set(pageRows.map((r) => r.sku_id)));
         if (skuIds.length > 0) {
-          const [sk, rr] = await Promise.all([
+          const [sk, rr, cm] = await Promise.all([
             sb.from("skus").select("id, sku_code, product_name, variant_name, base_unit").in("id", skuIds),
             sb.from("reorder_rules").select("location_id, sku_id, safety_stock, reorder_point").in("sku_id", skuIds),
+            // 一頁一次，不要每列各打一次
+            sb.rpc("rpc_get_stock_commitment_bulk", {
+              p_pairs: pageRows.map((r) => ({ location_id: r.location_id, sku_id: r.sku_id })),
+            }),
           ]);
           if (cancelled) return;
           const sm = new Map<number, Sku>();
           for (const s of (sk.data as Sku[]) ?? []) sm.set(s.id, s);
           const rm = new Map<string, Reorder>();
           for (const r of (rr.data as Reorder[]) ?? []) rm.set(`${r.location_id}-${r.sku_id}`, r);
+          const cmap = new Map<string, Commitment>();
+          for (const c of (cm.data as Commitment[]) ?? []) {
+            cmap.set(`${c.location_id}-${c.sku_id}`, {
+              ...c,
+              promised: num(c.promised),
+              waiting: num(c.waiting),
+              pool: num(c.pool),
+              free: num(c.free),
+            });
+          }
           setSkuMap(sm);
           setReorderMap(rm);
+          setCommitMap(cmap);
         } else {
           setSkuMap(new Map());
           setReorderMap(new Map());
+          setCommitMap(new Map());
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -277,7 +347,7 @@ export default function InventoryOverviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [locationId, search, onlyLow, page, role, showCost, reloadTick]);
+  }, [locationId, search, onlyLow, onlyFree, page, role, showCost, reloadTick]);
 
   const storeByLoc = useMemo(() => {
     const m = new Map<number, string>();
@@ -396,6 +466,17 @@ export default function InventoryOverviewPage() {
           <input type="checkbox" checked={onlyLow} onChange={(e) => setOnlyLow(e.target.checked)} />
           只看低於補貨點
         </label>
+        <label
+          className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+            onlyFree
+              ? "border-violet-400 bg-violet-50 text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+              : "border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-800"
+          }`}
+          title="只列出「可分配 > 0」的品項 —— 現在就能直接配給客人的貨。可與「只看低於補貨點」並用（取交集）。"
+        >
+          <input type="checkbox" checked={onlyFree} onChange={(e) => setOnlyFree(e.target.checked)} />
+          🤝 只看可配給客人
+        </label>
       </div>
 
       {error && (
@@ -410,9 +491,16 @@ export default function InventoryOverviewPage() {
           <Th>商品 / SKU</Th>
           <Th>倉別</Th>
           <Th align="right">在庫</Th>
-          <Th align="right">保留</Th>
+          {/* 「保留 / 可用」拿掉了：stock_balances.reserved 全站沒在維護
+              （2026-08-16 實測 7,712 筆有庫存的列，reserved<>0 的是 0 筆）
+              → 可用 恆等於 在庫，是一欄假數字，而且會跟「可分配」互相打臉
+              （截圖回報：列表寫可用 3、配單視窗寫自由量 0）。
+              換成真的有意義的三欄。reserved 若哪天真的開始用，會以標記
+              形式掛在「在庫」旁邊（見下方 rows 渲染）。 */}
+          <Th align="right">已承諾</Th>
+          <Th align="right">池子</Th>
+          <Th align="right">可分配</Th>
           <Th align="right">在途</Th>
-          <Th align="right">可用</Th>
           {showCost && <Th align="right">均成本</Th>}
           <Th align="right">最後異動</Th>
           <Th />
@@ -427,7 +515,7 @@ export default function InventoryOverviewPage() {
               const key = `${r.location_id}-${r.sku_id}`;
               const sku = skuMap.get(r.sku_id);
               const rule = reorderMap.get(key);
-              const available = r.on_hand - r.reserved;
+              const commit = commitMap.get(key) ?? null;
               const isLow = rule != null && r.on_hand <= num(rule.reorder_point);
               const open = expanded === key;
               const out: React.ReactNode[] = [
@@ -446,17 +534,47 @@ export default function InventoryOverviewPage() {
                   <Td className="text-xs">{locLabel(r.location_id)}</Td>
                   <Td align="right" className="font-mono">
                     {fmtQty(r.on_hand)}
+                    {/* reserved 目前全站恆為 0，所以不給一整欄；真的開始用的話
+                        這個標記會自己冒出來，不會靜靜地被吃掉 */}
+                    {r.reserved !== 0 && (
+                      <span
+                        className="ml-1 text-[10px] text-zinc-400"
+                        title={`其中 ${fmtQty(r.reserved)} 件被 stock_balances.reserved 鎖住`}
+                      >
+                        (保留 {fmtQty(r.reserved)})
+                      </span>
+                    )}
                     {isLow && (
                       <span className="ml-1.5 rounded bg-amber-200 px-1 text-[10px] font-medium text-amber-800 dark:bg-amber-900 dark:text-amber-300">
                         低
                       </span>
                     )}
                   </Td>
-                  <Td align="right" className="font-mono text-zinc-500">{fmtQty(r.reserved)}</Td>
-                  <Td align="right" className="font-mono text-zinc-500">{fmtQty(r.in_transit_in)}</Td>
-                  <Td align="right" className={`font-mono ${available < 0 ? "text-red-600 dark:text-red-400" : ""}`}>
-                    {fmtQty(available)}
+                  <Td align="right" className="font-mono text-zinc-500" title="已承諾未取：客人單已到貨、等他來領的量">
+                    {commit ? fmtQty(commit.promised) : "—"}
+                    {commit != null && commit.waiting > 0 && (
+                      <span className="ml-1 text-[10px] text-zinc-400" title="還在等貨的 confirmed 訂單需求">
+                        +{fmtQty(commit.waiting)}待
+                      </span>
+                    )}
                   </Td>
+                  <Td align="right" className="font-mono text-zinc-500" title="【內部】店現貨池：要賣走訂單頁的「轉單給客人」">
+                    {commit ? fmtQty(commit.pool) : "—"}
+                  </Td>
+                  <Td
+                    align="right"
+                    className={`font-mono font-semibold ${
+                      commit == null
+                        ? "text-zinc-400"
+                        : commit.free > 0
+                          ? "text-emerald-700 dark:text-emerald-400"
+                          : "text-zinc-400"
+                    }`}
+                    title="可分配＝在庫 − 已承諾 − 等貨 − 池子。這才是能直接配給客人的量"
+                  >
+                    {commit ? fmtQty(commit.free) : "—"}
+                  </Td>
+                  <Td align="right" className="font-mono text-zinc-500">{fmtQty(r.in_transit_in)}</Td>
                   {showCost && <Td align="right" className="font-mono text-zinc-500">{fmtCost(r.avg_cost)}</Td>}
                   <Td align="right" className="text-xs text-zinc-500">
                     <span title={fmtDateTime(r.last_movement_at)}>
