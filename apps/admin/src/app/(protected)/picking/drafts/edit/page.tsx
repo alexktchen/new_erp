@@ -20,6 +20,13 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { fetchAllRows } from "@/lib/fetchAllRows";
+import {
+  buildSkuRows,
+  buildStoreColumns,
+  describeDraftDbError,
+  rowTotal,
+  type StoreRef,
+} from "@/lib/pickingDraftView";
 import SpinButton from "@/components/SpinButton";
 import SearchSpinner from "@/components/SearchSpinner";
 
@@ -38,9 +45,11 @@ type DraftItem = {
   qty: number;
   snapshot_sku_code: string | null;
   snapshot_sku_label: string | null;
+  snapshot_store_code: string | null;
+  snapshot_store_name: string | null;
 };
 
-type Store = { id: number; code: string; name: string };
+type Store = StoreRef;
 
 type SkuOption = {
   id: number;
@@ -50,6 +59,8 @@ type SkuOption = {
 };
 
 const cellKey = (skuId: number, storeId: number) => `${skuId}:${storeId}`;
+
+const STORE_STATE_LABEL = { inactive: "已停用", missing: "已刪除" } as const;
 
 export default function PickingDraftEditPage() {
   return (
@@ -65,6 +76,10 @@ function Body() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [items, setItems] = useState<DraftItem[]>([]);
   const [stores, setStores] = useState<Store[]>([]);
+  // 草稿引用到、但已經不在啟用清單裡的分店（停用或被刪）。key = store_id，查不到就是被刪了。
+  const [extraStores, setExtraStores] = useState<Map<number, Store>>(new Map());
+  // 目前 skus 還查得到的 id；null = 這次查不出來 → 一律不標「商品已不存在」
+  const [existingSkuIds, setExistingSkuIds] = useState<Set<number> | null>(null);
   // 網址沒帶 ?id= 就沒有東西要載 → 一開始就不是 loading，直接落到下面的錯誤畫面
   const [loading, setLoading] = useState(validId);
   const [error, setError] = useState<string | null>(null);
@@ -86,30 +101,75 @@ function Body() {
         // 所有啟用中的分店（含這次沒下訂單的），排序沿用 restock/new 的 code 排法
         sb.from("stores").select("id, code, name").eq("is_active", true).order("code"),
       ]);
-      if (headErr) throw new Error(headErr.message);
+      if (headErr) throw headErr;
       if (!head) throw new Error(`找不到草稿 #${draftId}（可能已被刪除，或這個帳號看不到）`);
       // 分店撈失敗一定要吭聲：靜靜當成 0 家店的話，矩陣會變成沒有任何欄位、
       // 「加入商品」也會失敗，畫面上看起來像是草稿壞掉。
-      if (storeRes.error) throw new Error(`撈分店清單失敗：${storeRes.error.message}`);
+      if (storeRes.error) throw new Error(`撈分店清單失敗：${describeDraftDbError(storeRes.error)}`);
 
       // 明細是 SKU×分店 一格一列，50 樣 × 十幾家店就破千 →
       // 一定要走 fetchAllRows 分頁，否則 PostgREST 會靜默截在 1000 列、後面的商品整個消失。
       const cells = await fetchAllRows<DraftItem>(() =>
         sb
           .from("picking_draft_items")
-          .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label")
+          .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label, snapshot_store_code, snapshot_store_name")
           .eq("draft_id", draftId)
           .order("id", { ascending: true }),
       );
 
+      const activeStores = (storeRes.data ?? []) as Store[];
+
+      // ---- 孤兒列的解析（sku_id / store_id 沒有外鍵，草稿可能引用到已刪除的東西）----
+      // ⛔ 目的不是「濾掉」，是「查出來好標示」。查失敗一律退化成「不標記」，
+      //    絕不因為一次查詢失敗就把資料藏起來或對老闆說東西不見了。
+      const activeIds = new Set(activeStores.map((s) => s.id));
+      const missingStoreIds = Array.from(new Set(cells.map((c) => c.store_id))).filter(
+        (id) => !activeIds.has(id),
+      );
+      const extra = new Map<number, Store>();
+      if (missingStoreIds.length > 0) {
+        try {
+          for (let i = 0; i < missingStoreIds.length; i += 200) {
+            const { data: rows } = await sb
+              .from("stores")
+              .select("id, code, name")
+              .in("id", missingStoreIds.slice(i, i + 200));
+            for (const s of (rows ?? []) as Store[]) extra.set(s.id, s);
+          }
+        } catch {
+          extra.clear(); // 查不到就當成「已刪除」標示，欄位照樣會出現
+        }
+      }
+
+      const skuIds = Array.from(new Set(cells.map((c) => c.sku_id)));
+      let alive: Set<number> | null = null;
+      if (skuIds.length > 0) {
+        try {
+          const found = new Set<number>();
+          for (let i = 0; i < skuIds.length; i += 200) {
+            const { data: rows, error: e } = await sb
+              .from("skus")
+              .select("id")
+              .in("id", skuIds.slice(i, i + 200));
+            if (e) throw new Error(e.message);
+            for (const s of (rows ?? []) as { id: number }[]) found.add(s.id);
+          }
+          alive = found;
+        } catch {
+          alive = null; // 查不出來 → 不標記（見 buildSkuRows 的說明）
+        }
+      }
+
       setError(null);
       setDraft(head as Draft);
       setNameDraft((head as Draft).name);
-      setStores((storeRes.data ?? []) as Store[]);
+      setStores(activeStores);
+      setExtraStores(extra);
+      setExistingSkuIds(alive);
       setItems(cells);
       setEdits(new Map());
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeDraftDbError(e));
     } finally {
       setLoading(false);
     }
@@ -125,19 +185,18 @@ function Body() {
     return m;
   }, [items]);
 
-  // 一列 = 一樣商品。品名/品號取快照值（草稿是快照：商品之後改名也維持當初挑的樣子）。
-  const skuRows = useMemo(() => {
-    const m = new Map<number, { sku_id: number; code: string; label: string }>();
-    for (const it of items) {
-      if (m.has(it.sku_id)) continue;
-      m.set(it.sku_id, {
-        sku_id: it.sku_id,
-        code: it.snapshot_sku_code ?? "",
-        label: it.snapshot_sku_label ?? `#${it.sku_id}`,
-      });
-    }
-    return Array.from(m.values()).sort((a, b) => a.code.localeCompare(b.code));
-  }, [items]);
+  // 一列 = 一樣商品；欄位 = 啟用中的分店 ∪ 這張草稿用到的分店。
+  // 兩者都可能含「已停用 / 已刪除」的東西，一律照樣顯示並標示（見 lib/pickingDraftView.ts）。
+  const skuRows = useMemo(() => buildSkuRows(items, existingSkuIds), [items, existingSkuIds]);
+  const storeCols = useMemo(
+    () => buildStoreColumns(stores, items, extraStores),
+    [stores, items, extraStores],
+  );
+  const orphanSkuCount = useMemo(() => skuRows.filter((r) => r.missing).length, [skuRows]);
+  const orphanStoreCount = useMemo(
+    () => storeCols.filter((c) => c.state !== "active").length,
+    [storeCols],
+  );
 
   const readOnly = draft?.status === "done";
 
@@ -188,9 +247,12 @@ function Body() {
         setItems((arr) => arr.map((it) => (it.id === existing.id ? { ...it, qty: n } : it)));
       } else {
         // 這格還沒有列：加入這樣商品之後才啟用的分店。
-        // 品號/品名沿用同商品其他列的快照值；數量快照(snapshot_at / demand / available)
-        // 留 NULL —— 這一格不在當初那次快照裡，切片 B 對照現況時要看得出來。
+        // 品號/品名沿用同商品其他列的快照值；分店名稱取「現在這一欄」的值
+        // （這一欄可能來自 stores 現況，也可能來自別列的分店快照，兩者都對）。
+        // 數量快照(snapshot_at / demand / available) 留 NULL ——
+        // 這一格不在當初那次快照裡，切片 B 對照現況時要看得出來。
         const sibling = items.find((it) => it.sku_id === skuId);
+        const col = storeCols.find((c) => c.id === storeId);
         const { data, error: err } = await sb
           .from("picking_draft_items")
           .insert({
@@ -201,17 +263,19 @@ function Body() {
             qty: n,
             snapshot_sku_code: sibling?.snapshot_sku_code ?? null,
             snapshot_sku_label: sibling?.snapshot_sku_label ?? null,
+            snapshot_store_code: col?.code ?? null,
+            snapshot_store_name: col?.name ?? null,
             created_by: uid,
             updated_by: uid,
           })
-          .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label")
+          .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label, snapshot_store_code, snapshot_store_name")
           .single();
         if (err) throw err;
         setItems((arr) => [...arr, data as DraftItem]);
       }
       clearEdit();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeDraftDbError(e));
       clearEdit();
     }
   }
@@ -244,15 +308,19 @@ function Body() {
             snapshot_at: now,
             snapshot_sku_code: opt.sku_code,
             snapshot_sku_label: label,
+            // 分店名稱也拍下來：store_id 沒有外鍵，分店被硬刪之後
+            // 畫面與列印都還要說得出「原本要給哪一家」，不能只剩一個 #id
+            snapshot_store_code: st.code,
+            snapshot_store_name: st.name,
             created_by: uid,
             updated_by: uid,
           })),
         )
-        .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label");
+        .select("id, sku_id, store_id, qty, snapshot_sku_code, snapshot_sku_label, snapshot_store_code, snapshot_store_name");
       if (err) throw err;
       setItems((arr) => [...arr, ...((data ?? []) as DraftItem[])]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeDraftDbError(e));
     }
   }
 
@@ -269,7 +337,7 @@ function Body() {
       if (err) throw err;
       setItems((arr) => arr.filter((it) => it.sku_id !== skuId));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeDraftDbError(e));
     }
   }
 
@@ -293,7 +361,7 @@ function Body() {
       if (err) throw err;
       setDraft({ ...draft, name });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeDraftDbError(e));
     }
   }
 
@@ -309,12 +377,9 @@ function Body() {
       if (err) throw err;
       setDraft((d) => (d ? { ...d, status } : d));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeDraftDbError(e));
     }
   }
-
-  const rowTotal = (skuId: number) =>
-    stores.reduce((sum, st) => sum + Number(itemsByKey.get(cellKey(skuId, st.id))?.qty ?? 0), 0);
 
   const inputCls =
     "rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800";
@@ -383,6 +448,20 @@ function Body() {
         </div>
       )}
 
+      {(orphanSkuCount > 0 || orphanStoreCount > 0) && (
+        // 草稿不綁外鍵 → 可能引用到已刪除的商品／分店。這裡先總結一句，
+        // 表格裡再逐列 / 逐欄標黃，⛔ 不靜默把它們藏起來。
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          這張草稿裡有東西在系統中已經不存在了：
+          {orphanSkuCount > 0 && <> <strong>{orphanSkuCount} 樣商品</strong>已被刪除</>}
+          {orphanSkuCount > 0 && orphanStoreCount > 0 && "、"}
+          {orphanStoreCount > 0 && <> <strong>{orphanStoreCount} 個分店</strong>已停用或被刪除</>}
+          。
+          數量都還在（下面標黃色的就是），顯示的是<strong>加入當下的名稱</strong>；
+          要移除請按該列的「移除」。
+        </div>
+      )}
+
       {readOnly ? (
         <p className="rounded-md border border-zinc-300 bg-zinc-50 p-3 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
           這張草稿已標記完成，先按「重新開啟」才能繼續改。
@@ -403,9 +482,20 @@ function Body() {
                 <th className="sticky left-0 z-10 min-w-56 border-r border-zinc-200 bg-zinc-50 px-3 py-2 text-left dark:border-zinc-800 dark:bg-zinc-900">
                   商品
                 </th>
-                {stores.map((st) => (
-                  <th key={st.id} className="whitespace-nowrap px-2 py-2 text-center" title={st.name}>
+                {storeCols.map((st) => (
+                  <th
+                    key={st.id}
+                    className={`whitespace-nowrap px-2 py-2 text-center ${
+                      st.state === "active" ? "" : "bg-amber-50 dark:bg-amber-950/40"
+                    }`}
+                    title={st.state === "active" ? st.name : `${st.name}（${STORE_STATE_LABEL[st.state]}）`}
+                  >
                     {st.name}
+                    {st.state !== "active" && (
+                      <div className="font-normal normal-case text-amber-700 dark:text-amber-400">
+                        {STORE_STATE_LABEL[st.state]}
+                      </div>
+                    )}
                   </th>
                 ))}
                 <th className="whitespace-nowrap px-3 py-2 text-right">合計</th>
@@ -418,13 +508,25 @@ function Body() {
                   <th className="sticky left-0 z-10 border-r border-zinc-200 bg-white px-3 py-2 text-left font-normal dark:border-zinc-800 dark:bg-zinc-950">
                     <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{row.label}</div>
                     <div className="font-mono text-xs text-zinc-400">{row.code}</div>
+                    {row.missing && (
+                      // 商品在 skus 裡查不到了（草稿不綁外鍵，見 migration 檔頭）。
+                      // 照樣顯示快照名稱＋明講狀況，⛔ 不靜默跳過這一列。
+                      <div className="mt-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                        ⚠ 此商品已不存在（顯示的是加入當下的名稱）
+                      </div>
+                    )}
                   </th>
-                  {stores.map((st) => {
+                  {storeCols.map((st) => {
                     const key = cellKey(row.sku_id, st.id);
                     const stored = itemsByKey.get(key)?.qty;
                     const value = edits.get(key) ?? (stored === undefined ? "0" : String(Number(stored)));
                     return (
-                      <td key={st.id} className="px-1 py-1 text-center">
+                      <td
+                        key={st.id}
+                        className={`px-1 py-1 text-center ${
+                          st.state === "active" ? "" : "bg-amber-50 dark:bg-amber-950/40"
+                        }`}
+                      >
                         <input
                           type="number"
                           inputMode="numeric"
@@ -443,7 +545,8 @@ function Body() {
                       </td>
                     );
                   })}
-                  <td className="px-3 py-2 text-right font-mono font-medium">{rowTotal(row.sku_id)}</td>
+                  {/* 合計直接從明細加總，不是加總畫面上的欄位 —— 少一欄也不會跟著算少 */}
+                  <td className="px-3 py-2 text-right font-mono font-medium">{rowTotal(items, row.sku_id)}</td>
                   <td className="px-2 py-2 text-right">
                     {!readOnly && (
                       <SpinButton
@@ -462,7 +565,8 @@ function Body() {
       )}
 
       <p className="text-xs text-zinc-400">
-        共 {skuRows.length} 樣商品 × {stores.length} 家分店。
+        共 {skuRows.length} 樣商品 × {storeCols.length} 個分店欄位
+        {orphanStoreCount > 0 && `（其中 ${orphanStoreCount} 個已停用／已刪除）`}。
         「對照現況」「列印」「送到派貨工作台」是後續切片，這一版還沒有。
       </p>
     </div>
