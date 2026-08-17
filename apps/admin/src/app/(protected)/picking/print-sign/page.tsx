@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { DatePicker } from "@/components/DatePicker";
 import SpinButton from "@/components/SpinButton";
+import { excelSafeText, toCsv } from "@/lib/printSheet";
 
 type WaveItem = {
   id: number;
@@ -36,7 +37,6 @@ type StoreSheet = {
     sku: SkuRow;
     qty: number;
     pickedQty: number;
-    waveCodes: string[];
     unitPrice: number | null; // 分店價(prices scope='branch' 現行價)；查無 = null
     subtotal: number | null;
   }[];
@@ -50,6 +50,15 @@ type StoreSheet = {
 // 表頭金額一律無小數（分店進貨單對的是整數台幣）
 function money(n: number): string {
   return `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+// CSV 的「店號 / 店名」兩欄。老闆 2026-08-17 要求拆開：`三峽店(S01)` 擠在一格
+// 就沒辦法拿去跑 Excel 樞紐，而店號排序比店名穩，所以店號放前面。
+// ⚠ stores.code 沒有 NOT NULL，查無一律印「—」：空白格在樞紐裡會顯示成「(空白)」，
+//   而本頁其他查無資料的欄位（編號 / 品名）用的也是「—」，保持一致。
+//   註：「—」是 U+2014，不是 ASCII 的 `-`，不會被 excelSafeText 當成公式開頭加引號。
+function storeCsvCells(s: StoreRow): string[] {
+  return [excelSafeText(s.code || "—"), excelSafeText(s.name)];
 }
 
 export default function PrintSignPage() {
@@ -85,6 +94,19 @@ export default function PrintSignPage() {
     let cancelled = false;
     (async () => {
       try {
+        // ⚠ 每次查詢一開始，先把上一輪的錯誤與資料全部清掉。
+        //   這兩件事**必須成對做**，只做一半比不做更糟：
+        //   ‧ 只清資料、不清 error → 老闆遇到一次失敗後列印/CSV 永遠按不下去，要重開分頁才解得掉
+        //   ‧ 只清 error、不清資料 → 查詢中途失敗時會留著上一輪的 prices，跟這一輪剛寫進去的
+        //     新商品混出一張「金額是舊的」簽收單 —— 而那是要印給店家簽收的錢（阿審 #759 第三輪 P0-2）
+        //   ⛔ 清除一律放在這裡（async 內、第一個 await 之前），不要搬到 effect 本體：
+        //     搬上去會多一條 react-hooks/set-state-in-effect。
+        setError(null);
+        setWaves(null);
+        setItems([]);
+        setStores([]);
+        setSkus([]);
+        setPrices(new Map());
         const sb = getSupabase();
         const q = sb
           .from("picking_waves")
@@ -125,11 +147,18 @@ export default function PrintSignPage() {
         const [ss, sk] = await Promise.all([
           storeIds.length
             ? sb.from("stores").select("id, code, name").in("id", storeIds).order("code")
-            : Promise.resolve({ data: [] as StoreRow[] }),
+            : Promise.resolve({ data: [] as StoreRow[], error: null }),
           skuIds.length
             ? sb.from("skus").select("id, sku_code, product_name, variant_name").in("id", skuIds)
-            : Promise.resolve({ data: [] as SkuRow[] }),
+            : Promise.resolve({ data: [] as SkuRow[], error: null }),
         ]);
+        // ⚠ 這兩個查詢的 error 原本沒人看：失敗時 data 是 null → `?? []` 變成空陣列 →
+        //   畫面走「此日無已派貨資料」，老闆會以為那天真的沒出貨（阿審 #759 第三輪 P0-1）。
+        //   skus 失敗更陰險：紙本與 CSV 會把品號品名印成「—」，看起來就只是缺資料。
+        //   一律比照上面 e1 / e2 / e3 的既有寫法直接 throw，交給 catch 走錯誤狀態。
+        //   （`error: null` 是上面兩個空清單捷徑補的，補了這裡才讀得到 .error）
+        if (ss.error) throw new Error(ss.error.message);
+        if (sk.error) throw new Error(sk.error.message);
         if (!cancelled) {
           setStores((ss.data as StoreRow[]) ?? []);
           setSkus((sk.data as SkuRow[]) ?? []);
@@ -171,18 +200,17 @@ export default function PrintSignPage() {
   const sheets: StoreSheet[] = useMemo(() => {
     if (!waves || items.length === 0) return [];
     const skuMap = new Map(skus.map((s) => [s.id, s]));
-    const waveCodeMap = new Map(waves.map((w) => [w.id, w.wave_code]));
     const waveDateMap = new Map(waves.map((w) => [w.id, w.wave_date]));
     // 撿貨單建立日 → 表頭「訂單日」（wave_date 是配送/出貨日，兩者常差一天）
     const orderDateMap = new Map(
       waves.map((w) => [w.id, new Date(w.created_at).toLocaleDateString("sv-SE")])
     );
 
-    // (store_id) -> (sku_id) -> { qty, picked_qty, waveCodes Set, waveDates Set }
+    // (store_id) -> (sku_id) -> { qty, picked_qty }，另加該店的 waveDates / orderDates Set
     const byStore = new Map<
       number,
       {
-        skus: Map<number, { qty: number; pickedQty: number; waveCodes: Set<string> }>;
+        skus: Map<number, { qty: number; pickedQty: number }>;
         waveDates: Set<string>;
         orderDates: Set<string>;
       }
@@ -191,19 +219,13 @@ export default function PrintSignPage() {
       if (!byStore.has(it.store_id))
         byStore.set(it.store_id, { skus: new Map(), waveDates: new Set(), orderDates: new Set() });
       const slot = byStore.get(it.store_id)!;
-      const cur = slot.skus.get(it.sku_id) ?? {
-        qty: 0,
-        pickedQty: 0,
-        waveCodes: new Set<string>(),
-      };
+      const cur = slot.skus.get(it.sku_id) ?? { qty: 0, pickedQty: 0 };
       cur.qty += it.qty;
       // picked_qty 為 NULL = 該波尚未做「撿貨確認」(rpc_confirm_picked 還沒 backfill)。
       // 這種情況下 fallback 顯示派貨計畫量 qty,讓「撿貨前先列印簽收單給司機」也印得出數量;
       // 撿貨確認後 picked_qty 會被寫成實撿量,短撿差異仍靠下方 (派 {qty}) 標註呈現。
       // 注意:明確被設成 0(短撿到 0)不是 NULL,會照實顯示 0,不走 fallback。
       cur.pickedQty += it.picked_qty == null ? it.qty : it.picked_qty;
-      const wc = waveCodeMap.get(it.wave_id);
-      if (wc) cur.waveCodes.add(wc);
       const wd = waveDateMap.get(it.wave_id);
       if (wd) slot.waveDates.add(wd);
       const od = orderDateMap.get(it.wave_id);
@@ -222,7 +244,6 @@ export default function PrintSignPage() {
             sku: skuMap.get(skuId) ?? { id: skuId, sku_code: null, product_name: null, variant_name: null },
             qty: v.qty,
             pickedQty: v.pickedQty,
-            waveCodes: Array.from(v.waveCodes).sort(),
             unitPrice,
             // 小計照「實際配發量」算 — 短撿時分店只該被收到的貨算錢
             subtotal: unitPrice == null ? null : unitPrice * v.pickedQty,
@@ -248,6 +269,71 @@ export default function PrintSignPage() {
     }
     return result;
   }, [waves, items, stores, skus, prices]);
+
+  // 匯出 CSV — 全部分店合在同一個檔，靠「店號 / 店名」兩欄分辨（老闆 2026-08-17 定案：
+  // 不要一間店一個檔）。欄位跟紙本對得起來，才能拿檔案核簽回來的那疊紙。
+  function exportCsv() {
+    // ⚠ 文字欄一律過 excelSafeText：擋公式注入，也擋 Excel 把 `G00351-01` 這種碼
+    //   自作主張改成日期／科學記號。數量與金額維持純數字，Excel 才加得了總。
+    // ⚠ 金額先 Math.round 再輸出 —— 紙上的 money() 印的就是四捨五入後的整數，
+    //   CSV 若給沒進位的小數，老闆兩邊會對不起來。這裡不做任何別的算術。
+    // ⚠ 第一欄「類型」＝明細／合計。**這是唯一能分辨合計列的欄位**，老闆要在 Excel 篩掉
+    //   合計列（不然樞紐會把每家店的金額重複算一次）就篩這一欄。
+    //   ⛔ 不可以改回用「編號」欄放標記：sku_code 只有 `TEXT NOT NULL`，DB 沒有任何約束
+    //      擋得住某個品號真的就叫「合計」；真撞上時篩選會連那列明細一起刪掉，
+    //      而且刪掉的是金額、老闆不會發現（阿審 #759 複審 P1）。
+    const header = ["類型", "店號", "店名", "編號", "商品名稱", "數量", "訂購量", "單價", "小計"];
+    const body = sheets.flatMap((sheet) => [
+      ...sheet.rows.map((r) => [
+        excelSafeText("明細"),
+        ...storeCsvCells(sheet.store),
+        excelSafeText(r.sku.sku_code ?? "—"),
+        excelSafeText(
+          r.sku.variant_name
+            ? `${r.sku.product_name ?? "—"} / ${r.sku.variant_name}`
+            : r.sku.product_name ?? "—"
+        ),
+        // 數量＝實配量（跟紙上那格一樣）；訂購量在紙上是括號註記，CSV 拆成獨立欄好對帳
+        r.pickedQty,
+        r.qty,
+        r.unitPrice == null ? "" : Math.round(r.unitPrice),
+        r.subtotal == null ? "" : Math.round(r.subtotal),
+      ]),
+      // 每家店的明細後面接一列合計（老闆 2026-08-17 追加）。
+      // ⛔ 刻意不在檔尾再加一列總計：老闆沒要，而且多一層更難篩。
+      // ⚠ 編號欄留空 —— 識別合計列一律看「類型」欄（見上面 header 的說明）。
+      // ⚠ 數量與金額直接用 sheets 已經算好的 totalPicked / totalAmount，跟紙上那列
+      //   印的是同一個值（連四捨五入的時機都一樣），沒有在這裡重算過。
+      //   訂購量紙上沒有合計，只能在這裡加總 —— 加法比照 useMemo 裡 totalPicked 的寫法。
+      [
+        excelSafeText("合計"),
+        ...storeCsvCells(sheet.store),
+        "",
+        excelSafeText(
+          sheet.store.code
+            ? `${sheet.store.name}(${sheet.store.code}) 合計`
+            : `${sheet.store.name} 合計`
+        ),
+        sheet.totalPicked,
+        sheet.rows.reduce((s, r) => s + r.qty, 0),
+        "", // 單價：把各品項的單價加起來沒有意義，留空
+        Math.round(sheet.totalAmount),
+      ],
+    ]);
+    const csv = toCsv([header, ...body]);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    // ⛔ 檔名的日期只取自資料庫的 wave_date（查無就用今天），**不用網址上的 ?date=** ——
+    //    那是使用者可控字串，直接接進 a.download 等於讓網址決定檔名。
+    const fileDate =
+      Array.from(new Set(sheets.flatMap((s) => s.waveDates))).sort()[0] ??
+      new Date().toLocaleDateString("sv-SE");
+    a.href = url;
+    a.download = `分店簽收單_${fileDate}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   if (!date && !waveIds) {
     return <div className="p-6 text-sm text-zinc-500">載入中…</div>;
@@ -299,135 +385,111 @@ export default function PrintSignPage() {
               />
             </label>
           )}
-          <span className="text-sm text-zinc-500">
-            {waves === null
+          {/* ⚠ 「出錯了」和「這天真的沒貨」在畫面上必須一眼分得出來 —— 兩者都是空畫面，
+              但一個要重試、一個不用。error 優先於其他狀態顯示。 */}
+          <span className={error ? "text-sm font-semibold text-red-700" : "text-sm text-zinc-500"}>
+            {error
+              ? "⚠ 載入失敗（不是沒資料）"
+              : waves === null
               ? "載入中…"
               : sheets.length === 0
               ? "（無資料）"
               : `${sheets.length} 間分店、${waves.length} 張撿貨單`}
           </span>
+          {/* ⚠ 有 error 就不准列印/匯出：載入到一半失敗時手上這份資料是殘缺的，
+              印出去就是拿錯的金額給店家簽收（阿審 #759 第三輪 P0-2）。
+              ⛔ 這個 disable 一定要搭配「查詢開始時 setError(null)」一起看 —— 少了那半邊，
+                 老闆遇到一次失敗就再也按不了按鈕。 */}
+          <SpinButton
+            onClick={exportCsv}
+            disabled={sheets.length === 0 || error !== null}
+            className="ml-auto rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+          >
+            ⬇ 匯出 CSV
+          </SpinButton>
           <SpinButton
             onClick={() => window.print()}
-            disabled={sheets.length === 0}
-            className="ml-auto rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+            disabled={sheets.length === 0 || error !== null}
+            className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
           >
             🖨️ 列印
           </SpinButton>
         </div>
 
+        {/* ⚠ 錯誤訊息本身是 Supabase 丟回來的英文技術字串，老闆看不出「要不要重試」，
+            所以上面補一句白話結論。原文照留在最下面，工程師才查得下去。 */}
         {error && (
           <div className="no-print m-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-            {error}
+            <div className="font-semibold">⚠ 資料載入失敗 —— 這不是「今天沒有貨」。</div>
+            <div className="mt-1">
+              畫面上的資料不完整，已停用列印與匯出 CSV。請重新整理或重選配送日再試一次。
+            </div>
+            <div className="mt-1 font-mono text-xs break-words text-red-700">{error}</div>
           </div>
         )}
 
         {/* 簽收單內容 */}
-        {sheets.length === 0 && waves !== null && (
+        {/* ⚠ `!error` 這個條件是重點：沒有它，查詢失敗（例如 stores 查不到）也會落到這一行，
+            畫面就變成「此日無已派貨資料」—— 系統壞掉偽裝成當天沒出貨，老闆分不出來。 */}
+        {sheets.length === 0 && waves !== null && !error && (
           <div className="no-print p-6 text-center text-sm text-zinc-500">
             此日無已派貨資料 — 請選擇有撿貨單的配送日。
           </div>
         )}
 
-        {/* 出車總覽 — 列在最前面、依店分 group、底下列商品 */}
-        {sheets.length > 0 && (
-          <div className="sheet mx-auto my-6 max-w-[210mm] border border-zinc-300 bg-white p-8 print:my-0 print:border-0 print:p-0">
-            <div className="mb-4 flex items-start justify-between border-b-2 border-zinc-900 pb-2">
-              <div>
-                <div className="text-xl font-bold">出車總覽</div>
-                {tenantName && (
-                  <div className="mt-0.5 text-xs text-zinc-500">{tenantName}</div>
-                )}
-              </div>
-              <div className="text-right text-sm">
-                <div>
-                  配送日:
-                  <span className="ml-1 font-mono font-semibold">
-                    {Array.from(new Set(sheets.flatMap((s) => s.waveDates))).sort().join("、") || date}
-                  </span>
-                </div>
-                <div className="mt-0.5 text-xs text-zinc-600">
-                  {sheets.length} 間分店 · {sheets.reduce((s, sh) => s + sh.totalPicked, 0)} 件 ·{" "}
-                  <span className="font-mono">
-                    {money(sheets.reduce((s, sh) => s + sh.totalAmount, 0))}
-                  </span>
-                </div>
-              </div>
-            </div>
+        {/* ⛔ 這裡原本有一張「出車總覽」（依店 group、底下再列一次商品）。
+            2026-08-17 老闆指示移除：它自己就是一張 A4（`sheet` 有 page-break-after），
+            內容又跟後面每一張簽收單完全重複 —— 每次列印白白多印一整張紙。 */}
 
-            <div className="flex flex-col divide-y divide-zinc-300">
-              {sheets.map((sheet) => (
-                <div key={`overview-${sheet.store.id}`} className="py-2">
-                  <div className="mb-1 flex items-baseline justify-between">
-                    <div className="text-base font-semibold">
-                      {sheet.store.name}
-                      {sheet.store.code && (
-                        <span className="ml-2 font-mono text-xs text-zinc-500">
-                          ({sheet.store.code})
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xs text-zinc-600">
-                      {sheet.rows.length} 樣 · {sheet.totalPicked} 件 ·{" "}
-                      <span className="font-mono">{money(sheet.totalAmount)}</span>
-                      {sheet.hasMissingPrice && <span className="ml-1 text-zinc-400">(部分未定價)</span>}
-                    </div>
-                  </div>
-                  <ul className="ml-2 grid grid-cols-2 gap-x-6 gap-y-0.5 text-sm">
-                    {sheet.rows.map((r) => (
-                      <li key={`overview-${sheet.store.id}-${r.sku.id}`} className="flex justify-between">
-                        <span className="truncate">
-                          <span className="font-mono text-[11px] text-zinc-500 mr-1">
-                            {r.sku.sku_code ?? "—"}
-                          </span>
-                          {r.sku.product_name ?? "—"}
-                          {r.sku.variant_name && (
-                            <span className="ml-1 text-xs text-zinc-500">/ {r.sku.variant_name}</span>
-                          )}
-                        </span>
-                        <span className="font-mono">× {r.pickedQty}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {sheets.map((sheet) => (
+        {/* ⚠ 有 error 就整批不渲染。價格查詢失敗時 waves/items/stores/skus 其實都已經進 state，
+            簽收單照樣排得出來，只是單價全變「—」、合計變 $0，底下還會掛一句
+            「※ 標『—』的品項尚未設定分店價」—— 那句在這個情況下是**騙人的**（價格不是沒設，
+            是根本沒查到）。按鈕擋得住我們自己的列印鈕，擋不住瀏覽器的 Ctrl+P，
+            所以錯誤狀態下乾脆不給任何可印的東西（阿審 #759 第三輪 P0-2:「清空可列印資料」）。
+            ⛔ 這是唯一對簽收單本體的改動，而且只在 error 非 null 時生效 ——
+              正常情境下每一格的文字與 class 都跟 5a50b7e 逐字元相同（v5 指紋已驗）。 */}
+        {(error ? [] : sheets).map((sheet) => (
           <div
             key={sheet.store.id}
             className="sheet mx-auto my-6 max-w-[210mm] border border-zinc-300 bg-white p-8 print:my-0 print:border-0 print:p-0"
           >
-            {/* 表頭 — 公司抬頭置中，底下左右兩欄的單頭欄位（單號/訂單日 ‧ 店家/出貨日）*/}
+            {/* 表頭 — 公司抬頭置中，底下一排三格單頭欄位（店家 ‧ 訂單日 ‧ 出貨日）*/}
             <div className="mb-3 text-center">
               {tenantName && <div className="text-lg font-bold tracking-wide">{tenantName}</div>}
               <div className="text-xs text-zinc-500">分店進貨單</div>
             </div>
 
-            <div className="mb-2 grid grid-cols-2 gap-x-8 text-sm">
-              <div className="flex">
-                <span className="w-16 shrink-0 text-zinc-500">單號</span>
-                <span className="font-mono font-semibold">
-                  {Array.from(new Set(sheet.rows.flatMap((r) => r.waveCodes))).join("、") || "—"}
-                </span>
-              </div>
-              <div className="flex">
+            {/* ⛔ 這一區原本有第四格「單號」(撿貨單號 wave_code)。2026-08-17 老闆指示整格刪掉:
+                分店根本不需要關心單號是多少。紙上那串是「本張簽收單涵蓋的所有撿貨單」,
+                不是逐商品對應 —— 拿在手上也指不出哪一項貨是哪一張單來的,定位能力接近零。
+                分店真要對照,系統的收貨畫面(wms/inbound 的收貨視窗)本來就會顯示
+                「來自撿貨單 WV-xxx」,不必靠這張紙。
+                ⛔ 這裡只講「這張紙上為什麼不印」;wave_code 在別的頁面怎麼用不是本頁的事,
+                  也不要在這裡替全站下斷語(前一版就是這樣寫錯了)。
+                分店要定位改看「店家＋訂單日＋出貨日」:同一天、同一家店就是這一張。
+                ⚠ 連帶收掉了「單號獨佔一整行」那一圈外層 div —— 那圈是上一版為了讓單號不被折行
+                  才加的,單號沒了就沒有存在意義,留著只會多一層空殼。
+                三個短欄位並排;放不下就自己換行,不去擠壓彼此。
+                ⚠ min-w-0 / max-w-full / break-* 是給極端值用的:flex item 預設 min-width:auto,
+                  沒有 min-w-0 就縮不到內容寬度以下,超長店名或超長店號會直接把 A4 撐破。
+                  店號用 break-all(整串沒有空白也沒有斷點),其餘用 break-words。 */}
+            <div className="mb-2 flex flex-wrap gap-x-8 gap-y-1 text-sm">
+              <div className="flex min-w-0 max-w-full">
                 <span className="w-16 shrink-0 text-zinc-500">店家</span>
-                <span className="font-semibold">
+                <span className="min-w-0 break-words font-semibold">
                   {sheet.store.name}
                   {sheet.store.code && (
-                    <span className="ml-2 font-mono text-xs text-zinc-500">({sheet.store.code})</span>
+                    <span className="ml-2 break-all font-mono text-xs text-zinc-500">({sheet.store.code})</span>
                   )}
                 </span>
               </div>
-              <div className="flex">
+              <div className="flex min-w-0 max-w-full">
                 <span className="w-16 shrink-0 text-zinc-500">訂單日</span>
-                <span className="font-mono">{sheet.orderDates.join("、") || "—"}</span>
+                <span className="min-w-0 break-words font-mono">{sheet.orderDates.join("、") || "—"}</span>
               </div>
-              <div className="flex">
+              <div className="flex min-w-0 max-w-full">
                 <span className="w-16 shrink-0 text-zinc-500">出貨日</span>
-                <span className="font-mono">{sheet.waveDates.join("、") || date}</span>
+                <span className="min-w-0 break-words font-mono">{sheet.waveDates.join("、") || date}</span>
               </div>
             </div>
 
@@ -435,12 +497,19 @@ export default function PrintSignPage() {
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="bg-zinc-100">
-                  <th className="border border-zinc-400 px-2 py-1.5 text-left text-xs font-semibold">編號</th>
-                  <th className="border border-zinc-400 px-2 py-1.5 text-left text-xs font-semibold">商品名稱</th>
-                  <th className="w-16 border border-zinc-400 px-2 py-1.5 text-right text-xs font-semibold">數量</th>
-                  <th className="w-20 border border-zinc-400 px-2 py-1.5 text-right text-xs font-semibold">單價</th>
-                  <th className="w-24 border border-zinc-400 px-2 py-1.5 text-right text-xs font-semibold">小計</th>
-                  <th className="w-12 whitespace-nowrap border border-zinc-400 px-2 py-1.5 text-center text-xs font-semibold">
+                  {/* ⚠ 編號欄一定要 whitespace-nowrap。
+                      不是「沒給寬度」那麼單純:`G00351-01` 裡的連字號是合法斷行點,
+                      所以這一欄的 min-content 只有 `G00351-` 那麼寬 —— 表格一被長品名擠,
+                      瀏覽器就名正言順把它縮到 7 個字寬、把碼折成兩行。
+                      給固定寬度沒有用(table-layout: auto 底下 width 只是建議值,min-content 仍會贏),
+                      要 nowrap 把 min-content 撐成整串碼,這一欄才縮不下去。
+                      作法比照既有的 finance/receivables/print。 */}
+                  <th className="whitespace-nowrap border border-zinc-400 px-2 py-1 text-left text-xs font-semibold">編號</th>
+                  <th className="border border-zinc-400 px-2 py-1 text-left text-xs font-semibold">商品名稱</th>
+                  <th className="w-16 border border-zinc-400 px-2 py-1 text-right text-xs font-semibold">數量</th>
+                  <th className="w-20 border border-zinc-400 px-2 py-1 text-right text-xs font-semibold">單價</th>
+                  <th className="w-24 border border-zinc-400 px-2 py-1 text-right text-xs font-semibold">小計</th>
+                  <th className="w-12 whitespace-nowrap border border-zinc-400 px-2 py-1 text-center text-xs font-semibold">
                     點收
                   </th>
                 </tr>
@@ -448,57 +517,59 @@ export default function PrintSignPage() {
               <tbody>
                 {sheet.rows.map((r) => (
                   <tr key={r.sku.id}>
-                    <td className="border border-zinc-400 px-2 py-1 font-mono text-xs">
+                    <td className="whitespace-nowrap border border-zinc-400 px-2 py-0.5 font-mono text-xs">
                       {r.sku.sku_code ?? "—"}
                     </td>
-                    <td className="border border-zinc-400 px-2 py-1">
+                    <td className="border border-zinc-400 px-2 py-0.5">
                       {r.sku.product_name ?? "—"}
                       {r.sku.variant_name && (
                         <span className="ml-1 text-xs text-zinc-500">/ {r.sku.variant_name}</span>
                       )}
                     </td>
-                    {/* 數量 = 實際配發量；短撿時在旁邊補註訂購量，分店才對得出少了什麼 */}
-                    <td className="border border-zinc-400 px-2 py-1 text-right font-mono">
+                    {/* 數量 = 實際配發量；短撿時在旁邊補註訂購量，分店才對得出少了什麼。
+                        nowrap 是預防性的：目前的量級（個位/十位數）在 w-16 裡本來就排得下，
+                        但數量一多（例如以克計價的品項）「(訂 N)」就會掉到第二行、整列變高。 */}
+                    <td className="whitespace-nowrap border border-zinc-400 px-2 py-0.5 text-right font-mono">
                       <span className={r.pickedQty < r.qty ? "text-rose-600" : ""}>{r.pickedQty}</span>
                       {r.pickedQty < r.qty && (
                         <span className="ml-1 text-[10px] text-zinc-500">(訂 {r.qty})</span>
                       )}
                     </td>
-                    <td className="border border-zinc-400 px-2 py-1 text-right font-mono">
+                    <td className="whitespace-nowrap border border-zinc-400 px-2 py-0.5 text-right font-mono">
                       {r.unitPrice == null ? "—" : money(r.unitPrice)}
                     </td>
-                    <td className="border border-zinc-400 px-2 py-1 text-right font-mono">
+                    <td className="whitespace-nowrap border border-zinc-400 px-2 py-0.5 text-right font-mono">
                       {r.subtotal == null ? "—" : money(r.subtotal)}
                     </td>
-                    <td className="border border-zinc-400 px-2 py-1 text-center">
+                    <td className="border border-zinc-400 px-2 py-0.5 text-center">
                       <span className="text-zinc-300">□</span>
                     </td>
                   </tr>
                 ))}
-                {/* 補空行讓表格美觀 */}
+                {/* 補空行讓表格美觀（品項很少時才會出現，手寫補品項也用得上） */}
                 {Array.from({ length: Math.max(0, 5 - sheet.rows.length) }).map((_, i) => (
                   <tr key={`empty-${i}`}>
-                    <td className="border border-zinc-400 px-2 py-3"></td>
-                    <td className="border border-zinc-400 px-2 py-3"></td>
-                    <td className="border border-zinc-400 px-2 py-3"></td>
-                    <td className="border border-zinc-400 px-2 py-3"></td>
-                    <td className="border border-zinc-400 px-2 py-3"></td>
-                    <td className="border border-zinc-400 px-2 py-3"></td>
+                    <td className="border border-zinc-400 px-2 py-2"></td>
+                    <td className="border border-zinc-400 px-2 py-2"></td>
+                    <td className="border border-zinc-400 px-2 py-2"></td>
+                    <td className="border border-zinc-400 px-2 py-2"></td>
+                    <td className="border border-zinc-400 px-2 py-2"></td>
+                    <td className="border border-zinc-400 px-2 py-2"></td>
                   </tr>
                 ))}
                 {/* 合計列 — 件數 + 金額，對齊紙本單 */}
                 <tr className="bg-zinc-100 font-semibold">
-                  <td colSpan={2} className="border border-zinc-400 px-2 py-1.5 text-right">
+                  <td colSpan={2} className="border border-zinc-400 px-2 py-1 text-right">
                     合計
                   </td>
-                  <td className="border border-zinc-400 px-2 py-1.5 text-right font-mono">
+                  <td className="whitespace-nowrap border border-zinc-400 px-2 py-1 text-right font-mono">
                     {sheet.totalPicked} 件
                   </td>
-                  <td className="border border-zinc-400 px-2 py-1.5"></td>
-                  <td className="border border-zinc-400 px-2 py-1.5 text-right font-mono">
+                  <td className="border border-zinc-400 px-2 py-1"></td>
+                  <td className="whitespace-nowrap border border-zinc-400 px-2 py-1 text-right font-mono">
                     {money(sheet.totalAmount)}
                   </td>
-                  <td className="border border-zinc-400 px-2 py-1.5"></td>
+                  <td className="border border-zinc-400 px-2 py-1"></td>
                 </tr>
               </tbody>
             </table>
