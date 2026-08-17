@@ -72,6 +72,9 @@ export type DraftCell = {
 
 export type StoreRef = { id: number; code: string; name: string };
 
+/** stores 全表的一列：**含停用**。`is_active === false` → 欄位標「已停用」 */
+export type StoreRow = StoreRef & { is_active?: boolean | null };
+
 export type StoreColumn = StoreRef & { state: "active" | "inactive" | "missing" | "unknown" };
 
 /**
@@ -85,7 +88,17 @@ export type StoreColumn = StoreRef & { state: "active" | "inactive" | "missing" 
 export type SkuRow = { sku_id: number; code: string; label: string; state: "active" | "missing" | "unknown" };
 
 /** 商品存在性的查詢結果。known + 空集合 = 「確實一個都沒有」（例如空草稿），不是異常 */
-export type SkuExistence = { kind: "known"; ids: Set<number> } | { kind: "unknown" };
+export type SkuExistence =
+  | { kind: "known"; ids: Set<number> }
+  | {
+      kind: "unknown";
+      /**
+       * ⭐ 即使整批查詢異常，之後從搜尋框加進來的商品仍然是**確定存在**的
+       * （它就是從 skus 搜出來的）。把這些記著，才不會連它們也標「無法確認」。
+       * 阿審 #751 複審 P2：舊版 unknown 是死狀態，加什麼進去都被誤標。
+       */
+      confirmedIds: Set<number>;
+    };
 
 /**
  * 矩陣要有哪些分店欄位 = 「目前啟用中的分店」∪「這張草稿裡出現過的分店」。
@@ -99,14 +112,21 @@ export type SkuExistence = { kind: "known"; ids: Set<number> } | { kind: "unknow
  * @param known  額外查回來的分店資料（key = store_id）；查不到的就是被硬刪了
  */
 export function buildStoreColumns(
-  active: StoreRef[],
+  allStores: StoreRow[],
   cells: DraftCell[],
   known: Map<number, StoreRef> | null,
 ): StoreColumn[] {
+  // ⭐ 第一個參數是 **stores 全表（含停用）**，不是只有 is_active 的那些。
+  //   只撈 active 的話，「已停用、而且這張草稿剛好沒有那家店的明細列」會整欄消失 ——
+  //   老闆要的是「所有分店都有欄位」（他可能臨時多給某店），少一欄就是靜默丟失。
   // id 一律正規化成數字再比（理由同 buildSkuRows）
-  const activeIds = new Set(active.map((s) => Number(s.id)));
+  const activeIds = new Set(allStores.map((s) => Number(s.id)));
   const knownById = known ? new Map(Array.from(known, ([k, v]) => [Number(k), v])) : null;
-  const cols: StoreColumn[] = active.map((s) => ({ ...s, id: Number(s.id), state: "active" }));
+  const cols: StoreColumn[] = allStores.map((s) => ({
+    ...s,
+    id: Number(s.id),
+    state: s.is_active === false ? ("inactive" as const) : ("active" as const),
+  }));
 
   const extraIds = Array.from(new Set(cells.map((c) => Number(c.store_id)))).filter(
     (id) => !activeIds.has(id),
@@ -148,6 +168,13 @@ export function buildSkuRows(cells: DraftCell[], existence: SkuExistence): SkuRo
   //   字串，而 TypeScript 的 `{ id: number }` 宣告**不會在執行期檢查** ——
   //   一邊是 "1630"、另一邊是 1630，Set.has() 就必定失敗、整批誤判成「已不存在」。
   const alive = existence.kind === "known" ? new Set(Array.from(existence.ids, (v) => Number(v))) : null;
+  // 整批查不出來時，仍然認得「加入當下確定存在」的那些
+  const confirmed =
+    existence.kind === "unknown"
+      // ?? 是刻意的：TypeScript 的型別在執行期不存在，少帶這個欄位會整頁爆掉。
+      // 本專案已經因為「相信宣告的型別」踩過一次（#751 的 id 型別）。
+      ? new Set(Array.from(existence.confirmedIds ?? [], (v) => Number(v)))
+      : null;
   const m = new Map<number, SkuRow>();
   for (const c of cells) {
     const skuId = Number(c.sku_id);
@@ -156,7 +183,13 @@ export function buildSkuRows(cells: DraftCell[], existence: SkuExistence): SkuRo
       sku_id: skuId,
       code: c.snapshot_sku_code ?? "",
       label: c.snapshot_sku_label ?? `（商品 #${skuId}，沒有留下品名）`,
-      state: alive ? (alive.has(skuId) ? "active" : "missing") : "unknown",
+      state: alive
+        ? alive.has(skuId)
+          ? "active"
+          : "missing"
+        : confirmed?.has(skuId)
+          ? "active"
+          : "unknown",
     });
   }
   return Array.from(m.values()).sort((a, b) => a.code.localeCompare(b.code));
@@ -417,4 +450,58 @@ export function lateCellSnapshot(pre: PrefillResult | null, storeId: number, now
     snapshot_close_date: pre.closeDate,
     snapshot_extra: extra,
   };
+}
+
+// ============================================================
+// 結單日的顯示
+// ============================================================
+
+/**
+ * 老闆原話：「一定要標示結單日是什麼時候的，不然同樣的商品會分不出來要分那一次的。」
+ * 本公司同一個商品會重複開團，光看品名分不出「這批是哪一次的」。
+ *
+ * ⭐ 三種「沒有日期」必須顯示**不一樣的字**，⛔ 不可以都給空白讓老闆自己猜
+ *   （系統異常偽裝成資料狀態，正是本專案一路踩的病）：
+ *     none    這樣商品加入當下就沒有任何未派需求 → 本來就沒有結單日可記
+ *     failed  加入當下查結單日失敗（snapshot_extra.close_date_lookup === "failed"）
+ *     legacy  這一列是「結單日功能上線前」建的（連 snapshot_at 都沒有記到日期欄位）
+ * ⭐ 跨多個結單日要**全部列出**（6/24、7/01），不可以只顯示最早那個然後靜默隱藏其他的
+ *   —— 那正是老闆說的「分不出來要分哪一次」。
+ */
+export type CloseDateView = { text: string; kind: "dates" | "none" | "failed" | "legacy" };
+
+/**
+ * ⚠️ legacy 的判定**必須看 metadata**，不可以看「欄位存不存在」——
+ * SELECT 一旦固定選了那個欄位，key 就永遠存在，判斷永遠 false（阿審 #752 P1-2）。
+ * 這裡用 `snapshot_extra.snapshot_source`：新版寫入一定有 add_sku / cell_created_later，
+ * 「結單日功能上線前」建的列則沒有。
+ */
+export function isLegacyDraftCell(extra: Record<string, unknown> | null | undefined): boolean {
+  return !extra || typeof extra.snapshot_source !== "string";
+}
+
+export function formatCloseDates(
+  closeDate: string | null | undefined,
+  extra: Record<string, unknown> | null | undefined,
+  opts?: { legacy?: boolean },
+): CloseDateView {
+  const md = (iso: string) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+    // 月不補零、日補零（6/24、7/01）：紙本上日的寬度一致，樓下比較好對
+    return m ? `${Number(m[2])}/${m[3]}` : iso;
+  };
+  const listRaw = extra && Array.isArray(extra.close_dates) ? (extra.close_dates as unknown[]) : [];
+  const list = listRaw.filter((d): d is string => typeof d === "string");
+  if (list.length > 1) {
+    // 全部列出，並保證主欄位那個也在裡面（資料萬一不一致也不漏）
+    const all = Array.from(new Set(closeDate ? [closeDate, ...list] : list)).sort();
+    return { text: all.map(md).join("、"), kind: "dates" };
+  }
+  if (closeDate) return { text: md(closeDate), kind: "dates" };
+  if (extra && extra.close_date_lookup === "failed") {
+    return { text: "查詢失敗", kind: "failed" };
+  }
+  // legacy 由呼叫端傳入（用 isLegacyDraftCell 判定），或這裡自己看 metadata
+  if (opts?.legacy ?? isLegacyDraftCell(extra)) return { text: "—", kind: "legacy" };
+  return { text: "無", kind: "none" };
 }
