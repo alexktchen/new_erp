@@ -8,10 +8,16 @@
 //      （PR #744 的根因就是「選取 ∩ 目前清單」把勾選悄悄丟掉）。
 //   把判斷抽成純函式，才驗得起來（含孤兒情境），也才不會散在 JSX 裡。
 //
-// 三種「不在正常狀態」的欄位／列，一律**照樣顯示**並標示出來：
-//   - 分店 inactive：stores 裡還在，但 is_active = false（停用後才建的草稿還看得到舊資料）
-//   - 分店 missing ：stores 裡整筆查不到（被硬刪）
-//   - 商品 missing ：skus 裡查不到 → 用 snapshot 的品名品號照樣印
+// 「不在正常狀態」的欄位／列分**兩類**，處理方式不一樣：
+//   ① 異常狀態 → 一律**照樣顯示**並標示出來（藏起來就是拿系統異常冒充一切正常）：
+//      - 分店 missing ：stores 裡整筆查不到（被硬刪）
+//      - 分店 unknown ：分店查詢失敗 → 標「無法確認」，不武斷說被刪了
+//      - 商品 missing / unknown：skus 裡查不到、或查不出來 → 用 snapshot 的品名品號照樣印
+//   ② 正常狀態 → 只有「**本草稿有量**」才顯示：
+//      - 分店 inactive：stores 裡還在，但 is_active = false ＝ 已經收掉的店，
+//        不該再出現在撿貨單上（老闆 2026-08-17：「已停用的店家就不用出現了」）。
+//        ⭐ 但有量的一定要留：rowTotal 是把該商品所有 cells 加總、不看畫面上有沒有那一欄，
+//        藏掉一個有量的欄，紙上橫的加起來就 ≠ 合計。判準與證明見 buildStoreColumns。
 
 /**
  * 把 DB 錯誤翻成老闆看得懂、而且知道下一步要做什麼的話。
@@ -72,7 +78,11 @@ export type DraftCell = {
 
 export type StoreRef = { id: number; code: string; name: string };
 
-/** stores 全表的一列：**含停用**。`is_active === false` → 欄位標「已停用」 */
+/**
+ * stores 全表的一列：**含停用**。
+ * `is_active === false` → 這一欄只有「本草稿有量」時才留下來，並標「已停用」；
+ * 零數量的整欄不顯示（判準見 buildStoreColumns）。
+ */
 export type StoreRow = StoreRef & { is_active?: boolean | null };
 
 export type StoreColumn = StoreRef & { state: "active" | "inactive" | "missing" | "unknown" };
@@ -329,6 +339,9 @@ export function computePrefill(rows: DemandRow[]): Prefill {
  * ⚠ 直接從 cells 加總，**不是**加總畫面上看得到的欄位 ——
  *   萬一哪天欄位漏了一欄，合計也還是對的（寧可欄位與合計對不起來被發現，
  *   也不要合計跟著一起少算而看不出來）。
+ * ⓘ 「欄位漏了一欄」現在已經是**常態而不是意外**：buildStoreColumns 會藏掉
+ *   「停用且本草稿數量合計 0」的欄。那種欄保證每一格都是 0、對合計的貢獻是 0，
+ *   所以橫加仍然等於合計 —— 這支照樣不能改成加總畫面上的欄位。
  */
 export function rowTotal(cells: DraftCell[], skuId: number): number {
   let sum = 0;
@@ -570,6 +583,21 @@ export function formatCloseDates(
 // ============================================================
 
 /**
+ * 按下刪除當下**重查**回來的品項數。
+ *
+ * ⭐ 為什麼做成 union、而不是 `number | null`：`null` 會讓呼叫端有辦法「就這樣傳下去」，
+ *   靜靜沿用畫面上的舊數字。這裡把「查失敗」做成一個**非講不可**的狀態 ——
+ *   由型別逼著措辭去處理它，不是靠自律。
+ *
+ * @property count  重查到的品項數（去重後的商品數）
+ * @property shown  老闆**畫面上**那個數字（列表 load() 當下算的，可能已經過期）
+ * @property reason 重查失敗的原因，要原封不動講給老闆聽
+ */
+export type DraftSkuRecount =
+  | { kind: "ok"; count: number; shown: number }
+  | { kind: "failed"; shown: number; reason: string };
+
+/**
  * 刪草稿之前，老闆唯一會看到的那段字。
  *
  * ⭐ 一定要明講「連帶刪掉 N 樣商品」：明細是 DB 的 ON DELETE CASCADE 帶走的
@@ -579,20 +607,49 @@ export function formatCloseDates(
  * ⭐ 也要明講「不影響庫存 / 訂單 / 派貨工作台」：這個系統是正式營運中的，
  *   一個叫「刪除」的紅色按鈕不講清楚範圍，老闆根本不敢按。
  *
+ * ⭐⭐ N 一定要是「按下刪除當下重查」的數字，不可以是畫面上那個（老闆 2026-08-17 拍板）：
+ *   列表是幾分鐘前載入的，樓下同時在另一台 iPad 上加商品 —— 這正是本功能的設計前提。
+ *   確認框說「會刪掉 12 樣」、cascade 實際帶走 32 樣，他以為刪的是一張沒用的小草稿，
+ *   其實是樓下做了一半的工，而且救不回來。
+ *   ⛔ 兩個數字不一樣時**不可以默默換成新的**：「這張草稿在我載入之後被別人改過」
+ *      本身就是他該拿來決定要不要刪的資訊，換掉數字等於瞞著他。
+ *   ⛔ 重查失敗時**不可以靜默沿用舊數字**照樣說「會刪掉 N 樣」——
+ *      靜默偽裝正是本專案一路踩過的病。明講查不到，讓他自己決定。
+ *   ⓘ 數字一致時，措辭與加這道防線之前**一字不差**（一切如常就不要沒事嚇人）。
+ *
  * ⓘ 為什麼措辭放在這支 lib 而不是寫在頁面裡：與 addOutcomeMessage 同一個理由 ——
  *   老闆會讀到的字集中一處維護，才不會哪天改了一句忘了另一句。
- *
- * @param skuCount 這張草稿的品項數（去重後的商品數，＝列表頁「品項數」那一欄的數字）
  */
-export function deleteDraftConfirmMessage(name: string, skuCount: number): string {
-  const body =
-    skuCount > 0
-      ? `會連帶刪掉裡面的 ${skuCount} 樣商品，包含各分店已經填好的數量。`
-      : `這張草稿裡目前沒有商品。`;
-  return (
-    `確定要刪除草稿「${name}」？\n\n` +
-    `${body}\n` +
+export function deleteDraftConfirmMessage(name: string, recount: DraftSkuRecount): string {
+  // ⓘ 這幾段字最後是丟進 confirm() 的，**不會**被 render 成 markdown ——
+  //   寫 `**重點**` 老闆會原封不動看到兩顆星號。要強調就用「」或換句話說。
+  const head = `確定要刪除草稿「${name}」？\n\n`;
+  const tail =
     `刪掉就救不回來 —— 沒有復原、也不會進垃圾桶。\n\n` +
-    `（只刪這張草稿：不會動到任何庫存、訂單，也不影響派貨工作台。）`
-  );
+    `（只刪這張草稿：不會動到任何庫存、訂單，也不影響派貨工作台。）`;
+
+  if (recount.kind === "failed") {
+    return (
+      head +
+      // ⚠ 原因是 describeDraftDbError 的整句話、自己就帶句號 → 不要再包一層「（…）。」，
+      //   會變成「…資料庫。）。」。另起一行給它，跟本檔其他地方的「原始訊息：」同一個寫法。
+      `⚠ 現在查不到這張草稿裡有幾樣商品。\n原因：${recount.reason}\n\n` +
+      `畫面上寫的「${recount.shown} 樣」是這一頁載入當下的數字，不保證是現在的狀況 ——\n` +
+      `如果樓下剛剛又加了商品，實際被刪掉的會比 ${recount.shown} 樣更多。\n` +
+      `建議先按「取消」，用「重新載入」確認之後再刪。\n\n` +
+      tail
+    );
+  }
+
+  const { count, shown } = recount;
+  const body =
+    count > 0
+      ? `會連帶刪掉裡面的 ${count} 樣商品，包含各分店已經填好的數量。`
+      : `這張草稿裡目前沒有商品。`;
+  const drift =
+    count === shown
+      ? ""
+      : `⚠ 這張草稿在你打開這一頁之後被改過了：畫面上寫的是 ${shown} 樣，` +
+        `現在實際是 ${count} 樣（可能是另一台 iPad 剛剛加了或刪了商品）。\n\n`;
+  return head + drift + `${body}\n` + tail;
 }
