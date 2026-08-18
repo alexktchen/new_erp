@@ -1144,6 +1144,33 @@ export default function PickingWorkstationPage() {
       (sku.storeDemand.get(storeId) ?? 0) - (sku.storeWave.get(storeId) ?? 0),
     );
   }
+  // ===== 整欄高亮：點進某一格數量時，那一欄（含表頭店名）一起亮起來 =====
+  // 表頭固定之後店名一直在，但 17 間店的欄位長得都一樣，眼睛還是要在「格子」和「表頭」之間
+  // 數欄位 —— 第 11 欄看成第 12 欄，貨就配給錯的店。亮起整欄是為了不用數。
+  //
+  // ⚠ 刻意「不」放進 React state：矩陣可到 180 列 × 17 欄 ≈ 3000 格，focusedStoreId 進 state
+  //   會讓整張表每次點格子都重繪。這一頁本來就慢，拖慢的後果不只是頓 —— 還會延後身分綁定，
+  //   加劇「按了加入卻沒進已挑清單」那個既有的間歇性 bug。
+  // 這裡只碰 2 個節點（該欄的 <col> ＋ 表頭那一格 <th>），而且查詢範圍鎖在 colgroup / 表頭
+  // 那一列（各約 20 個子節點），與列數完全無關：180 列跟 1 列一樣快。
+  // 底色靠 <col> 帶（CSS 表格背景層：欄在列/格之下），所以不必逐格加 class。
+  const colGroupRef = useRef<HTMLTableColElement>(null);
+  const headRowRef = useRef<HTMLTableRowElement>(null);
+  function highlightStoreCol(storeId: number | null) {
+    const roots = [colGroupRef.current, headRowRef.current];
+    // 先清乾淨再上色：不記錄上一次是哪一欄，換店別欄／切「顯示全部分店」而 DOM 節點被重用時
+    // 才不會留下殘影（清除範圍同樣只有那 ~20 個子節點）。
+    for (const root of roots) {
+      for (const el of root?.querySelectorAll<HTMLElement>(".is-col-focus") ?? []) {
+        el.classList.remove("is-col-focus");
+      }
+    }
+    if (storeId === null) return;
+    for (const root of roots) {
+      root?.querySelector<HTMLElement>(`[data-store-col="${storeId}"]`)?.classList.add("is-col-focus");
+    }
+  }
+
   // 「⚖ 平均」自動分配:把 totalAvailable 平均分到「未派需求 > 0」的店,cap 在各店未派需求。
   // 若有店需求不足分到的份額,剩餘量會在下一輪重新平均。
   function autoDistribute(sku: SkuRow) {
@@ -1618,6 +1645,145 @@ export default function PickingWorkstationPage() {
         </div>
       )}
 
+      {/* ⚠️ 位置是刻意的，這一塊必須夾在「② 步驟鈕」和「控制列」之間，兩個方向都不能挪:
+          ⛔ 往下挪到矩陣後面 = 弄壞固定表頭。矩陣的 max-h-[calc(100dvh-7rem)] 前提是「矩陣下方
+            沒有東西」;這塊排到矩陣後面,頁面捲到底就把整個矩陣頂到畫面上方,thead 的 sticky 只黏在
+            矩陣容器頂端 → 店名整排消失,改數字時看不出這格是哪間店(＝派錯店)。實測(180 列 × 17 欄
+            真 Chrome、2 張補貨申請)1180×670 有 41% 的捲動範圍會出事、最糟 550px 全是輸入框卻
+            一個店名都沒有;820×1030 是 53%。排到矩陣前面 → 五個尺寸全部 0%。
+          ⛔ 往上挪到控制列前面 = 弄壞「🧾 建立撿貨單」。控制列必須緊貼矩陣上緣,老闆才按得到;
+            這塊插進控制列和矩陣中間的話,矩陣填到滿版時控制列被推到畫面外 —— 實測建單鈕在可工作
+            的捲動位置從 100% 掉到 0%(這正是 8be4c6f 之後第一次搬位置踩到的坑)。
+          老闆 2026-08-17 在兩個候選版本之間親自挑的就是「補貨申請排在矩陣上面」。代價他也知道:
+          有補貨申請的日子要多滑一段才看到矩陣(1180×670、2 張申請:矩陣起點 792px → 1211px)。
+          沒有補貨申請時這塊算出來是 false,React 不產生任何節點,版面與搬動前逐字相同。 */}
+      {/* === 補貨申請(無 PO 來源) section === */}
+      {restockDemand !== null && visibleRestockGroups.length > 0 && (
+        <section className="mt-2 rounded-md border border-amber-200 bg-amber-50/40 dark:border-amber-900 dark:bg-amber-950/20">
+          <header className="border-b border-amber-200 px-4 py-2 dark:border-amber-900">
+            <h2 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+              📦 補貨申請(無 PO 來源)
+              <span className="ml-2 text-xs font-normal text-amber-700/80 dark:text-amber-300/70">
+                {visibleRestockGroups.length} 張申請 · 供給來自 HQ 即時庫存
+              </span>
+            </h2>
+          </header>
+          <div className="flex flex-col gap-3 p-3">
+            {visibleRestockGroups.map((g) => {
+              const allocSum = g.lines.reduce(
+                (s, ln) => s + getRestockAlloc(g.rrId, ln.sku_id),
+                0,
+              );
+              const canSubmit = allocSum > 0 && submittingRrId !== g.rrId;
+              return (
+                <div
+                  key={g.rrId}
+                  className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
+                >
+                  <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                    <div className="flex flex-wrap items-baseline gap-2">
+                      <span className="font-mono text-sm font-semibold">
+                        RR-{g.rrId}
+                      </span>
+                      <span className="inline-flex rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                        {g.rrStatus === "pending" ? "待處理" : "已批准"}
+                      </span>
+                      <span className="text-sm">{g.storeName}</span>
+                      {g.storeCode && (
+                        <span className="font-mono text-[11px] text-zinc-500">
+                          {g.storeCode}
+                        </span>
+                      )}
+                    </div>
+                    <SpinButton
+                      onClick={() => submitRestockWave(g)}
+                      disabled={!canSubmit}
+                      className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+                    >
+                      {submittingRrId === g.rrId
+                        ? "建立中…"
+                        : `🧾 建立撿貨單 (擬分 ${allocSum})`}
+                    </SpinButton>
+                  </div>
+                  <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
+                    <thead className="bg-zinc-50 dark:bg-zinc-950">
+                      <tr>
+                        <Th>品項</Th>
+                        <Th className="text-center">申請量</Th>
+                        <Th className="text-center" title="HQ 即時庫存 (on_hand)">HQ 庫存</Th>
+                        <Th className="text-center">已撿</Th>
+                        <Th className="text-center">本次撿</Th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                      {g.lines.map((ln) => {
+                        const maxForLine = Math.max(
+                          0,
+                          Math.min(
+                            Number(ln.demand_qty) - Number(ln.wave_qty),
+                            Number(ln.gr_qty),
+                          ),
+                        );
+                        const value = getRestockAlloc(g.rrId, ln.sku_id);
+                        return (
+                          <tr key={ln.sku_id}>
+                            <Td className="text-xs">
+                              <div className="font-mono text-[11px] text-zinc-500">
+                                {ln.sku_code ?? "—"}
+                              </div>
+                              <div title={ln.sku_label}>{ln.sku_label}</div>
+                              <div className="mt-0.5 flex flex-wrap gap-1">{renderPriceTags(ln.sku_id)}</div>
+                            </Td>
+                            <NumCell value={Number(ln.demand_qty)} bold />
+                            <NumCell
+                              value={Number(ln.gr_qty)}
+                              accent={
+                                Number(ln.gr_qty) < Number(ln.demand_qty)
+                                  ? "danger"
+                                  : undefined
+                              }
+                            />
+                            <NumCell value={Number(ln.wave_qty)} muted />
+                            <td className="px-2 py-1.5 text-center">
+                              <input
+                                type="number"
+                                inputMode="numeric"
+                                value={value}
+                                min={0}
+                                max={maxForLine}
+                                step={1}
+                                onChange={(e) =>
+                                  setRestockAlloc(
+                                    g.rrId,
+                                    ln.sku_id,
+                                    Number(e.target.value),
+                                    maxForLine,
+                                  )
+                                }
+                                onFocus={(e) => e.currentTarget.select()}
+                                title={`最多可撿 ${maxForLine}(申請 ${ln.demand_qty}、庫存 ${ln.gr_qty}、已撿 ${ln.wave_qty})`}
+                                className={`h-10 w-full max-w-[96px] rounded-md border px-1 text-center font-mono text-base font-semibold tabular-nums dark:bg-zinc-800 ${
+                                  value === 0
+                                    ? "border-zinc-200 text-zinc-300 dark:border-zinc-700"
+                                    : "border-amber-400 text-amber-700 dark:border-amber-600 dark:text-amber-300"
+                                }`}
+                              />
+                              <div className="mt-0.5 text-[10px] text-zinc-400">
+                                ≤ {maxForLine}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* 控制列 */}
       <div className="flex flex-wrap items-end gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
         <span className="text-xs text-zinc-500" title="建單後到「總倉收件匣 → 撿貨單」點配送日即可修改">
@@ -1916,13 +2082,40 @@ export default function PickingWorkstationPage() {
                 : "目前的篩選條件下沒有待派品項 — 回步驟 1 挑商品,或換個開團 / 時間、清除篩選。"}
           </div>
         ) : (
-          // 只保留水平(左右)捲軸:拿掉高度上限,表格整高展開、跟著整頁一起垂直捲動,
-          // 容器只在「店別欄超出寬度」時出現左右 scrollbar(overflow-x-auto),不再有內框垂直捲軸。
-          // sticky 左欄在橫向捲動時固定品項欄。
-          <div className="overflow-x-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          // 捲動容器:左右 + 上下都在這一層(overflow-auto),表頭與品項欄的 sticky 都相對它定位。
+          // ⚠ 高度上限不能拿掉 —— 舊版只寫 overflow-x-auto 而沒有 max-h:overflow-x 一旦不是
+          //   visible,overflow-y 的 visible 就會被算成 auto,這個 div 因此仍是捲動容器,但高度
+          //   等於內容高度、永遠捲不動 → thead 的 sticky top-0 黏在框頂,框卻跟著整頁捲走,
+          //   等於固定表頭寫了等於沒寫(改中間某一格數字要拉回最上面才知道是哪一店)。
+          // 高度取 100dvh − 7rem:捲到底時矩陣停在上方控制列(建立撿貨單鈕)底下、表頭落在可視範圍內。
+          //   算式是 容器頂端(捲到底) = 視窗高 − 容器高 − 容器下方內容高,與上方內容多高無關。
+          //   用 dvh 不用 vh:平板瀏覽器工具列收合時 vh 會比實際可視高度大,表頭會被切掉(同 Modal.tsx)。
+          //
+          // ⚠️⚠️ 這個 7rem 成立的前提是「矩陣下方沒有東西」—— 這個前提是靠版面順序維持的,
+          //   不是天生的:『📦 補貨申請(無 PO 來源)』section 不受 viewMode/pickStep 控制,有待處理
+          //   的補貨申請時一定會跟矩陣同時出現,所以它被刻意排在矩陣「上面」(見上方那一塊的註解)。
+          //   ⛔ 把它搬回矩陣後面 = 直接弄壞固定表頭。代進上面那條算式:下方一多,容器頂端就變負的,
+          //   thead 的 sticky top-0 只黏在容器頂端 → 表頭被推到畫面外。實測(180 列 × 17 欄真
+          //   Chrome,掃過整段頁面捲動範圍;「出事」=矩陣還看得到 100px 以上但表頭不在畫面內):
+          //     視窗          排在矩陣「後面」時   排在矩陣「前面」時(現況)
+          //     1180×670      42% / 最糟 550px    0%
+          //     1280×720      47% / 600px         0%
+          //     768×950       53% / 833px         0%
+          //     820×1030      53% / 913px         0%
+          //     1536×960      56% / 845px         0%
+          //   (再往前一版、連 max-h 都沒有的 origin/main:96% / 670px。)
+          //   現況另外量到(五個尺寸、2 張與 4 張補貨申請都一樣):捲到底時矩陣頂端 y=88、表頭 y=89、
+          //   上方控制列還露出 64–72px → 「🧾 建立撿貨單」在每一個可工作的捲動位置都按得到。
+          //   順帶記錄兩個試過但不採用的做法:overscroll-contain 實測完全無效(42%,一模一樣的區間
+          //   —— 它只擋捲動接力,不改頁面捲動範圍);ResizeObserver 動態算高在補貨區塊高度 ≥ 視窗高
+          //   時會把矩陣算成 0(2 張申請就已經 670px),數學上就不成立。
+          // max-h 不是 h:品項少的時候框仍然只有內容高度,大螢幕不會變成一條扁框。
+          // print: 兩個 —— 列印時把高度上限拿掉,否則直接對這一頁 Ctrl+P 只會印出一個螢幕的列
+          //   (加高度上限之前不會)。正規列印走 /picking/print-pick-list,這只是別讓它變壞。
+          <div className="max-h-[calc(100dvh-7rem)] overflow-auto rounded-md border border-zinc-200 bg-white print:max-h-none print:overflow-visible dark:border-zinc-800 dark:bg-zinc-900">
             {/* table-fixed + 明確總寬：auto layout 把 <col> 寬度當建議值,店一多就把店別欄
                 壓窄、數量輸入框跟著縮,兩位數以上直接被裁掉。fixed layout 嚴格吃 <col> 寬度,
-                超出容器交給外層 overflow-x-auto 出捲軸;容器比較寬時 min-w-full 照舊撐滿。
+                超出容器交給外層的 overflow-auto 出捲軸;容器比較寬時 min-w-full 照舊撐滿。
                 平板優化:訂購/已到/在途/短少/已派 收斂進品項欄的統計列,只留
                 可分配 + 擬分合計 兩個數字欄;店別欄放大到 96px 裝大號觸控輸入框。
                 總寬 = 品項 230 + 可分配 80(w-20) + 擬分 64(w-16) + 店別 n×96(w-24),
@@ -1931,22 +2124,28 @@ export default function PickingWorkstationPage() {
               className="min-w-full table-fixed divide-y divide-zinc-200 text-sm dark:divide-zinc-800"
               style={{ width: 230 + 80 + 64 + visibleStores.length * 96 }}
             >
-              <colgroup>
+              {/* data-store-col:整欄高亮認的就是這個屬性(見 highlightStoreCol) */}
+              <colgroup ref={colGroupRef}>
                 <col className="w-[230px]" />
                 <col className="w-20" />
                 <col className="w-16" />
-                {visibleStores.map((st) => <col key={st.store_id} className="w-24" />)}
+                {visibleStores.map((st) => <col key={st.store_id} className="w-24" data-store-col={st.store_id} />)}
               </colgroup>
-              <thead className="sticky top-0 z-10 bg-zinc-50 dark:bg-zinc-900">
-                <tr>
+              {/* 底線用 shadow 不用 border:divide-y 的那條線掛在 tbody 上,thead 黏住時線會留在原地。
+                  底色一定要逐格(th)給,不能只給 thead:border-collapse 下 thead 的背景在部分瀏覽器
+                  不會畫出來,黏住的表頭會變透明、被底下的列穿過去。兩點都比照 orders/pivot 的寬表。 */}
+              <thead className="sticky top-0 z-10 bg-zinc-50 shadow-[0_1px_0_0_rgb(228_228_231)] dark:bg-zinc-900 dark:shadow-[0_1px_0_0_rgb(39_39_42)]">
+                <tr ref={headRowRef}>
                   {/* 勾選欄拿掉：選哪些品項改在步驟 1 決定（舊版勾選會被「目前清單」交集吃掉） */}
                   <Th className="sticky left-0 z-20 bg-zinc-50 py-2 dark:bg-zinc-900">品項 / 來源</Th>
-                  <Th className="py-2 text-center" title="可分配剩餘 = 總倉已到貨 − 已派 − 本次擬分">可分配</Th>
-                  <Th className="py-2 text-center" title="本次擬分合計(含被隱藏的分店欄)">擬分</Th>
+                  <Th className="bg-zinc-50 py-2 text-center dark:bg-zinc-900" title="可分配剩餘 = 總倉已到貨 − 已派 − 本次擬分">可分配</Th>
+                  <Th className="bg-zinc-50 py-2 text-center dark:bg-zinc-900" title="本次擬分合計(含被隱藏的分店欄)">擬分</Th>
                   {visibleStores.map((st) => (
-                    <Th key={st.store_id} className="py-2 text-center">
+                    <Th key={st.store_id} storeCol={st.store_id} className="bg-zinc-50 py-2 text-center dark:bg-zinc-900">
                       <div className="text-xs font-semibold normal-case text-zinc-700 dark:text-zinc-200">{st.store_name}</div>
-                      <div className="font-mono text-[10px] font-normal text-zinc-400">{st.store_code}</div>
+                      {/* store-code 是給 CSS 認的鉤子：高亮那一欄時要一起把店號調深/調亮，
+                          不然「為了看清楚是哪一店而高亮，高亮後店號反而最難讀」(見 globals.css)。 */}
+                      <div className="store-code font-mono text-[10px] font-normal text-zinc-400">{st.store_code}</div>
                     </Th>
                   ))}
                 </tr>
@@ -2038,7 +2237,10 @@ export default function PickingWorkstationPage() {
                               inputMode="numeric"
                               value={value}
                               onChange={(e) => setAllocCapped(sk.sku_id, st.store_id, Number(e.target.value), sk.totalAvailable)}
-                              onFocus={(e) => e.currentTarget.select()}
+                              // 觸發點是 focus 不是 hover：現場用 iPad,觸控沒有 hover 這回事。
+                              // 只加不改：select() 照舊(點進去整數反白、直接打字就覆蓋),onChange 一個字沒動。
+                              onFocus={(e) => { e.currentTarget.select(); highlightStoreCol(st.store_id); }}
+                              onBlur={() => highlightStoreCol(null)}
                               min={0}
                               max={maxForCell}
                               step={1}
@@ -2151,133 +2353,6 @@ export default function PickingWorkstationPage() {
             </section>
           );
         })
-      )}
-
-      {/* === 補貨申請(無 PO 來源) section === */}
-      {restockDemand !== null && visibleRestockGroups.length > 0 && (
-        <section className="mt-2 rounded-md border border-amber-200 bg-amber-50/40 dark:border-amber-900 dark:bg-amber-950/20">
-          <header className="border-b border-amber-200 px-4 py-2 dark:border-amber-900">
-            <h2 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-              📦 補貨申請(無 PO 來源)
-              <span className="ml-2 text-xs font-normal text-amber-700/80 dark:text-amber-300/70">
-                {visibleRestockGroups.length} 張申請 · 供給來自 HQ 即時庫存
-              </span>
-            </h2>
-          </header>
-          <div className="flex flex-col gap-3 p-3">
-            {visibleRestockGroups.map((g) => {
-              const allocSum = g.lines.reduce(
-                (s, ln) => s + getRestockAlloc(g.rrId, ln.sku_id),
-                0,
-              );
-              const canSubmit = allocSum > 0 && submittingRrId !== g.rrId;
-              return (
-                <div
-                  key={g.rrId}
-                  className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
-                >
-                  <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-                    <div className="flex flex-wrap items-baseline gap-2">
-                      <span className="font-mono text-sm font-semibold">
-                        RR-{g.rrId}
-                      </span>
-                      <span className="inline-flex rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                        {g.rrStatus === "pending" ? "待處理" : "已批准"}
-                      </span>
-                      <span className="text-sm">{g.storeName}</span>
-                      {g.storeCode && (
-                        <span className="font-mono text-[11px] text-zinc-500">
-                          {g.storeCode}
-                        </span>
-                      )}
-                    </div>
-                    <SpinButton
-                      onClick={() => submitRestockWave(g)}
-                      disabled={!canSubmit}
-                      className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
-                    >
-                      {submittingRrId === g.rrId
-                        ? "建立中…"
-                        : `🧾 建立撿貨單 (擬分 ${allocSum})`}
-                    </SpinButton>
-                  </div>
-                  <table className="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-                    <thead className="bg-zinc-50 dark:bg-zinc-950">
-                      <tr>
-                        <Th>品項</Th>
-                        <Th className="text-center">申請量</Th>
-                        <Th className="text-center" title="HQ 即時庫存 (on_hand)">HQ 庫存</Th>
-                        <Th className="text-center">已撿</Th>
-                        <Th className="text-center">本次撿</Th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                      {g.lines.map((ln) => {
-                        const maxForLine = Math.max(
-                          0,
-                          Math.min(
-                            Number(ln.demand_qty) - Number(ln.wave_qty),
-                            Number(ln.gr_qty),
-                          ),
-                        );
-                        const value = getRestockAlloc(g.rrId, ln.sku_id);
-                        return (
-                          <tr key={ln.sku_id}>
-                            <Td className="text-xs">
-                              <div className="font-mono text-[11px] text-zinc-500">
-                                {ln.sku_code ?? "—"}
-                              </div>
-                              <div title={ln.sku_label}>{ln.sku_label}</div>
-                              <div className="mt-0.5 flex flex-wrap gap-1">{renderPriceTags(ln.sku_id)}</div>
-                            </Td>
-                            <NumCell value={Number(ln.demand_qty)} bold />
-                            <NumCell
-                              value={Number(ln.gr_qty)}
-                              accent={
-                                Number(ln.gr_qty) < Number(ln.demand_qty)
-                                  ? "danger"
-                                  : undefined
-                              }
-                            />
-                            <NumCell value={Number(ln.wave_qty)} muted />
-                            <td className="px-2 py-1.5 text-center">
-                              <input
-                                type="number"
-                                inputMode="numeric"
-                                value={value}
-                                min={0}
-                                max={maxForLine}
-                                step={1}
-                                onChange={(e) =>
-                                  setRestockAlloc(
-                                    g.rrId,
-                                    ln.sku_id,
-                                    Number(e.target.value),
-                                    maxForLine,
-                                  )
-                                }
-                                onFocus={(e) => e.currentTarget.select()}
-                                title={`最多可撿 ${maxForLine}(申請 ${ln.demand_qty}、庫存 ${ln.gr_qty}、已撿 ${ln.wave_qty})`}
-                                className={`h-10 w-full max-w-[96px] rounded-md border px-1 text-center font-mono text-base font-semibold tabular-nums dark:bg-zinc-800 ${
-                                  value === 0
-                                    ? "border-zinc-200 text-zinc-300 dark:border-zinc-700"
-                                    : "border-amber-400 text-amber-700 dark:border-amber-600 dark:text-amber-300"
-                                }`}
-                              />
-                              <div className="mt-0.5 text-[10px] text-zinc-400">
-                                ≤ {maxForLine}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              );
-            })}
-          </div>
-        </section>
       )}
     </div>
   );
@@ -2473,8 +2548,19 @@ function StepBtn({ active, onClick, children }: { active: boolean; onClick: () =
   );
 }
 
-function Th({ children, className = "", title }: { children: React.ReactNode; className?: string; title?: string }) {
-  return <th title={title} className={`px-2 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-zinc-500 ${className}`}>{children}</th>;
+function Th({
+  children,
+  className = "",
+  title,
+  storeCol,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  title?: string;
+  /** 這一格屬於哪一間分店 — 整欄高亮用來認欄位(不給就不輸出屬性,其他表照舊)。 */
+  storeCol?: number;
+}) {
+  return <th title={title} data-store-col={storeCol} className={`px-2 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-zinc-500 ${className}`}>{children}</th>;
 }
 
 function KpiCard({ label, value, accent = "text-zinc-900 dark:text-zinc-100", hint }: { label: string; value: number; accent?: string; hint?: string }) {
