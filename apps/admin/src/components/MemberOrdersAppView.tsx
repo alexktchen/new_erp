@@ -11,11 +11,14 @@
  * 「一樣」是硬需求，四個地方要跟會員端同步（改那邊記得改這邊）：
  *   - 資料管線 = liff-api listMyOrders：v_customer_order_summary、半年內、
  *     active / history 各最多 100 筆、一般取消不顯示但斷貨取消要顯示、已轉讓隱藏
- *   - orderPhase 分桶 = apps/member/src/components/OrderCard.tsx
+ *   - orderPhase / itemPhase 分桶（**依品項行**拆分身，2026-08-14 起）
+ *     = apps/member/src/components/OrderCard.tsx
  *   - 應付總金額只在「待到貨」「待取貨」顯示、用 outstanding_amount
  *     = apps/member/src/app/orders/page.tsx（2026-08-11 起「全部」不顯示金額）
  *   - 卡片標題 orderCardTitle（內部 sentinel 團改印品項名）
  *     = apps/member/src/lib/orderTitle.ts 的副本 lib/orderTitle.ts
+ *   - 「已完成」依「那一次到店結單」分組（order_pickup_events）
+ *     = apps/member/src/lib/pickups.ts 的副本 lib/pickupVisits.ts
  *
  * 後台加值：點卡片可直接開訂單明細（會員 app 沒有這個）。
  */
@@ -23,6 +26,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { orderCardTitle } from "@/lib/orderTitle";
+import { fetchReprintableEvents } from "@/lib/pickupReceipt";
+import {
+  buildDoneNodes,
+  formatVisitWhen,
+  visibleTotals,
+  type PickupVisit,
+} from "@/lib/pickupVisits";
 
 type AppOrderItem = {
   id: number;
@@ -33,6 +43,13 @@ type AppOrderItem = {
   subtotal: number;
   status: string;
   stockout?: boolean;
+  /**
+   * 這一行到店了沒（v_customer_order_summary.items[].arrived @20260814070000）。
+   * 只有 active 行（pending/reserved/ready）有值，其餘是 null。
+   * ⚠️ 不可以用單頭的 arrived 代替：那一欄有快路徑，單頭一到 ready /
+   * partially_completed 就無條件 true（短收時會謊報到貨）。
+   */
+  arrived?: boolean | null;
 };
 
 export type AppOrderRow = {
@@ -53,6 +70,8 @@ export type AppOrderRow = {
   campaign_name: string | null;
   campaign_cutoff_date: string | null;
   store_name: string | null;
+  /** 這張單的取貨紀錄（order_pickup_events；撤銷掉的那幾次已濾除）—— 「已完成」分組用 */
+  pickups?: { id: number; picked_at: string; item_ids: number[] }[];
 };
 
 type Phase = "waiting" | "pickup" | "done" | "void" | "transferred";
@@ -90,6 +109,55 @@ function orderPhase(o: Pick<AppOrderRow, "status" | "arrived">): {
   if (o.status === "shipping")
     return { phase: "waiting", label: "運送中", className: "text-amber-700 dark:text-amber-400" };
   return { phase: "waiting", label: "待到貨", className: "text-amber-700 dark:text-amber-400" };
+}
+
+/** 分身卡右上角的狀態字（= 會員 app 的 PHASE_LABEL，換成後台配色） */
+const PHASE_LABEL: Record<Phase, { label: string; className: string }> = {
+  waiting: { label: "待到貨", className: "text-amber-700 dark:text-amber-400" },
+  pickup: { label: "待取貨", className: "text-amber-700 dark:text-amber-400" },
+  done: { label: "已完成", className: "text-rose-700 dark:text-rose-400" },
+  void: { label: "訂單不成立", className: "text-red-700 dark:text-red-400" },
+  transferred: { label: "已轉讓", className: "text-zinc-400" },
+};
+
+/**
+ * 單一品項行屬於哪個分頁 = apps/member/src/components/OrderCard.tsx 的 itemPhase。
+ *
+ * 短收之後一張單常常是「一件已領走、一件根本還沒到」，整張塞同一個分頁
+ * 等於叫客人來拿沒到的貨 —— 團友手機上是依行分的，客服這邊也必須依行分，
+ * 否則兩邊的分頁筆數與金額直接對不起來。
+ */
+function itemPhase(order: Pick<AppOrderRow, "status">, item: AppOrderItem): Phase {
+  switch (order.status) {
+    case "cancelled":
+    case "expired":
+      return "void";
+    case "transferred_out":
+      return "transferred";
+  }
+  if (item.status === "picked_up") return "done";
+  if (["cancelled", "expired"].includes(item.status)) return "void";
+  // arrived 缺值一律當「沒到」，寧可少報到貨也不要叫客人白跑一趟
+  return item.arrived === true ? "pickup" : "waiting";
+}
+
+/** = 會員 app 的 splitOrderByPhase：一張單拆成數個只帶該分頁品項的分身 */
+function splitOrderByPhase(order: AppOrderRow): Map<Phase, AppOrderRow> {
+  const out = new Map<Phase, AppOrderRow>();
+  for (const it of order.items ?? []) {
+    const ph = itemPhase(order, it);
+    const cur = out.get(ph);
+    if (cur) (cur.items as AppOrderItem[]).push(it);
+    else out.set(ph, { ...order, items: [it] });
+  }
+  return out;
+}
+
+/** 這一組品項行還沒領走的貨值（把單頭應付分攤到各分頁用）= 會員 app 同名函式 */
+function unpickedSubtotal(items: AppOrderItem[]): number {
+  return items
+    .filter((i) => !["cancelled", "expired", "picked_up"].includes(i.status))
+    .reduce((s, i) => s + Number(i.subtotal ?? 0), 0);
 }
 
 function fmtAmount(n: number | string | null | undefined): string {
@@ -150,6 +218,19 @@ export function useMemberAppOrders(memberId: number, reloadTick = 0) {
       ]
         .filter((o) => orderPhase(o).phase !== "transferred")
         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      // 取貨紀錄 —— 「已完成」要依「客人那一次到店結單」分組（= 會員 app）。
+      // 拿不到就只是少了分組（卡片照列），不要讓整個視圖掛掉。
+      const eventsByOrder = await fetchReprintableEvents(rows.map((o) => o.id));
+      if (cancelled) return;
+      for (const o of rows) {
+        o.pickups = (eventsByOrder.get(o.id) ?? []).map((ev) => ({
+          id: ev.id,
+          picked_at: ev.created_at,
+          item_ids: ev.item_ids,
+        }));
+      }
+
       setOrders(rows);
       setLoading(false);
     })();
@@ -158,11 +239,33 @@ export function useMemberAppOrders(memberId: number, reloadTick = 0) {
     };
   }, [memberId, reloadTick]);
 
+  // 依**品項行**分桶 = 會員 app orders/page.tsx（2026-08-14 起）。整張單塞同一個
+  // 分頁會讓「一件已領走、一件還沒到」的單整張跑到待取貨 —— 團友手機上不是這樣分的。
+  //
+  // 「不成立」是後台才有的分頁（會員 app 2026-08-17 拿掉了），維持原本的**整張單**
+  // 語意：只有整張取消 / 逾期的單才進去，活單裡的斷貨行不另外拆一張卡進來。
   const buckets = useMemo(() => {
     const b: Record<Tab, AppOrderRow[]> = { all: orders, waiting: [], pickup: [], done: [], void: [] };
     for (const o of orders) {
-      const { phase } = orderPhase(o);
-      if (phase !== "transferred") b[phase].push(o);
+      if (orderPhase(o).phase === "void") {
+        b.void.push(o);
+        continue;
+      }
+      // 應付金額要**分攤**到各分身，不能每個分身都掛整張單的 outstanding ——
+      // 一張單同時出現在「待到貨」和「待取貨」時會被算兩次（未結金額重複計算是
+      // 這個 repo 踩過的雷）。分攤法與會員 app 逐字相同，表尾總金額才對得上。
+      const wholeUnpicked = unpickedSubtotal(o.items ?? []);
+      const outstanding = Number(o.outstanding_amount ?? o.payable_amount ?? 0);
+      for (const [phase, part] of splitOrderByPhase(o)) {
+        if (phase === "transferred" || phase === "void") continue;
+        b[phase as Exclude<Tab, "all" | "void">].push({
+          ...part,
+          outstanding_amount:
+            wholeUnpicked > 0
+              ? (outstanding * unpickedSubtotal(part.items ?? [])) / wholeUnpicked
+              : 0,
+        });
+      }
     }
     return b;
   }, [orders]);
@@ -175,6 +278,11 @@ export type MemberAppOrders = ReturnType<typeof useMemberAppOrders>;
 /**
  * 一個分桶的應付加總 = 會員 app orders/page.tsx 的 sumOrders：
  * outstanding_amount（還沒領走的貨），排除 cancelled / expired。
+ *
+ * 吃的是**分身**（依品項行拆過、outstanding 已按比例分攤），所以「待到貨 +
+ * 待取貨」相加仍等於整張單的未結金額，不會把同一張單算兩次。hasPicked 刻意
+ * 拿分身的 outstanding 比整張單的 payable_amount —— 逐字照抄會員 app，
+ * 兩邊的副標才會同時出現 / 同時消失。
  */
 export function outstandingTotals(list: AppOrderRow[]) {
   const active = list.filter((o) => !["cancelled", "expired"].includes(String(o.status ?? "")));
@@ -201,6 +309,11 @@ export function MemberOrdersAppView({
 }) {
   const { buckets, loading, err } = data;
   const [tab, setTab] = useState<Tab>("waiting");
+
+  // 「已完成」依「那一次到店結單」分組（= 會員 app 的同一支演算法）：客人一趟
+  // 拿走好幾個團的貨、當場付一次現金，平鋪的訂單列表拼不回那一次拿了什麼。
+  // 一張單分兩次取完會拆成兩張卡，各自掛在自己那一次底下。
+  const doneNodes = useMemo(() => buildDoneNodes(buckets.done), [buckets.done]);
 
   const bucket = buckets[tab];
   // = 會員 app orders/page.tsx：應付總金額只在待到貨 / 待取貨顯示
@@ -263,15 +376,60 @@ export function MemberOrdersAppView({
 
       {!loading && (
         <div className="max-h-[560px] space-y-3 overflow-auto pr-1">
-          {bucket.map((o) => (
-            <AppOrderCard key={o.id} order={o} onClick={() => onOpenOrder(o.id, o.order_no)} />
-          ))}
+          {tab === "done"
+            ? doneNodes.map((node) =>
+                node.kind === "visit" ? (
+                  <PickupVisitHeader key={node.key} visit={node.visit} />
+                ) : (
+                  <AppOrderCard
+                    key={node.key}
+                    order={node.order}
+                    viewPhase="done"
+                    onClick={() => onOpenOrder(node.order.id, node.order.order_no)}
+                  />
+                ),
+              )
+            : bucket.map((o, i) => (
+                // 分身卡的右上角狀態字要講「這一頁」的語意；「全部」不拆頁，維持整張單。
+                // 一張單會拆成數個分身，key 不能只用 order.id。
+                <AppOrderCard
+                  key={`${o.id}:${(o.items ?? [])[0]?.id ?? i}`}
+                  order={o}
+                  viewPhase={tab === "all" ? undefined : (tab as Phase)}
+                  onClick={() => onOpenOrder(o.id, o.order_no)}
+                />
+              ))}
         </div>
       )}
 
       <p className="text-[11px] text-zinc-400">
-        與會員 app「我的訂單」同一套資料與口徑（半年內、每類最多 100 筆）；點卡片可開後台訂單明細。
+        與會員 app「我的訂單」同一套資料與口徑（半年內、每類最多 100 筆）；「已完成」依客人
+        到店結單的那一次分組；點卡片可開後台訂單明細。
       </p>
+    </div>
+  );
+}
+
+// 一次到店結單的標題（= 會員 app 的 PickupVisitHeader）。
+// 措辭避開「結單」兩個字：卡片上的「結單日」是開團收單日，兩種意思擺一起會誤讀。
+function PickupVisitHeader({ visit }: { visit: PickupVisit }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50/60 px-4 py-2.5 dark:border-rose-900 dark:bg-rose-950/30">
+      <div className="min-w-0">
+        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          🧾 {formatVisitWhen(visit.pickedAt)} 取貨
+        </div>
+        <div className="text-xs text-zinc-500">
+          {visit.storeName && <>{visit.storeName} · </>}
+          {visit.orderCount} 筆訂單 · {visit.qty} 件
+        </div>
+      </div>
+      <div className="flex-shrink-0 text-right">
+        <div className="text-[11px] text-zinc-500">本次取貨金額</div>
+        <div className="text-lg font-semibold tabular-nums text-rose-700 dark:text-rose-400">
+          ${fmtAmount(visit.amount)}
+        </div>
+      </div>
     </div>
   );
 }
@@ -280,32 +438,53 @@ export function MemberOrdersAppView({
 const ACTIVE_ITEM_STATUSES = ["pending", "reserved", "ready"];
 
 // = apps/member/src/components/OrderCard.tsx 的卡片內容（後台配色 + 可點擊）
-function AppOrderCard({ order, onClick }: { order: AppOrderRow; onClick: () => void }) {
-  const phase = orderPhase(order);
+function AppOrderCard({
+  order,
+  onClick,
+  /**
+   * 這張卡是「某個分頁的分身」（只帶屬於該分頁的品項行）時傳入該分頁 ——
+   * 右上角狀態字改用分頁的語意，金額也要照卡片上真的列出來的行算
+   * （掛整張單的 items_total / payable_amount 會出現「1 件 $278」這種對不起來的
+   * 畫面）。不傳（「全部」分頁）就照舊顯示整張單。= 會員 app OrderCard 同一套。
+   */
+  viewPhase,
+}: {
+  order: AppOrderRow;
+  onClick: () => void;
+  viewPhase?: Phase;
+}) {
+  const phase = viewPhase ? { ...orderPhase(order), ...PHASE_LABEL[viewPhase] } : orderPhase(order);
+  // 分身卡實際列出來的貨值（斷貨 / 取消的行不算，跟件數同一套）
+  const visible = visibleTotals(order.items ?? []);
   // 內部 sentinel 團（店內現貨轉手單）印品項名，其餘印開團名稱 —— 見 lib/orderTitle
   const title = orderCardTitle(order);
   const totalQty = (order.items ?? []).reduce(
     (s, i) => (["cancelled", "expired"].includes(i.status) ? s : s + Number(i.qty ?? 0)),
     0,
   );
-  // = 會員端 OrderCard：部分取貨時逐行標「已取 / 未取」，客服看到的跟
-  // 團友手機上的一致（2026-08-13 中和店客訴：分不出哪行取了）
-  const showPickChips =
-    (order.items ?? []).some((i) => i.status === "picked_up") &&
-    (order.items ?? []).some((i) => ACTIVE_ITEM_STATUSES.includes(i.status));
-  const pickChip = (status: string) =>
-    !showPickChips ? null : status === "picked_up" ? (
-      <span className="ml-1.5 inline-block rounded bg-green-100 px-1 py-0.5 text-[10px] font-medium text-green-800 dark:bg-green-950 dark:text-green-300">
-        已取
-      </span>
-    ) : ACTIVE_ITEM_STATUSES.includes(status) ? (
+  // = 會員端 OrderCard：同一張卡裡混著不同階段的行時才逐行標，客服看到的跟
+  // 團友手機上的一致（2026-08-13 中和店客訴：分不出哪行取了）。
+  // 沒到貨的行講「未到貨」不講「未取」—— 後者會被讀成「貨在店裡等你」。
+  const phasesInCard = new Set((order.items ?? []).map((it) => itemPhase(order, it)));
+  const showPickChips = phasesInCard.size > 1;
+  const pickChip = (it: AppOrderItem) => {
+    if (!showPickChips) return null;
+    if (it.status === "picked_up")
+      return (
+        <span className="ml-1.5 inline-block rounded bg-green-100 px-1 py-0.5 text-[10px] font-medium text-green-800 dark:bg-green-950 dark:text-green-300">
+          已取
+        </span>
+      );
+    if (!ACTIVE_ITEM_STATUSES.includes(it.status)) return null;
+    return (
       <span className="ml-1.5 inline-block rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-        未取
+        {it.arrived === true ? "未取" : "未到貨"}
       </span>
-    ) : null;
+    );
+  };
+  const cardPayable = viewPhase ? visible.amount : Number(order.payable_amount ?? 0);
   const outstanding = Number(order.outstanding_amount ?? NaN);
-  const partlyPaid =
-    Number.isFinite(outstanding) && outstanding > 0 && outstanding < Number(order.payable_amount ?? 0);
+  const partlyPaid = Number.isFinite(outstanding) && outstanding > 0 && outstanding < cardPayable;
 
   return (
     <article
@@ -349,7 +528,7 @@ function AppOrderCard({ order, onClick }: { order: AppOrderRow; onClick: () => v
                     斷貨
                   </span>
                 )}
-                {pickChip(it.status)}
+                {pickChip(it)}
               </div>
               <div className="text-xs text-zinc-500">
                 {fmtAmount(it.unit_price)} × {it.qty}
@@ -369,7 +548,9 @@ function AppOrderCard({ order, onClick }: { order: AppOrderRow; onClick: () => v
       <div className="space-y-1 border-t border-zinc-100 px-4 py-2.5 text-sm dark:border-zinc-800">
         <div className="flex justify-between text-xs text-zinc-500">
           <span>商品（{totalQty} 件）</span>
-          <span className="tabular-nums">{fmtAmount(order.items_total)}</span>
+          <span className="tabular-nums">
+            {fmtAmount(viewPhase ? visible.amount : order.items_total)}
+          </span>
         </div>
         {Number(order.shipping_fee) > 0 && (
           <div className="flex justify-between text-xs text-zinc-500">
@@ -394,7 +575,7 @@ function AppOrderCard({ order, onClick }: { order: AppOrderRow; onClick: () => v
                 : "text-lg font-semibold tabular-nums text-rose-700 dark:text-rose-400"
             }
           >
-            ${fmtAmount(order.payable_amount)}
+            ${fmtAmount(viewPhase ? visible.amount : order.payable_amount)}
           </span>
         </div>
         {partlyPaid && (
