@@ -240,7 +240,9 @@ const AID_STATUS_BY_STAGE: Record<Stage, AidStatus[]> = {
   standby: [],
   in_transit: ["shipping"],
   done: ["ready", "completed", "partially_completed"],
-  rejected: ["cancelled"],
+  // view 的 stage CASE 是 ELSE 'rejected',所以 cancelled 以外的終態也要列進來,
+  // 否則 badge 數字(rpc_inbox_counts 走 view)會比列表多
+  rejected: ["cancelled", "expired", "transferred_out"],
 };
 const PICKING_STATUS_BY_STAGE: Record<Stage, string[]> = {
   pending: ["draft", "picking", "picked"],
@@ -494,10 +496,13 @@ async function fetchTransferRows(
   return { rows, total: count ?? 0 };
 }
 
-const AID_SELECT = `id, order_no, status, is_air_transfer, pickup_store_id, transferred_from_order_id, updated_at,
-       campaign:group_buy_campaigns(id, campaign_no, name),
-       store:stores!customer_orders_pickup_store_id_fkey(id, name),
-       items:customer_order_items!inner(id, source)`;
+// 收件匣的互助 / 空中轉列一律走 v_hq_inbox_aid（20260818000040）：
+// 它已經排除同店轉單（貨沒有移動、總倉不用確認也不用派貨），並把轉出端
+// （來源單 / 轉出店）查好 —— PostgREST 直查 customer_orders 做不到
+// 「來源單.pickup_store_id = 本單.pickup_store_id」這種欄位對欄位比較。
+const AID_SELECT = `id, order_no, status, is_air_transfer, pickup_store_id,
+       transferred_from_order_id, updated_at, campaign_no, store_name,
+       from_order_no, from_store_id, from_store_name, line_count`;
 
 type AidQueryRow = {
   id: number;
@@ -507,76 +512,42 @@ type AidQueryRow = {
   pickup_store_id: number | null;
   transferred_from_order_id: number | null;
   updated_at: string;
-  campaign?: { id: number; campaign_no: string; name: string } | null;
-  store?: { id: number; name: string } | null;
-  items?: { id: number }[];
+  campaign_no: string | null;
+  store_name: string | null;
+  from_order_no: string | null;
+  from_store_id: number | null;
+  from_store_name: string | null;
+  line_count: number | null;
 };
 
-// 來源單 → 轉出店。查失敗不擋收件匣(路徑欄退回「—」而已),所以不 throw。
-async function fetchAidSourceMap(
-  sb: SBClient,
-  srcIds: number[],
-): Promise<Map<number, { order_no: string; store_id: number | null; store_name: string | null }>> {
-  const map = new Map<number, { order_no: string; store_id: number | null; store_name: string | null }>();
-  const ids = Array.from(new Set(srcIds));
-  if (ids.length === 0) return map;
-  const { data } = await sb
-    .from("customer_orders")
-    .select("id, order_no, pickup_store_id, store:stores!customer_orders_pickup_store_id_fkey(name)")
-    .in("id", ids);
-  const rows = (data ?? []) as unknown as Array<{
-    id: number;
-    order_no: string;
-    pickup_store_id: number | null;
-    store: { name: string } | { name: string }[] | null;
-  }>;
-  for (const r of rows) {
-    map.set(r.id, {
-      order_no: r.order_no,
-      store_id: r.pickup_store_id,
-      store_name: (Array.isArray(r.store) ? r.store[0]?.name : r.store?.name) ?? null,
-    });
-  }
-  return map;
-}
-
 async function toAidRows(sb: SBClient, aidRows: AidQueryRow[], airMode: "aid" | "air"): Promise<Row[]> {
-  const [itemsMap, srcMap] = await Promise.all([
-    fetchItemsSummaryMap(sb, "customer_order_items", "order_id", aidRows.map((a) => a.id), "qty"),
-    fetchAidSourceMap(
-      sb,
-      aidRows.map((a) => a.transferred_from_order_id).filter((x): x is number => x != null),
-    ),
-  ]);
-  return aidRows.map((a) => {
-    const src = a.transferred_from_order_id != null ? srcMap.get(a.transferred_from_order_id) : undefined;
-    return {
-      key: `${airMode}-${a.id}`,
-      source: airMode,
-      ts: new Date(a.updated_at).getTime(),
-      stage: classifyAid(a.status),
-      raw: {
-        id: a.id,
-        order_no: a.order_no,
-        status: a.status,
-        is_air_transfer: a.is_air_transfer,
-        pickup_store_id: a.pickup_store_id,
-        store_name: a.store?.name ?? null,
-        campaign_no: a.campaign?.campaign_no ?? null,
-        updated_at: a.updated_at,
-        line_count: a.items?.length ?? 0,
-        items_summary: itemsMap.get(a.id) ?? "",
-        transferred_from_order_id: a.transferred_from_order_id,
-        from_order_no: src?.order_no ?? null,
-        from_store_id: src?.store_id ?? null,
-        from_store_name: src?.store_name ?? null,
-      },
-    };
-  });
+  const itemsMap = await fetchItemsSummaryMap(
+    sb, "customer_order_items", "order_id", aidRows.map((a) => a.id), "qty",
+  );
+  return aidRows.map((a) => ({
+    key: `${airMode}-${a.id}`,
+    source: airMode,
+    ts: new Date(a.updated_at).getTime(),
+    stage: classifyAid(a.status),
+    raw: {
+      id: a.id,
+      order_no: a.order_no,
+      status: a.status,
+      is_air_transfer: a.is_air_transfer,
+      pickup_store_id: a.pickup_store_id,
+      store_name: a.store_name,
+      campaign_no: a.campaign_no,
+      updated_at: a.updated_at,
+      line_count: a.line_count ?? 0,
+      items_summary: itemsMap.get(a.id) ?? "",
+      transferred_from_order_id: a.transferred_from_order_id,
+      from_order_no: a.from_order_no,
+      from_store_id: a.from_store_id,
+      from_store_name: a.from_store_name,
+    },
+  }));
 }
 
-// airMode: "aid" = 互助訂單(排除空中轉,只 is_air_transfer 為 null/false)
-//          "air" = 空中轉(只 is_air_transfer=true)
 async function fetchAidRows(
   sb: SBClient,
   stage: Stage | null,
@@ -588,14 +559,13 @@ async function fetchAidRows(
 ): Promise<{ rows: Row[]; total: number }> {
   if (stage === "standby") return { rows: [], total: 0 }; // 只有 restock 有候補
   let q = sb
-    .from("customer_orders")
+    .from("v_hq_inbox_aid")
     .select(AID_SELECT, { count: "exact" })
-    .eq("items.source", "aid_transfer")
     .order("updated_at", { ascending: false });
   if (stage) q = q.in("status", AID_STATUS_BY_STAGE[stage] as string[]);
   if (aidStatus) q = q.eq("status", aidStatus);
-  if (airMode === "air") q = q.eq("is_air_transfer", true);
-  else q = q.or("is_air_transfer.is.null,is_air_transfer.eq.false");
+  // view 的 is_air_transfer 已 COALESCE 成 false,不會有 null
+  q = q.eq("is_air_transfer", airMode === "air");
   if (dateFrom) q = q.gte("updated_at", `${dateFrom}T00:00:00`);
   if (dateTo) q = q.lte("updated_at", `${dateTo}T23:59:59.999`);
   const start = (page - 1) * PAGE_SIZE;
@@ -826,18 +796,25 @@ async function fetchTransferRowsByIds(sb: SBClient, ids: number[]): Promise<Row[
 }
 
 // airMode: "aid" 排除空中轉 / "air" 只留空中轉(tag 用,決定 row.source 與 key 前綴)
-async function fetchAidRowsByIds(sb: SBClient, ids: number[], airMode: "aid" | "air" = "aid"): Promise<Row[]> {
+// v_hq_inbox 的 aid 分支不分空中轉(row_key 一律 aid-<id>),所以這裡**不能**濾
+// is_air_transfer —— 濾掉的話那幾列在「全部」分頁會被 detailMap 查不到而靜靜消失,
+// 但 total 仍然把它們算進去(筆數對不上列數)。列的 source 改成逐列判定。
+async function fetchAidRowsByIds(sb: SBClient, ids: number[]): Promise<Row[]> {
   if (ids.length === 0) return [];
-  let q = sb
-    .from("customer_orders")
+  const { data, error } = await sb
+    .from("v_hq_inbox_aid")
     .select(AID_SELECT)
-    .eq("items.source", "aid_transfer")
     .in("id", ids);
-  if (airMode === "air") q = q.eq("is_air_transfer", true);
-  else q = q.or("is_air_transfer.is.null,is_air_transfer.eq.false");
-  const { data, error } = await q;
   if (error) throw new Error("aid: " + error.message);
-  return toAidRows(sb, (data ?? []) as unknown as AidQueryRow[], airMode);
+  const rows = (data ?? []) as unknown as AidQueryRow[];
+  const built = await Promise.all(
+    rows.map(async (r) => {
+      const [row] = await toAidRows(sb, [r], r.is_air_transfer ? "air" : "aid");
+      // key 要對回 v_hq_inbox 的 row_key(aid-<id>),空中轉才不會落空
+      return { ...row, key: `aid-${r.id}` };
+    }),
+  );
+  return built;
 }
 
 async function fetchShortageRowsByIds(sb: SBClient, ids: number[]): Promise<Row[]> {
@@ -1032,9 +1009,8 @@ function HqInboxContent() {
           (async () => {
             const result: Record<Stage, number> = { ...fallback };
             const { data: rows } = await sb
-              .from("customer_orders")
-              .select("status, items:customer_order_items!inner(source)")
-              .eq("items.source", "aid_transfer")
+              .from("v_hq_inbox_aid")
+              .select("status")
               .eq("is_air_transfer", true);
             for (const r of (rows as { status: AidStatus }[] | null) ?? []) {
               const stg = classifyAid(r.status);
@@ -2722,9 +2698,9 @@ function MailRow({
 // 互助 / 空中轉列的標題：貨「從哪一家店 → 到哪一家店」。
 // 原本標的是「開團 → 取貨店」——取貨店只是收貨的那一頭，總倉看不出要跟誰收貨，
 // 而經總倉的互助正是總倉要親手轉交的（Leg-1 來源店 → 總倉、Leg-2 總倉 → 收貨店，
-// 20260510000004）。另外全站 375 張互助轉入單裡有 359 張其實是同店轉單
-// （只是換客人、貨沒離開本店，rpc_ship_aid_order 也會擋下派貨），標出來才不會
-// 跟真的要中轉的混在一起。
+// 20260510000004）。同店轉單（只是換客人、貨沒離開本店）在「待處理 / 在途」已經
+// 被 v_hq_inbox_aid 濾掉（20260818000040），但已完成 / 已取消的歷史還看得到，
+// 所以這個標記留著 —— 全站 375 張轉入單裡有 359 張是這種。
 function AidRouteTitle({ a }: { a: AidRaw }) {
   const dest = a.store_name ?? "—";
   const sameStore = a.from_store_id != null && a.from_store_id === a.pickup_store_id;
