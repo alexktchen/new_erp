@@ -23,6 +23,7 @@ import { aidRouteLabel, aidStageLabel, isAidInFlight } from "@/lib/aidTransfer";
 import { internalOrderSource } from "@/lib/orderTitle";
 import { translateRpcError } from "@/lib/rpcError";
 import { parseReturnNote } from "@/lib/returnNote";
+import { GIFT_ITEM_SELECT, giftTitle, isCampaignGiftLine, isGiftLine } from "@/lib/orderGift";
 import {
   fetchReprintableEvents,
   pickupEventLabel,
@@ -59,6 +60,10 @@ type ItemRow = {
   qty: number;
   unit_price: number;
   status: string;
+  // 贈品標記（20260819000000）：品項自己標的 + 開團層級的促銷贈品
+  is_gift: boolean | null;
+  gift_reason: string | null;
+  campaign_item: { is_gift: boolean | null; gift_reason: string | null } | null;
   stockout_at: string | null;
   source: string;
   notes: string | null;
@@ -297,7 +302,7 @@ export function OrderDetail({
           .select("id, order_no, status, stockout_at, pickup_deadline, nickname_snapshot, created_at, updated_at, pickup_store_id, campaign_id, transferred_from_order_id, is_air_transfer, discount_amount, discount_percent, wallet_paid_amount, payment_status, paid_at, notes, member:members(id, name, phone, member_no), campaign:group_buy_campaigns(id, campaign_no, name), store:stores!customer_orders_pickup_store_id_fkey(id, name)")
           .eq("id", orderId).maybeSingle(),
         sb.from("customer_order_items")
-          .select("id, qty, unit_price, status, stockout_at, source, notes, discount_amount, discount_percent, created_at, updated_at, created_by, updated_by, sku:skus(id, sku_code, product_name, variant_name)")
+          .select(`id, qty, unit_price, status, stockout_at, source, notes, discount_amount, discount_percent, created_at, updated_at, created_by, updated_by, ${GIFT_ITEM_SELECT}, sku:skus(id, sku_code, product_name, variant_name)`)
           .eq("order_id", orderId)
           .order("created_at", { ascending: true }),
         sb.from("transfers")
@@ -508,6 +513,13 @@ export function OrderDetail({
   // 與 v_customer_order_summary.items_total / rpc_wallet_pay_order 同一套過濾
   //（migration 20260808000010）。
   const activeItems = items.filter((i) => !["cancelled", "expired"].includes(i.status));
+  // 取貨會被零元守衛擋下的品項：還沒取貨、單價 $0、也還沒被標成贈品。
+  // 用 itemEffective（含未存檔的草稿改價），避免「已經改好價還在叫你標贈品」。
+  const zeroPriceItems = items.filter(
+    (i) => ["pending", "reserved", "ready"].includes(i.status)
+      && Number(itemEffective(i).unit_price) === 0
+      && !isGiftLine(i),
+  );
 
   const totalQty = activeItems.reduce((s, i) => s + Number(itemEffective(i).qty), 0);
   const grossTotal = activeItems.reduce((s, i) => {
@@ -812,6 +824,67 @@ export function OrderDetail({
     if (rpcErr) { alert(`刪除失敗：${translateRpcError(rpcErr)}`); return; }
     const cancelled = !!(data as { order_cancelled?: boolean } | null)?.order_cancelled;
     alert(cancelled ? "已刪除品項，整單已一併取消" : "已刪除品項");
+    setReloadTick((n) => n + 1);
+  }
+
+  // 標記／取消標記「贈品」（$0 但刻意送的）。標了就免除取貨零元守衛。
+  // 權限與備註同一套（HQ / 總倉 / 自店 = canEditNotes），理由必填、寫 audit log。
+  // 開團層級的促銷贈品（campaign_items.is_gift）在這裡取消不掉 —— 後端會擋並說明
+  // 要去開團商品那邊改，避免「按了沒反應」。
+  async function toggleGift(it: ItemRow) {
+    if (!head) return;
+    const label = it.sku ? (it.sku.variant_name || it.sku.product_name || it.sku.sku_code) : `#${it.id}`;
+    const turningOn = !it.is_gift;
+    let reason: string | null = null;
+    if (turningOn) {
+      reason = prompt(
+        `標記為贈品：${label}（${head.order_no}）\n這個品項會以 $0 交給客人（不收錢）。\n請輸入原因（例：促銷買二送一 / 客訴補償）：`,
+      );
+      if (reason === null) return;
+      if (!reason.trim()) { alert("請填寫贈品原因（會寫進異動紀錄）"); return; }
+    } else if (!confirm(`取消贈品標記：${label}\n取消後這個品項在取貨時會被零元守衛擋下，要補上金額才能取貨。確定嗎？`)) {
+      return;
+    }
+    const sb = getSupabase();
+    const { data: sess } = await sb.auth.getSession();
+    const operator = sess.session?.user?.id ?? null;
+    if (!operator) { alert("尚未登入"); return; }
+    const { error: rpcErr } = await sb.rpc("rpc_mark_order_item_gift", {
+      p_order_id: head.id,
+      p_item_id: it.id,
+      p_is_gift: turningOn,
+      p_operator: operator,
+      p_reason: reason?.trim() ?? null,
+    });
+    if (rpcErr) { alert(`${turningOn ? "標記" : "取消"}贈品失敗：${translateRpcError(rpcErr)}`); return; }
+    setReloadTick((n) => n + 1);
+  }
+
+  // 整張單的 $0 品項一次標成贈品 —— 促銷活動送的東西通常整張單好幾項，
+  // 一列一列點太慢。批次版與逐列版同一套守衛（未取貨 + $0 + 理由必填 + 逐列 audit）。
+  async function markAllZeroGift() {
+    if (!head) return;
+    const targets = zeroPriceItems;
+    if (targets.length === 0) return;
+    const reason = prompt(
+      `把這張單的 ${targets.length} 個 $0 品項全部標成贈品（${head.order_no}）\n` +
+      `這些品項會以 $0 交給客人（不收錢），每一列都會寫進異動紀錄。\n\n` +
+      `請輸入原因（例：週年慶滿額贈 / 買二送一）：`,
+    );
+    if (reason === null) return;
+    if (!reason.trim()) { alert("請填寫贈品原因（會寫進異動紀錄）"); return; }
+    const sb = getSupabase();
+    const { data: sess } = await sb.auth.getSession();
+    const operator = sess.session?.user?.id ?? null;
+    if (!operator) { alert("尚未登入"); return; }
+    const { data, error: rpcErr } = await sb.rpc("rpc_mark_zero_price_items_gift", {
+      p_order_ids: [head.id],
+      p_operator: operator,
+      p_reason: reason.trim(),
+    });
+    if (rpcErr) { alert(`標記贈品失敗：${translateRpcError(rpcErr)}`); return; }
+    const r = (data ?? null) as { items: number } | null;
+    alert(`已把 ${r?.items ?? 0} 個品項標成贈品，取貨不再被擋`);
     setReloadTick((n) => n + 1);
   }
 
@@ -1294,6 +1367,23 @@ export function OrderDetail({
             })()}
           </div>
         </div>
+        {/* $0 品項提示 —— 取貨會被擋（rpc_record_pickup 零元守衛）。兩條路：
+            漏填金額就改單價，刻意送的（促銷 / 補償）就標贈品。促銷走這顆一鍵標。*/}
+        {zeroPriceItems.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+            <span className="font-semibold">⚠️ 有 {zeroPriceItems.length} 個品項的單價是 $0</span>
+            <span>取貨會被擋下。漏填金額就改單價；刻意送的就標成贈品。</span>
+            {canEditNotes && (
+              <SpinButton
+                onClick={markAllZeroGift}
+                title="把這張單所有未取貨的 $0 品項一次標成贈品（會要求填原因，每一列都寫入異動紀錄）"
+                className="ml-auto shrink-0 rounded-md border border-amber-400 bg-white px-2.5 py-1 font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-700 dark:bg-transparent dark:text-amber-300 dark:hover:bg-amber-950"
+              >
+                🎁 整單標成贈品
+              </SpinButton>
+            )}
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-zinc-200 text-xs dark:divide-zinc-800">
             <thead className="bg-zinc-50 dark:bg-zinc-900">
@@ -1335,6 +1425,29 @@ export function OrderDetail({
                         </span>
                       )}
                       {showItemSource && <ItemSourceBadge source={it.source} className="ml-1.5" />}
+                      {/* 🎁 贈品：$0 但刻意送的（促銷 / 補償）→ 取貨零元守衛放行。
+                          開團設定的贈品整團適用，這裡只顯示、不給取消（後端也會擋）。*/}
+                      {isGiftLine(it) && (
+                        <span
+                          className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                          title={giftTitle(it)}
+                        >
+                          🎁 贈品{isCampaignGiftLine(it) ? "（開團設定）" : ""}
+                        </span>
+                      )}
+                      {canEditNotes && !isPicked && !isCampaignGiftLine(it)
+                        && !["cancelled", "expired"].includes(it.status)
+                        && (it.is_gift || Number(eff.unit_price) === 0) && (
+                        <SpinButton
+                          onClick={() => toggleGift(it)}
+                          title={it.is_gift
+                            ? "取消贈品標記（取消後取貨會被零元守衛擋下，要補金額）"
+                            : "這個品項是刻意送的贈品（促銷 / 補償）→ 標記後不用補金額就能取貨。會要求填原因並寫入異動紀錄。"}
+                          className="ml-1.5 rounded border border-amber-400 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950"
+                        >
+                          {it.is_gift ? "取消贈品" : "🎁 標為贈品"}
+                        </SpinButton>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-right font-mono">
                       {isPicked ? (

@@ -37,7 +37,10 @@ type Row = {
   // 漏填金額 —— 取貨時 rpc_record_pickup 的零元守衛會擋下整張單。
   // 【內部】xx 店 / RR- / OV- 容器單（member_type='store_internal'）恆為 0：
   // 池子單價本來就可能是 0，不是漏填。
+  // 20260819000000 起排除已標記的贈品（刻意送的不算漏填）。
   zero_price_lines: number | null;
+  // 贈品行數（開團設定的促銷贈品 + 這張單標的）。跟 $0 提示互斥，純顯示用。
+  gift_lines: number | null;
 };
 
 type Campaign = { id: number; campaign_no: string; name: string; cover_image_url: string | null; start_at: string | null };
@@ -331,6 +334,21 @@ function ZeroPriceBadge({ lines }: { lines: number | null }) {
   );
 }
 
+// 「這張單有贈品」🎁 標 — gift_lines 同樣來自 v_admin_orders_list（20260819000000）。
+// 贈品是刻意送的（促銷 / 補償），不是漏填，所以不紅標；但要看得到，
+// 免得「$0 卻沒被擋」看起來像守衛壞了。
+function GiftBadge({ lines }: { lines: number | null }) {
+  if (!lines || lines <= 0) return null;
+  return (
+    <span
+      title="這張單有被標記為贈品的品項（開團設定的促銷贈品，或這張單標記的）。贈品不受取貨零元守衛限制。"
+      className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+    >
+      🎁 贈品 ×{lines}
+    </span>
+  );
+}
+
 export default function OrdersListPage() {
   return (
     <Suspense fallback={<LoadingBlock />}>
@@ -421,6 +439,7 @@ function OrdersListContent() {
   // 批量列印用的勾選（跨分頁累加；換 tab / 改篩選會清空，避免印到看不見的單）
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulkPrintErr, setBulkPrintErr] = useState<string | null>(null);
+  const [bulkGiftMsg, setBulkGiftMsg] = useState<string | null>(null);
 
   // KPI trend (當月 1 號 ~ 今天 每日 + 本月累計、套 filter 開團+店家、排除 transferred_out)
   const [trend, setTrend] = useState<TrendData | null>(null);
@@ -604,7 +623,7 @@ function OrdersListContent() {
         const base = getSupabase()
           .from("v_admin_orders_list")
           .select(
-            "id, order_no, campaign_id, member_id, nickname_snapshot, pickup_store_id, pickup_deadline, status, transferred_from_order_id, created_at, updated_at, zero_price_lines"
+            "id, order_no, campaign_id, member_id, nickname_snapshot, pickup_store_id, pickup_deadline, status, transferred_from_order_id, created_at, updated_at, zero_price_lines, gift_lines"
               + (activeSkuId ? ITEM_EMBED : ""),
             { count: "exact" },
           )
@@ -1023,6 +1042,41 @@ function OrdersListContent() {
     }
   }
 
+  // 批次標贈品 —— 促銷活動的正規流程：篩「只看 $0」＋開團／門市 → 選取 → 一次標完。
+  // 贈品是掛在訂單上的（同一個 SKU 有人買、有人是送的），所以入口在訂單這邊，
+  // 不是開團商品那邊（那個一標就把所有人的單價歸零，買的那幾張也跟著變 $0）。
+  // 逐張走 _check_order_edit_notes_perm：選到別人家的單會整批擋下並指名是哪一張。
+  async function bulkMarkGift() {
+    setBulkGiftMsg(null);
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    const reason = prompt(
+      `把選取的 ${ids.length} 張訂單裡「還沒取貨、單價 $0」的品項全部標成贈品。\n` +
+      `這些品項會以 $0 交給客人（不收錢），每一列都會寫進異動紀錄。\n\n` +
+      `請輸入原因（例：週年慶滿額贈 / 買二送一）：`,
+    );
+    if (reason === null) return;
+    if (!reason.trim()) { setBulkGiftMsg("請填寫贈品原因（會寫進異動紀錄）"); return; }
+    const sb = getSupabase();
+    const { data: sess } = await sb.auth.getSession();
+    const operator = sess.session?.user?.id ?? null;
+    if (!operator) { setBulkGiftMsg("尚未登入"); return; }
+    const { data, error: rpcErr } = await sb.rpc("rpc_mark_zero_price_items_gift", {
+      p_order_ids: ids,
+      p_operator: operator,
+      p_reason: reason.trim(),
+    });
+    if (rpcErr) { setBulkGiftMsg(translateRpcError(rpcErr)); return; }
+    const r = (data ?? null) as { orders: number; items: number; skipped_internal: number } | null;
+    setBulkGiftMsg(
+      `已把 ${r?.items ?? 0} 個品項（${r?.orders ?? 0} 張訂單）標成贈品，取貨不再被擋`
+      + ((r?.skipped_internal ?? 0) > 0 ? `；略過 ${r?.skipped_internal} 張【內部】容器單` : "")
+      + ((r?.items ?? 0) === 0 ? "（選取的訂單沒有未取貨的 $0 品項）" : ""),
+    );
+    setSelected(new Set());
+    setReloadOrders((n) => n + 1);
+  }
+
   async function bulkPrint(kind: "receipt" | "slip") {
     setBulkPrintErr(null);
     const ids = Array.from(selected);
@@ -1168,7 +1222,8 @@ function OrdersListContent() {
       {/* ⚠ 漏填金額提示 — 目前 tab + 篩選底下有幾張訂單含 $0 品項。
           $0 幾乎都是開團 / 代 key 時漏填單價（線上抽查 notes 全為 NULL，沒有一筆是
           刻意的贈品），取貨那一刻就是收錢的時候 → 不補金額等於把貨白送。
-          取貨頁與 rpc_record_pickup 會擋下這種單，所以這裡要讓人一眼看到、點得進去。*/}
+          取貨頁與 rpc_record_pickup 會擋下這種單，所以這裡要讓人一眼看到、點得進去。
+          刻意送的贈品（開團設定的促銷贈品 / 訂單上標的）不算在這裡（20260819000000）。*/}
       {(zeroOnly || (zeroCount ?? 0) > 0) && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
           <span className="font-semibold">
@@ -1176,6 +1231,7 @@ function OrdersListContent() {
           </span>
           <span className="text-xs">
             可能是開團時漏填金額。這些單在取貨頁會被擋下，請先補上金額（點訂單開明細改單價，或在取貨頁該品項旁直接補填）。
+            促銷贈品請改在開團商品或該品項標「🎁 贈品」，標了就不會再擋。
           </span>
           <SpinButton
             type="button"
@@ -1436,7 +1492,7 @@ function OrdersListContent() {
           </span>
           {selected.size > 0 && (
             <SpinButton
-              onClick={() => { setSelected(new Set()); setBulkPrintErr(null); }}
+              onClick={() => { setSelected(new Set()); setBulkPrintErr(null); setBulkGiftMsg(null); }}
               className="text-zinc-500 underline-offset-2 hover:underline"
             >
               清除
@@ -1452,6 +1508,14 @@ function OrdersListContent() {
               🖨️ 補印收據
             </SpinButton>
             <SpinButton
+              onClick={bulkMarkGift}
+              disabled={selected.size === 0}
+              title="把選取訂單裡「還沒取貨、單價 $0」的品項全部標成贈品（不收錢就交給客人）。會要求填原因，每一列都寫入異動紀錄。"
+              className="rounded-md border border-amber-400 px-2 py-1 font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-40 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950"
+            >
+              🎁 標為贈品
+            </SpinButton>
+            <SpinButton
               onClick={() => bulkPrint("slip")}
               disabled={selected.size === 0}
               title="列印小白單（取貨清單，只列還沒取的品項）— 同一會員的多張單合印一張"
@@ -1462,6 +1526,9 @@ function OrdersListContent() {
           </div>
           {bulkPrintErr && (
             <div className="w-full text-amber-700 dark:text-amber-400">{bulkPrintErr}</div>
+          )}
+          {bulkGiftMsg && (
+            <div className="w-full text-amber-700 dark:text-amber-400">{bulkGiftMsg}</div>
           )}
         </div>
       )}
@@ -1567,6 +1634,7 @@ function OrdersListContent() {
                 <span>共 {sum?.totalQty ?? 0} 件</span>
                 <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">${sum?.totalAmount ?? 0}</span>
                 <ZeroPriceBadge lines={r.zero_price_lines} />
+                <GiftBadge lines={r.gift_lines} />
                 <span
                   className="ml-auto"
                   title={`訂單日：${new Date(r.created_at).toLocaleString("zh-TW", { hour12: false })}\n更新日：${new Date(r.updated_at).toLocaleString("zh-TW", { hour12: false })}`}
@@ -1699,6 +1767,11 @@ function OrdersListContent() {
                     {(r.zero_price_lines ?? 0) > 0 && (
                       <div className="mt-0.5">
                         <ZeroPriceBadge lines={r.zero_price_lines} />
+                      </div>
+                    )}
+                    {(r.gift_lines ?? 0) > 0 && (
+                      <div className="mt-0.5">
+                        <GiftBadge lines={r.gift_lines} />
                       </div>
                     )}
                   </Td>
