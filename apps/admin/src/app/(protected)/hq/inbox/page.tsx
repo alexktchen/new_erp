@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { translateRpcError } from "@/lib/rpcError";
@@ -945,8 +945,37 @@ function HqInboxContent() {
 
   // server-side counts: per source × per stage(badge / tab 用)
   const [counts, setCounts] = useState<Record<SourceTag, Record<Stage, number>> | null>(null);
-  // 異常 chip count(由 <ExceptionsContent /> 透過 onCountChange 自報,不走 rpc_inbox_counts)
-  const [exceptionCount, setExceptionCount] = useState<number>(0);
+  // 異常 chip count = 異常「四類全算」(rpc_hq_exceptions 的 counts.all)
+  //
+  // 口徑由老闆 2026-08-21 裁示:chip 標籤寫「⚠️ 異常」,點進去的清單預設也是「全部」分頁,
+  // 徽章就該等於那個「全部」的數字。
+  //
+  // 為什麼 counts.all 是安全的(2026-08-21 老闆截圖實證):
+  //   進貨短少 3 ＋ 進貨破損 2 ＋ 過量進貨 78 ＋ 收貨短少 109 = 192 = 全部分頁的數字
+  //   → 四類加總剛好等於 all ⇒ 正式庫的 v_hq_exceptions 已是套過
+  //     20260811020010_hq_exceptions_drop_customer_shortage 的版本,
+  //     沒有已廢棄的 customer_shortage 殘留在 all 裡面
+  //     (ExceptionsContent.tsx 的 rows filter 仍留著當防線,不要拿掉)。
+  // 而且 <ExceptionsContent> 透過 onCountChange 回報的就是 cnts.all
+  //   (ExceptionsContent.tsx:189)⇒ 兩邊同口徑,點進去前後不會跳動。
+  //
+  // counts 在 RPC 內是 FROM ex(整個 view、未依 p_type 過濾)算的
+  //   (20260704000020_hq_exceptions_view_and_pagination.sql:273-283),
+  //   所以帶哪個 p_type 都拿得到同一份 counts;這裡帶 'all' 只是讓意圖跟讀的欄位一致。
+  //
+  // 這個數字必須在收件匣就先抓好:2026-08-21 線上實測 844 件的短收躺著沒人處理,
+  // 就是因為它一直顯示 0(舊版只有 <ExceptionsContent /> 掛載時才會被填 → 要先點進異常分頁)。
+  // null = 「還沒成功抓到過」(還在查,或第一次就失敗)⇒ 徽章顯示「—」,不顯示 0。
+  //   ⛔ 不可以用 0 當初值:0 在這裡有兩種完全相反的意思 ——
+  //      「查過了,真的沒有異常」vs「根本沒查到」,而徽章的規則是 0 就不畫
+  //      ⇒ 兩種情況長得一模一樣,正是這個切片一開始要解決的「一直顯示 0」的變形。
+  //      (2026-08-21 複審 P1)
+  // 第一次成功之後才進入數字狀態;之後再失敗維持前一個值(見下面那個 effect)。
+  const [exceptionCount, setExceptionCount] = useState<number | null>(null);
+  // 點進異常分頁後 <ExceptionsContent /> 每抓完一次都會回報筆數(cnts.all,與徽章同口徑)。
+  // 這裡只把它當「清單有變動」的訊號用,由下面那個 effect 自己重抓一次
+  // (處理掉一筆後徽章才會跟著少),不直接把回報值塞進徽章 —— 少一條資料來源少一種不一致。
+  const [exceptionTick, setExceptionTick] = useState(0);
   // server-side total: 當前 (source, stage) 篩選的總數
   const [total, setTotal] = useState(0);
   // 載入狀態
@@ -1038,7 +1067,7 @@ function HqInboxContent() {
           air: airCounts,
           shortage: { ...fallback, ...(raw.shortage ?? {}) },
           picking: pickingCounts,
-          exception: { ...fallback }, // 由 <ExceptionsContent /> 透過 onCountChange callback 自報、不走 rpc
+          exception: { ...fallback }, // 異常徽章走獨立的 exceptionCount(rpc_hq_exceptions),不走 rpc_inbox_counts
         };
         setCounts(newCounts);
       } catch {
@@ -1049,6 +1078,49 @@ function HqInboxContent() {
       cancelled = true;
     };
   }, [reloadTick]);
+
+  // <ExceptionsContent onCountChange> 用:必須是「穩定」的 function —— 它的 useEffect
+  // deps 含 onCountChange,傳 inline arrow 會讓那個 effect 每次 render 都重跑(無限抓)。
+  const lastReportedExceptionTotal = useRef<number | null>(null);
+  const handleExceptionListChanged = useCallback((reportedTotal: number) => {
+    // 同一個數字重複回報(切分頁籤 / 換頁)不必重抓;真的變了(處理掉一筆)才重抓
+    if (lastReportedExceptionTotal.current === reportedTotal) return;
+    lastReportedExceptionTotal.current = reportedTotal;
+    setExceptionTick((t) => t + 1);
+  }, []);
+
+  // 異常 chip 的筆數(四類全算)— 不等使用者點進異常分頁就先抓好
+  //
+  // ⚠️ 故意獨立成一個 effect、不併進上面那個 Promise.all:rpc_hq_exceptions 內部是
+  // WITH ex AS MATERIALIZED (SELECT * FROM v_hq_exceptions),每次都把整個 view 算完
+  // (p_page_size 省的是傳輸不是計算)。併進 Promise.all 會讓撿貨單 / 補貨申請 / 轉貨單
+  // 那幾個徽章一起等它 → 分開之後,慢的只有異常那一顆數字,收件匣其餘內容不受影響。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const sb = getSupabase();
+        const { data, error: err } = await sb.rpc("rpc_hq_exceptions", {
+          p_type: "all",
+          p_page: 1,
+          p_page_size: 1, // 只要 counts,不要 rows
+        });
+        if (cancelled || err) return;
+        // counts.all = 四類總和(口徑理由見 exceptionCount 宣告處)
+        const n = (data as { counts?: Record<string, number> } | null)?.counts?.all;
+        // 抓不到就維持前一個值,不歸零(歸零等於又回到「永遠顯示 0」的老問題);
+        // 真的是 0 筆時 n === 0,不會被這一行擋掉。
+        // 第一次就抓不到 ⇒ 維持初值 null ⇒ 徽章顯示「—」,不會假裝成 0。
+        if (n == null) return;
+        setExceptionCount(Number(n));
+      } catch {
+        // 同上:失敗不歸零
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadTick, exceptionTick]);
 
   // 抓當前 view 的 rows(server-side pagination)
   // 變動觸發:source / stage / page / 日期 / Aid 篩選 / reloadTick
@@ -1829,9 +1901,11 @@ function HqInboxContent() {
             exception: "⚠️ 異常",
           } as const)[s];
           // chip 顯示「該來源」的待處理數(從 cached counts 算,固定值,跟 stage 切換無關)
-          // exception 是 client-side 計算、直接使用 exceptionCount
+          // exception 走自己的 exceptionCount = 異常四類總和(counts.all,理由見宣告處註解),
+          //   跟點進去看到的「全部」分頁同一個數字
           // air 顯示「在途」數(空中轉自動出貨,貨在飛=in_transit),非 pending
-          const count = s === "exception"
+          // null ＝ 還沒成功抓到過(只有異常那顆會是 null,理由見 exceptionCount 宣告處)
+          const count: number | null = s === "exception"
             ? exceptionCount
             : s === "air"
               ? (!counts ? 0 : counts.air.in_transit)
@@ -1853,13 +1927,25 @@ function HqInboxContent() {
               }`}
             >
               <span>{label}</span>
-              {count > 0 && (
+              {/* 還沒成功抓到數字 → 畫「—」而不是 0,也不是什麼都不畫:
+                  「什麼都不畫」在這裡已經被拿來表示「真的是 0 筆」了(見下面那個分支),
+                  兩者長一樣的話,抓失敗會被看成「沒有異常」⇒ 又變成沒人去處理。 */}
+              {count === null ? (
+                <span
+                  title="還在查這個數字，先不顯示（不代表沒有）"
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                    active ? "bg-white/20 text-white dark:bg-zinc-900/20 dark:text-zinc-900" : "bg-zinc-300 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+                  }`}
+                >
+                  —
+                </span>
+              ) : count > 0 ? (
                 <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
                   active ? "bg-white/20 text-white dark:bg-zinc-900/20 dark:text-zinc-900" : "bg-blue-600 text-white"
                 }`}>
                   {count}
                 </span>
-              )}
+              ) : null}
             </SpinButton>
           );
         })}
@@ -1925,7 +2011,7 @@ function HqInboxContent() {
       {/* === 主區 === */}
       <div className="flex flex-1 flex-col gap-3 min-w-0">
         {sourceFilter === "exception" ? (
-          <ExceptionsContent showHeader={false} onCountChange={setExceptionCount} />
+          <ExceptionsContent showHeader={false} onCountChange={handleExceptionListChanged} />
         ) : (
           <>
 
