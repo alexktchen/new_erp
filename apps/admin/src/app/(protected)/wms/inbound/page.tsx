@@ -70,6 +70,33 @@ type Group = {
   backorderQty: number;    // 這組還有幾件掛著待補貨（少發配貨沒配到）
 };
 
+// 「已收」分頁單次查詢的筆數天花板。
+//
+// 1000 不是隨手挑的：PostgREST/Supabase 單次 select 的 max-rows 就是 1000
+// （supabase/config.toml:18 `max_rows = 1000`；lib/fetchAllRows.ts:3-6 有實測），
+// `.limit(12244)` 送出去也只會回 1000 筆，而且不會報錯 —— 這正是本頁舊的
+// 「載入全部」在騙人的地方（正式庫 status='received' 共 12,244 張、單店最多
+// 1,437 張，兩種視角都超過 1000）。
+//
+// ⛔ 那為什麼不乾脆用 lib/fetchAllRows 撈到底？因為問題不在這一發查詢，在下游：
+//    本頁拿到 transfer 之後還要用 .in(...) 撈 transfer_items / picking_waves，
+//    並把同一份 id 陣列丟進三支 RPC。id 一多會同時撞兩堵牆 ——
+//    ① 網址長度：postgrest-js 的 .in() 走 query string，一個 5 位數 id 編碼後
+//       佔 8 字元（逗號變 %2C）→ 1,041 張 ≈ 8.3 KB（現況），12,244 張 ≈ 95.8 KB。
+//       本 repo 其他頁早就為了這件事把 .in() 切成 150~500 一批
+//       （campaigns/page.tsx:305 註解「避免 .in() 把 URL 塞爆」），本頁沒切。
+//    ② statement_timeout：authenticated 是 8 秒，而 rpc_get_campaigns_for_transfers
+//       2026-07-13 就因為這一頁 timeout 過 14 次（20260720000040 migration 檔頭：
+//       1809 次呼叫、平均 1976ms、最大 7995ms）。該檔修好後的實測基準是
+//       336 張 = 141ms；12,244 張是那個母體的 36 倍（時間不必然線性放大，
+//       但這是目前唯一有實測數字的基準，而 8 秒的牆就在那裡）。
+//
+// ⇒ 要回頭查更早的貨，正解是用「收貨日期」把範圍縮小（PR #819 已上線），
+//   不是一次撈全部。這個常數只是把「後端本來就會做的截斷」搬到看得見的地方：
+//   後端上限若真是 1000，單次載入量與改動前一模一樣（舊的「載入全部」也只拿得到
+//   1000 筆）；若後端上限其實更高，改動後會停在 1000 —— 那反而是避開上面兩堵牆。
+const DONE_MAX = 1000;
+
 export default function TransfersInboxPage() {
   const [transfers, setTransfers] = useState<Transfer[] | null>(null);
   const [stores, setStores] = useState<StoreRow[]>([]);
@@ -102,6 +129,25 @@ export default function TransfersInboxPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [doneLimit, setDoneLimit] = useState(50);
   const [doneTotal, setDoneTotal] = useState(0);
+  // 上一次「已收」查詢的【查詢條件】與【結果】，綁在同一個 state 一起更新。
+  // 分開存的話，會在「按下去到新資料回來」的空窗期拿新條件配舊結果，
+  // 講出不實的數字。
+  //
+  // ⚠ 條件要把 doneQ 實際會變動的四個東西全帶上（筆數上限 / 分店 / 日期起訖）。
+  //   只帶 limit 是不夠的 —— 阿審 2026-08-22 P1-1 抓到：applyDoneRange() 雖然會
+  //   setDoneLimit(50)，但使用者本來就停在 50 時那是設同一個值、React 直接跳過，
+  //   而 doneFrom/doneTo 有變會照樣觸發重查（effect deps 含這兩個）。
+  //   於是空窗期 limit 仍然對得上 → footer 繼續顯示【上一個日期範圍】的
+  //   「已載入 N / M」。少帶任一個條件就會留下這種空窗。
+  // ⚠ 刻意不帶 serverSearch 與 reloadTick：doneQ 沒有用到它們（搜尋補查是另一發
+  //   extraQ，見下方 :270 附近），帶了只會讓這塊在每次打字／收完貨重載時無謂閃掉。
+  const [doneFetched, setDoneFetched] = useState<{
+    limit: number;
+    rows: number;
+    from: string;
+    to: string;
+    branch: number | null;
+  }>({ limit: -1, rows: 0, from: "", to: "", branch: null });
   // 撿貨單號（wave）分頁：一次顯示 20 個 wave，滑到底自動載入下一批（+20）
   const [groupLimit, setGroupLimit] = useState(20);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -167,7 +213,9 @@ export default function TransfersInboxPage() {
   // 所以預設一個字都不改、載入量與現在完全相同。
   // 選了範圍之後 limit 照舊套 doneLimit（不是撈全部）——只是把「最近 50 筆」換成
   // 「這個範圍內最近 50 筆」，單次查詢的筆數上限不變，不會有一次撈爆的問題。
-  // count:"exact" 也會跟著範圍縮小，下方「載入更多 / 載入全部」自動變成範圍內的總數。
+  // count:"exact" 也會跟著範圍縮小，下方「載入更多」的分母自動變成範圍內的總數。
+  // ⭐ 這個日期範圍就是「看更早的貨」的正解 —— 單次查詢有 DONE_MAX 的天花板，
+  //   撈不完的時候畫面會直接請使用者回來縮這裡。
   const [doneFrom, setDoneFrom] = useState("");
   const [doneTo, setDoneTo] = useState("");
 
@@ -259,7 +307,8 @@ export default function TransfersInboxPage() {
         ]);
         if (e1) throw new Error(e1.message);
         if (e2) throw new Error(e2.message);
-        if (!cancelled) setDoneTotal(doneCount ?? 0);
+        // ⛔ doneTotal / doneFetched 刻意【不】在這裡 setState —— 它們要跟
+        //    setTransfers(rows) 同一批更新，理由見下面那個區塊。
         const rows = ([...(pendingData ?? []), ...(doneData ?? [])] as Transfer[]);
 
         // 搜尋補查：老單被 doneLimit 擠出載入範圍時，用單號直接查後端合併進來
@@ -446,6 +495,28 @@ export default function TransfersInboxPage() {
         }
 
         if (!cancelled) {
+          // ⚠⚠ 這三個一定要在同一個 if (!cancelled) 區塊裡一起更新（阿審 2026-08-22
+          //    四審 P2）。原本 setDoneTotal / setDoneFetched 是在上面那發 Promise.all
+          //    之後就先設掉的，但它和這裡中間隔了 10 個 await（locations / waves /
+          //    transfer_items / skus / 三支 RPC / stores）＝ 好幾秒的空窗。
+          //    那段期間 doneFetched 已經是新的 → doneSettled 成立 → 頁尾會畫出來，
+          //    但 transfers 還是舊的 → 走「總部挑單一分店」那條路的頁尾與 KPI 用的是
+          //    summaries.done（算自 transfers）→ 畫面會拿【舊的】筆數配【新的】
+          //    已定案判斷，講出與當下條件不符的數字。
+          //    放在一起之後：要嘛整批舊、要嘛整批新，不會有混搭的中間態。
+          //    ⭐ 順帶把錯誤路徑也修對了 —— 中途任何一發查詢 throw 時，這三個
+          //      一個都不會被更新（以前 doneTotal 會先被改掉，然後配著舊清單留在畫面上）。
+          // 已收實際回幾筆要用 doneData 量：那是「已收」那一發查詢自己的結果，
+          // 沒有被搜尋補查(extraQ)混進來。回的比要求的少 ＝ 撞到後端 max-rows，
+          // 「還載得動嗎」就靠這個判斷（見 DONE_MAX）。
+          setDoneTotal(doneCount ?? 0);
+          setDoneFetched({
+            limit: doneLimit,
+            rows: doneData?.length ?? 0,
+            from: doneFrom,
+            to: doneTo,
+            branch: branchLocationId,
+          });
           setTransfers(rows);
           setLocations(locMap);
           setWaves(waveMap);
@@ -638,9 +709,9 @@ export default function TransfersInboxPage() {
     setExpanded(auto);
   }
 
-  // 換「已收日期範圍」時把 doneLimit 收回第一頁：使用者若先按過「載入全部」，
-  // doneLimit 會是好幾千，沿用它去查新範圍等於又撈一次大的。兩個 setState 放在
-  // 同一個事件 handler 裡，React 會併成一次 render → 只打一發查詢。
+  // 換「已收日期範圍」時把 doneLimit 收回第一頁：使用者若先按過「載入更多」，
+  // doneLimit 會停在最多 DONE_MAX，沿用它去查新範圍等於又撈一次大的。兩個
+  // setState 放在同一個事件 handler 裡，React 會併成一次 render → 只打一發查詢。
   function applyDoneRange(from: string, to: string) {
     setDoneFrom(from);
     setDoneTo(to);
@@ -656,6 +727,63 @@ export default function TransfersInboxPage() {
   }
 
   const visibleGroups = useMemo(() => groups.slice(0, groupLimit), [groups, groupLimit]);
+
+  // 「已收」歷史：實際載進來幾筆（不是要求幾筆 —— 要求 12,244 後端只會給 1000）
+  const doneLoaded = doneFetched.rows;
+  // 「還載得動嗎」＝ 再按一次拿不拿得到更多。兩種情況都算載到頂：
+  //   ① 上一次就是照天花板 DONE_MAX 去要的；
+  //   ② 上一次要求 N 筆、後端只回不到 N 筆 → 撞到後端 max-rows（自我校準：
+  //      就算哪天正式庫的上限不是 1000，這個判斷仍然成立，不必改程式）。
+  // ⚠ 兩個條件都只讀 doneFetched，刻意不摻當下的 doneLimit —— 混用會在
+  //   「按下去到資料回來」的空窗期用舊結果配新要求，講出不實的結論。
+  const doneAtMax = doneFetched.limit >= DONE_MAX || doneFetched.rows < doneFetched.limit;
+  // 上一次查詢是不是就是照【現在這組條件】查的。按下「載入更多」或換日期範圍
+  // 之後、新資料回來之前會對不上 —— 那段空窗期整塊先不畫。少畫一塊沒人受傷，
+  // 拿舊數字硬講「已載入 N / M」就是在騙人（本案要修的就是這種話）。
+  const doneSettled =
+    doneFetched.limit === doneLimit &&
+    doneFetched.from === doneFrom &&
+    doneFetched.to === doneTo &&
+    doneFetched.branch === branchLocationId;
+
+  // ─────────────────────────────────────────────────────────────────
+  // 按鈕上那個數字：到底有幾個東西會限制「按下去實際會多載到幾筆」
+  //
+  // 2026-08-22 這一類問題連續踩了三輪，每一輪都是「漏算了一個限制」：
+  //   第一輪 只算「要求幾筆」，漏了「後端實際回幾筆」
+  //   第二輪 只算「距離天花板」，漏了「距離總筆數」
+  // 所以這裡一次窮舉完，不要再補第三次。
+  //
+  //   實際增加量 ＝ min(新的要求, ①, ②, ④) − 目前已載入
+  //
+  //   ① DONE_MAX      本頁天花板        1000              ✅ 事前算得出（:98）
+  //   ② doneTotal     這組條件的總筆數  count:"exact"     ✅ 事前算得出（:311）
+  //   ③ doneLoaded    起算點            上次實際回傳量    ✅ 事前算得出（:315）
+  //   ④ 後端 max_rows 真正的截斷點      推定 1000         ❌ 事前不知道，只能
+  //                                                          事後由「回的比要的
+  //                                                          少」觀察到
+  //   ⑤ 兩次查詢之間資料變了（別人收了貨／退回收貨）→ 總筆數會變 ❌ 本質不可知
+  //
+  // ⇒ ④⑤ 事前算不出來，所以 ⛔ 按鈕上不可以再寫「保證會多載 N 筆」這種話。
+  //   改成寫【上界】：新的要求本身就被夾在「目前 + N」以內，
+  //   實際增加量必定 ≤ N ⇒「最多 +N」在 ①~⑤ 的任何組合下都成立。
+  //   真正發生了什麼由下面那行「已載入 X / Y」負責講，那個永遠是實際值。
+  //
+  // ⚠ 篩選條件（日期／分店）改變刻意不列進這張表：那不是「這一下能載幾筆」的
+  //   限制，而是「現在還算不算得準」的問題，已經由 doneSettled（:732）擋掉 ——
+  //   條件對不上時整塊不畫，不會拿舊的 doneTotal 去算新的步進。
+  // ⚠ 「doneLoaded ≠ doneLimit 的中間態」也不列，因為那個狀態畫不出按鈕：
+  //   按鈕要 !doneAtMax，而 doneAtMax 已經排除 doneLoaded < doneLimit；
+  //   加上 doneLoaded ≤ doneLimit 恆成立（要 N 筆最多回 N 筆）
+  //   ⇒ 按鈕畫得出來的時候，doneLoaded 必定剛好等於 doneLimit。
+  //
+  // 兩個差距都 ≥ 1（整塊要顯示就表示 doneLoaded < doneTotal；有按鈕就表示
+  // doneLimit < DONE_MAX），所以不會出現「最多 +0」的按鈕。
+  // ─────────────────────────────────────────────────────────────────
+  const doneRoom = DONE_MAX - doneLimit;          // 距離本頁天花板
+  const doneRemaining = doneTotal - doneLoaded;   // 距離這組條件的總筆數
+  const doneStepSmall = Math.min(50, doneRoom, doneRemaining);
+  const doneStepLarge = Math.min(500, doneRoom, doneRemaining);
 
   // 滑到底自動載入下一批撿貨單號（+20），不用手動按。sentinel 進入視窗就 +20；
   // effect 依 groupLimit/groups.length 重建 observer，若 sentinel 仍在視窗內會連續補到看不見為止。
@@ -738,6 +866,60 @@ export default function TransfersInboxPage() {
     }
     return acc;
   }, [transfers, waves, locationFilter]);
+
+  // ─────────────────────────────────────────────────────────────────
+  // 「已收」那個數字（頁首、分頁標籤、KPI 卡三處共用同一個值）
+  //
+  // ⛔ summaries.done 數的是「目前載入了幾筆已收」，不是「總共有幾筆已收」。
+  //    預設 doneLimit=50 → 畫面寫「已收 50」，正式庫實際 12,244 張。
+  //    跟本案要修的「載入全部」是同一種謊，而且 KPI 卡比按鈕更顯眼。
+  //
+  // 真實總數直接用 doneQ 已經帶回來的 count:"exact"（doneTotal），
+  // ⛔ 不為了這個數字另外多打一支查詢（那會拖慢每次開頁）。
+  //
+  // ⚠ 但兩者的範圍不完全一樣，只有一致時才能換：
+  //     doneTotal      的範圍 ＝ branchLocationId ＋ 已收日期範圍
+  //     summaries.done 的範圍 ＝ 上面那些 ＋ 總部右上角的分店下拉 locationFilter
+  //   分店帳號看不到那個下拉（:1089 要 branchLocationId == null 才畫），而全檔
+  //   唯一的 setLocationFilter 就在那個下拉裡（:1095）⇒ 分店帳號恆為 "all"。
+  //   總部選「全部」時也是 "all"。這兩種情況範圍一致，doneTotal 就是真實總數。
+  //
+  //   只有「總部手動挑了某一家店」時範圍不同，而 locationFilter 不在抓資料的
+  //   effect deps 裡（純前端篩選、不重查）⇒ 那種情況真的拿不到該店的總數。
+  //   ⇒ 照本輪原則：手上沒有精確值就不要假裝精確 —— 那種情況直接標明「已載入」，
+  //     講的就是它本來的東西。
+  //   ⚠⚠ 措辭要小心（阿審 2026-08-22 四審 P1）：這裡是「本頁目前沒有另查」，
+  //      【不是】「算不出來」。locationFilter 就是該分店的 dest_location，
+  //      doneQ 已經在用 count:"exact"，多一發 count-only 查詢、或把這個條件併進
+  //      doneQ，就拿得到該店總數。是 CEO 判定「總部挑單一分店是次要情境，
+  //      不值得為它多一支查詢拖慢主路徑」才不做的 —— 那是取捨，不是限制。
+  //      ⛔ 不要把「我沒做」寫成「做不到」，畫面上尤其不行。
+  //
+  // ⛔ 這裡刻意【不】用「N+」（至少 N 筆）那種下界寫法，雖然按鈕那邊用的是上界。
+  //    理由：下界在這裡不成立。搜尋補查（extraQ，:270 附近）會刻意把日期範圍外
+  //    的已收單也合併進 transfers，那些單一樣會被 summaries.done 數到 ⇒
+  //    「總部挑某店 ＋ 有日期範圍 ＋ 搜尋撈到該店範圍外的舊單」時，
+  //    summaries.done 會【超過】該店範圍內的真實總數，「N+」就變成假話。
+  //    「已載入 N」不必依賴任何界的推論 —— 它就是畫面上真的有幾筆，恆真。
+  // ─────────────────────────────────────────────────────────────────
+  const doneTotalIsExact = locationFilter === "all";
+  const doneKpiNum = doneTotalIsExact ? doneTotal : summaries.done;
+  // ⭐ 判斷「這個數字誠不誠實」的規則（2026-08-22 第四輪定下來的，前三輪都是憑感覺
+  //    逐處補，所以每一輪都還有漏）：
+  //      一個數字是誠實的，若且唯若「標題所描述的範圍」＝「它實際量到的範圍」。
+  //    ⇒ 範圍只要偏離預設，標題就要自己把那件事講出來，不能靠 tooltip 補。
+  //      ・總部挑了單一分店 → 量到的是「載入的筆數」而不是總數 → 標「已載入」
+  //      ・有已收日期範圍   → 量到的是「這段期間的總數」而不是全部 → 標「這段日期」
+  //    （分店帳號不必標：它的查詢本來就整條鎖在自己店，範圍與標題一致。）
+  const doneScopeNote = !doneTotalIsExact ? "已載入" : doneFrom || doneTo ? "這段日期" : "";
+  // 三處的講法分開寫（不硬湊成同一個字串）：同一個數字，但要在各自的版面裡
+  // 都把「這到底量的是什麼」講清楚
+  const doneKpiCardLabel = doneScopeNote ? `✓ 已收（${doneScopeNote}）` : "✓ 已收";
+  const doneKpiTabCount = doneScopeNote ? `${doneScopeNote} ${doneKpiNum}` : String(doneKpiNum);
+  const doneKpiHeader = doneScopeNote ? `已收（${doneScopeNote} ${doneKpiNum}）` : `已收 ${doneKpiNum}`;
+  const doneKpiHint = doneTotalIsExact
+    ? `status = received 的總數${doneFrom || doneTo ? "（限這段收貨日期）" : ""}，不是目前載入的筆數`
+    : "目前載入的 status = received 筆數。總部挑單一分店是次要情境，本頁【目前未另查】該店的已收總數，以免為它多打一支查詢拖慢主路徑 —— 不是查不到。";
 
   function selectAllPending() {
     setSelected(new Set(pendingIds));
@@ -965,7 +1147,7 @@ export default function TransfersInboxPage() {
             {transfers === null ? (
               <Spinner size={14} className="inline-block align-[-2px]" />
             ) : (
-              `待收 ${summaries.allPending} · 已收 ${summaries.done}`
+              `待收 ${summaries.allPending} · ${doneKpiHeader}`
             )}
           </p>
         </div>
@@ -993,8 +1175,10 @@ export default function TransfersInboxPage() {
       {/* 分頁：未收 / 已收（預設未收） */}
       <div className="flex items-center gap-1 border-b border-zinc-200 dark:border-zinc-800">
         {([
-          { value: "unreceived", label: "未收", count: summaries.allPending },
-          { value: "received", label: "已收", count: summaries.done },
+          // 已收那格拿得到真實總數時就顯示總數；拿不到時會是「已載入 N」
+          // （見上方 doneKpiTabCount）→ 兩個都當字串處理
+          { value: "unreceived", label: "未收", count: String(summaries.allPending) },
+          { value: "received", label: "已收", count: doneKpiTabCount },
         ] as const).map((tb) => {
           const active = tab === tb.value;
           return (
@@ -1093,7 +1277,28 @@ export default function TransfersInboxPage() {
         </div>
       )}
 
-      {/* KPI cards — 點任一張就 filter list,再點一次取消 */}
+      {/* KPI cards — 點任一張就 filter list,再點一次取消
+          ⚠ 這四張卡的數字來源【不對稱】，改的時候不要以為它們是同一回事：
+            ・「✓ 已收」＝ 真實總數（doneQ 的 count:"exact"）；總部挑了單一分店
+              那一種情況本頁目前未另查該店總數（是取捨不是做不到，見 doneKpiHint），
+              卡片標題會自己改成「已收（已載入）」
+              —— 見上方 doneKpiNum / doneKpiCardLabel
+            ・前三張待收的 ＝ 目前載入的筆數（summaries.*，數 transfers 陣列）
+          待收那三張今天看起來是準的，因為 pendingQ（:207 附近）沒有套 .limit()，
+          後端會把 status='shipped' 給回來（老闆 2026-08-22 實測待收 41 張）。
+          ⚠⚠ 但「準」是有前提的，而且前提沒有被任何程式保證住 —— 阿審 2026-08-22
+             三審對這件事提了保留，原話照收，因為它是對的：
+             ・「pendingQ 沒有 .limit()」只證明【前端】沒有設上限，
+               它仍然受 PostgREST max-rows 節制 → 待收哪天超過那個上限，
+               這三張會【少報而且畫面上看不出來】。
+             ・「🚚 明天到貨 / ⏳ 今日及更早」還多依賴 :363 那發 picking_waves
+               查詢，而【那發沒有分頁、也沒有處理 error】（回傳只解構 data，
+               error 被丟掉）→ 它被截斷或失敗時，有 wave_date 的單會被當成
+               沒有日期，這兩張同樣少報。
+          ⇒ 這兩件事今天不會觸發（一張 wave 對到多張 transfer，waveIds 遠小於
+            載入筆數），所以本輪【刻意不動程式行為】；但它們是這三個數字準不準的
+            前提，不是可以省略的細節。要處理時，優先改文字（標成「已載入」）
+            而不是加查詢。 */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KpiCard
           label="🚚 明天到貨"
@@ -1135,10 +1340,10 @@ export default function TransfersInboxPage() {
           }
         />
         <KpiCard
-          label="✓ 已收"
-          hint="status = received"
+          label={doneKpiCardLabel}
+          hint={doneKpiHint}
           showHint={showDetail}
-          value={summaries.done}
+          value={doneKpiNum}
           accent="text-emerald-700 dark:text-emerald-400"
           active={tab === "received"}
           onClick={() => { setTab("received"); setDateFilter(null); setSelected(new Set()); }}
@@ -1670,22 +1875,60 @@ export default function TransfersInboxPage() {
         </div>
       )}
 
-      {/* 已收歷史分頁:目前 doneLimit 比 doneTotal 少時顯示（僅已收分頁） */}
-      {tab === "received" && doneLimit < doneTotal && (
-        <div className="flex items-center justify-center gap-3 py-2 text-xs text-zinc-500">
-          <span>已顯示 {Math.min(doneLimit, doneTotal)} / {doneTotal} 筆已收歷史</span>
-          <SpinButton
-            onClick={() => setDoneLimit((n) => n + 50)}
-            className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+      {/* 已收歷史分頁:實際載進來的比範圍內總數少時顯示（僅已收分頁）。
+          ⚠ 條件用「實際載到幾筆」而不是「要求載幾筆」是刻意的：這裡本來寫
+          `doneLimit < doneTotal`，而舊的「載入全部」把 doneLimit 設成 doneTotal，
+          於是這一整塊就消失了 —— 畫面等於說「都在這了」。但那一發查詢送的是
+          `.limit(12244)`，PostgREST 只回 1000 筆且不報錯（見上方 DONE_MAX），
+          總部視角實際少看 11,000 多張、單店最多也少看 400 多張，正好是月結對帳
+          回頭查最需要看到的那一段。 */}
+      {tab === "received" && doneSettled && doneLoaded < doneTotal && (
+        <div className="flex flex-wrap items-center justify-center gap-3 py-2 text-xs text-zinc-500">
+          {/* ⚠ 總部在右上角挑了單一分店時，這裡【不能】顯示 doneLoaded / doneTotal ——
+              doneQ 只套 branchLocationId（:273），沒有套 locationFilter，所以那兩個
+              數字是「全部分店」的；而整頁的清單已經被 locationFilter 篩到那一家店
+              （filtered :568 / summaries :846 / pendingIds :830 都有套）。
+              兩者放在一起，使用者會把「/ 12244」讀成那家分店的已收歷史筆數。
+              ⛔ 這正是上一輪 KPI 沒改乾淨的同一格：doneTotalIsExact 已經承認
+                 「單一分店時 doneTotal 不適用」，KPI/頁首/分頁都分流了，只有這裡沒跟上。
+              該情況下改講「這家分店已載入 N 筆」（summaries.done，有套 locationFilter），
+              ⛔ 不顯示全分店的分母，也不另外查該店總數（會多打一支查詢拖慢頁面）。 */}
+          <span
+            title={
+              doneTotalIsExact
+                ? undefined
+                : "分母是全部分店的已收總數，跟目前篩選的分店對不起來，所以這裡只講這家分店已經載入幾筆。按「載入更多」是再撈全部分店的單，這家分店不一定會增加。"
+            }
           >
-            載入更多 (+50)
-          </SpinButton>
-          <SpinButton
-            onClick={() => setDoneLimit(doneTotal)}
-            className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-          >
-            載入全部
-          </SpinButton>
+            {doneTotalIsExact
+              ? `已載入 ${doneLoaded} / ${doneTotal} 筆已收歷史`
+              : `這家分店已載入 ${summaries.done} 筆已收歷史`}
+          </span>
+          {doneAtMax ? (
+            // 載到頂了才換成這句：再給按鈕也拿不到更多（後端會截掉），
+            // 留著只會讓人一直按。出口是上面的「收貨日期」（PR #819）。
+            <span>單次查詢載到這裡為止，要看更早的貨請用上面的「收貨日期」縮小範圍。</span>
+          ) : (
+            <>
+              <SpinButton
+                onClick={() => setDoneLimit((n) => Math.min(n + doneStepSmall, DONE_MAX))}
+                className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                載入更多 (最多 +{doneStepSmall})
+              </SpinButton>
+              {/* 大步只在「真的比小步多」時才出現 —— 快到上限時兩顆會夾成一樣的
+                  數字（例：只差 10 筆就載完時兩顆都是 +10），並排兩顆一模一樣的
+                  鈕很怪，而且第二顆等於沒有作用。 */}
+              {doneStepLarge > doneStepSmall && (
+                <SpinButton
+                  onClick={() => setDoneLimit((n) => Math.min(n + doneStepLarge, DONE_MAX))}
+                  className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                >
+                  載入更多 (最多 +{doneStepLarge})
+                </SpinButton>
+              )}
+            </>
+          )}
         </div>
       )}
 
