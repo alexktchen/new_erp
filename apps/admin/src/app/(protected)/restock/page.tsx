@@ -5,6 +5,7 @@ import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { useRole, isHqRole } from "@/lib/role";
 import { translateRpcError } from "@/lib/rpcError";
+import { restockStatusLabel } from "@/lib/restockStatus";
 import SpinButton from "@/components/SpinButton";
 import { Table, THead, TBody, Tr, Th, Td, EmptyRow, LoadingRow } from "@/components/DataTable";
 import RestockDetailModal from "@/components/RestockDetailModal";
@@ -38,7 +39,10 @@ type Row = {
 
 const STATUS_LABEL: Record<Status, string> = {
   pending: "待處理",
-  approved_transfer: "已派貨",
+  // ⚠ 這頁是分店在看的。2026-06-12 起 approved_transfer 不再建 transfer、貨也不會動
+  //   （rpc_approve_restock_to_transfer 最新版 20260714000040:260-270），
+  //   寫「已派貨」會讓分店以為貨已經在路上、白等。⛔ 不要改回去。
+  approved_transfer: "已派至工作台",
   approved_pr: "已轉採購",
   shipped: "已出貨",
   received: "已收貨",
@@ -294,7 +298,9 @@ export default function RestockListPage() {
                             </span>
                           ) : (
                             <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[r.status]}`}>
-                              {STATUS_LABEL[r.status]}
+                              {/* approved_transfer 分新舊：舊流程直派過的單（linked_transfer_id 有值）
+                                  貨是真的出去了，講「已派至工作台」對它反而不準。見 lib/restockStatus.ts */}
+                              {restockStatusLabel(r.status, r.linked_transfer_id, STATUS_LABEL)}
                             </span>
                           )}
                         </Td>

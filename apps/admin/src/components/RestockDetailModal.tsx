@@ -6,6 +6,7 @@ import { Modal } from "@/components/Modal";
 import { getSupabase } from "@/lib/supabase";
 import { PR_TERM_ZH, prStatusLabel } from "@/lib/prStatus";
 import { transferStatusLabel } from "@/lib/transferStatus";
+import { restockStatusLabel } from "@/lib/restockStatus";
 
 type RestockRow = {
   id: number;
@@ -46,7 +47,9 @@ type Line = {
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "待處理",
-  approved_transfer: "已派庫存",
+  // ⚠ 「已派庫存」是 2026-06-12 以前的行為。現在這個狀態只代表「核可、排進派貨工作台」，
+  //   庫存沒有動（rpc_approve_restock_to_transfer 最新版 20260714000040:260-270）。⛔ 不要改回去。
+  approved_transfer: "已派至工作台",
   approved_pr: "已下訂",
   shipped: "已出貨",
   received: "已收貨",
@@ -209,7 +212,8 @@ export default function RestockDetailModal({
               value={
                 hd.status === "pending" && hd.standby_at
                   ? `待處理（⏳ 候補中，${new Date(hd.standby_at).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" })} 轉入）`
-                  : STATUS_LABEL[hd.status] ?? hd.status
+                  // approved_transfer 分新舊，判準是 linked_transfer_id（見 lib/restockStatus.ts）
+                  : restockStatusLabel(hd.status, hd.linked_transfer_id, STATUS_LABEL)
               }
             />
             <Field label="申請時間" value={new Date(hd.requested_at).toLocaleString("zh-TW")} />
