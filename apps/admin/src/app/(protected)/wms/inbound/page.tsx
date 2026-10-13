@@ -130,6 +130,14 @@ type Group = {
 //   1000 筆）；若後端上限其實更高，改動後會停在 1000 —— 那反而是避開上面兩堵牆。
 const DONE_MAX = 1000;
 
+// 批次列「配送日」下拉的選項值：撿貨單的 wave_date（既有的 waves，不另查）；
+// 沒有配送日的單（不是撿貨單派出的、或撿貨單沒載到）歸 NO_WAVE_DATE。
+const NO_WAVE_DATE = "none";
+function waveDateKeyOf(t: Transfer, waves: Map<number, Wave>): string {
+  const wid = parseWaveId(t.transfer_no);
+  return (wid !== null ? waves.get(wid)?.wave_date : undefined) || NO_WAVE_DATE;
+}
+
 export default function TransfersInboxPage() {
   const [transfers, setTransfers] = useState<Transfer[] | null>(null);
   const [stores, setStores] = useState<StoreRow[]>([]);
@@ -240,6 +248,9 @@ export default function TransfersInboxPage() {
   // 待收子篩選（僅在「未收」分頁內作用）
   type DateFilter = "tomorrow" | "today_or_earlier" | "all_pending" | null;
   const [dateFilter, setDateFilter] = useState<DateFilter>(null);
+  // 批次列「配送日」下拉（老闆 2026-10-13，僅「未收」分頁）："all" | 某一天的 wave_date | NO_WAVE_DATE。
+  // ⛔ 不記在瀏覽器：每次進頁都從「全部」開始。「全部」時每一個新條件都直接放行 ＝ 加選單之前的行為。
+  const [waveDateFilter, setWaveDateFilter] = useState<string>("all");
   // 分頁：未收(shipped) / 已收(received)，預設未收
   type InboxTab = "unreceived" | "received" | "over" | "short";
   const [tab, setTab] = useState<InboxTab>("unreceived");
@@ -745,6 +756,30 @@ export default function TransfersInboxPage() {
     return Array.from(set.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [transfers, locations]);
 
+  // 配送日下拉的選項：待收（套目前的分店篩選）裡出現過的配送日，由舊到新，「無配送日」墊底；值是筆數
+  const waveDateOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of transfers ?? []) {
+      if (t.status !== "shipped") continue;
+      if (locationFilter !== "all" && t.dest_location !== locationFilter) continue;
+      const k = waveDateKeyOf(t, waves);
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    return Array.from(counts.entries()).sort(([a], [b]) =>
+      a === NO_WAVE_DATE ? 1 : b === NO_WAVE_DATE ? -1 : a.localeCompare(b),
+    );
+  }, [transfers, waves, locationFilter]);
+  // 選的那天已經沒有待收（收完了 / 換了分店）→ state 直接改回「全部」：不然清單是空的、
+  // 批次列（含這個下拉）也跟著消失，回不去；只在畫面上當作「全部」的話，之後同一天又來新單會無聲地重新篩掉別天。
+  // 在 render 當下調整（React 會丟掉這次結果、立刻重跑），不走 effect；改完就是 "all"，條件不再成立，不會迴圈。
+  // 等資料載入過（transfers !== null）才判斷；重新載入時 transfers 不會先變回 null，不會誤清。
+  if (transfers !== null && waveDateFilter !== "all" && !waveDateOptions.some(([k]) => k === waveDateFilter)) {
+    setWaveDateFilter("all");
+  }
+  // 上面那次調整生效之前的這一輪 render 也先當作「全部」
+  const activeWaveDate =
+    waveDateFilter !== "all" && waveDateOptions.some(([k]) => k === waveDateFilter) ? waveDateFilter : "all";
+
   const filtered = useMemo(() => {
     const today = new Date();
     const tomorrow = new Date();
@@ -783,6 +818,8 @@ export default function TransfersInboxPage() {
         return t.status === "received" && ((s?.receiveShortQty ?? 0) > 0 || (s?.shortQty ?? 0) > 0);
       }
       if (t.status !== "shipped") return false;
+      // 批次列的配送日下拉（「全部」時不作用）
+      if (activeWaveDate !== "all" && waveDateKeyOf(t, waves) !== activeWaveDate) return false;
       if (dateFilter === null || dateFilter === "all_pending") return true;
       const wid = parseWaveId(t.transfer_no);
       const w = wid !== null ? waves.get(wid) : undefined;
@@ -791,7 +828,7 @@ export default function TransfersInboxPage() {
       if (dateFilter === "today_or_earlier") return !!wd && wd <= todayStr;
       return true;
     });
-  }, [transfers, locationFilter, tab, dateFilter, waves, search, itemSummary, locations]);
+  }, [transfers, locationFilter, tab, dateFilter, activeWaveDate, waves, search, itemSummary, locations]);
 
   const groups = useMemo(() => {
     const map = new Map<string, Group>();
@@ -1058,9 +1095,38 @@ export default function TransfersInboxPage() {
     () =>
       (transfers ?? [])
         .filter((t) => t.status === "shipped" && (locationFilter === "all" || t.dest_location === locationFilter))
+        // 配送日下拉選了某一天 → 全選待收、「已選 N / M」的 M 只算那一天（「全部」時不作用）
+        .filter((t) => activeWaveDate === "all" || waveDateKeyOf(t, waves) === activeWaveDate)
         .map((t) => t.id),
-    [transfers, locationFilter],
+    [transfers, locationFilter, activeWaveDate, waves],
   );
+
+  // 批次列實際作用的集合 ＝ 看得到的待收（pendingIds：分店＋配送日）∩ 勾選。
+  // selected 可能殘留看不到的單（換分店不會清勾選，是既有行為）→ 批次列的計數、停用、
+  // 批次收貨、手動收貨、依客人分貨單一律只吃這一組，不會帶走畫面上看不到的單。
+  const selectedPendingIds = useMemo(
+    () => pendingIds.filter((id) => selected.has(id)),
+    [pendingIds, selected],
+  );
+  const selectedPendingTransfers = useMemo(() => {
+    const ids = new Set(selectedPendingIds);
+    return (transfers ?? []).filter((t) => ids.has(t.id));
+  }, [transfers, selectedPendingIds]);
+
+  // 換配送日：KPI 卡的日期篩選清掉（兩個篩選疊在一起看不懂）；
+  // 已勾但不是新那一天的單一律取消勾選，不留「看不到卻被勾」的單（換回「全部」不用取消，全都看得到）
+  function changeWaveDate(v: string) {
+    setWaveDateFilter(v);
+    setDateFilter(null);
+    if (v === "all") return;
+    setSelected((cur) => {
+      const next = new Set<number>();
+      for (const t of transfers ?? []) {
+        if (cur.has(t.id) && waveDateKeyOf(t, waves) === v) next.add(t.id);
+      }
+      return next;
+    });
+  }
 
   // KPI summaries: 4 個分類,點 KPI card 就 filter list
   const summaries = useMemo(() => {
@@ -1352,9 +1418,9 @@ export default function TransfersInboxPage() {
   }
 
   async function batchReceive() {
-    if (selected.size === 0) return;
-    if (!confirm(`確認批次收貨 ${selected.size} 筆?\n\n所有品項都將以「全收」(實收 = 派出量,無破損)處理。需要編輯數量請點個別「收貨」按鈕。\n${notifyHint()}`)) return;
-    await runBatchReceive(Array.from(selected));
+    if (selectedPendingIds.length === 0) return;
+    if (!confirm(`確認批次收貨 ${selectedPendingIds.length} 筆?\n\n所有品項都將以「全收」(實收 = 派出量,無破損)處理。需要編輯數量請點個別「收貨」按鈕。\n${notifyHint()}`)) return;
+    await runBatchReceive(selectedPendingIds);
     setSelected(new Set());
   }
 
@@ -1446,7 +1512,7 @@ export default function TransfersInboxPage() {
   }
 
   // 目前勾選的批次是不是同一家分店 —— 是的話藏「自動配」，只留手動配。
-  const selectedStore = singleStoreOf((transfers ?? []).filter((t) => selected.has(t.id)));
+  const selectedStore = singleStoreOf(selectedPendingTransfers);
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-6">
@@ -1501,7 +1567,7 @@ export default function TransfersInboxPage() {
           return (
             <SpinButton
               key={tb.value}
-              onClick={() => { setTab(tb.value); setDateFilter(null); setSelected(new Set()); }}
+              onClick={() => { setTab(tb.value); setDateFilter(null); setWaveDateFilter("all"); setSelected(new Set()); }}
               className={`relative px-4 py-2 text-sm font-medium transition-colors ${
                 active
                   ? "text-zinc-900 dark:text-zinc-100"
@@ -1624,11 +1690,12 @@ export default function TransfersInboxPage() {
           value={summaries.tomorrow}
           accent="text-blue-700 dark:text-blue-400"
           active={tab === "unreceived" && dateFilter === "tomorrow"}
-          onClick={() =>
-            tab === "unreceived" && dateFilter === "tomorrow"
+          onClick={() => {
+            setWaveDateFilter("all"); // 點 KPI 卡 → 配送日下拉回到「全部」（兩個篩選不疊）
+            return tab === "unreceived" && dateFilter === "tomorrow"
               ? setDateFilter(null)
-              : (setTab("unreceived"), setDateFilter("tomorrow"))
-          }
+              : (setTab("unreceived"), setDateFilter("tomorrow"));
+          }}
         />
         <KpiCard
           label="⏳ 今日及更早"
@@ -1637,11 +1704,12 @@ export default function TransfersInboxPage() {
           value={summaries.todayOrEarlier}
           accent="text-amber-700 dark:text-amber-400"
           active={tab === "unreceived" && dateFilter === "today_or_earlier"}
-          onClick={() =>
-            tab === "unreceived" && dateFilter === "today_or_earlier"
+          onClick={() => {
+            setWaveDateFilter("all");
+            return tab === "unreceived" && dateFilter === "today_or_earlier"
               ? setDateFilter(null)
-              : (setTab("unreceived"), setDateFilter("today_or_earlier"))
-          }
+              : (setTab("unreceived"), setDateFilter("today_or_earlier"));
+          }}
         />
         <KpiCard
           label="📋 全部待收"
@@ -1650,11 +1718,12 @@ export default function TransfersInboxPage() {
           value={summaries.allPending}
           accent="text-rose-700 dark:text-rose-400"
           active={tab === "unreceived" && dateFilter === "all_pending"}
-          onClick={() =>
-            tab === "unreceived" && dateFilter === "all_pending"
+          onClick={() => {
+            setWaveDateFilter("all");
+            return tab === "unreceived" && dateFilter === "all_pending"
               ? setDateFilter(null)
-              : (setTab("unreceived"), setDateFilter("all_pending"))
-          }
+              : (setTab("unreceived"), setDateFilter("all_pending"));
+          }}
         />
         <KpiCard
           label={doneKpiCardLabel}
@@ -1663,7 +1732,7 @@ export default function TransfersInboxPage() {
           value={doneKpiNum}
           accent="text-emerald-700 dark:text-emerald-400"
           active={tab === "received"}
-          onClick={() => { setTab("received"); setDateFilter(null); setSelected(new Set()); }}
+          onClick={() => { setTab("received"); setDateFilter(null); setWaveDateFilter("all"); setSelected(new Set()); }}
         />
       </div>
 
@@ -1728,14 +1797,31 @@ export default function TransfersInboxPage() {
       {tab === "unreceived" && pendingIds.length > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-800 dark:bg-zinc-900">
           <span className="text-xs text-zinc-500">
-            {selected.size > 0
-              ? `已選 ${selected.size} / ${pendingIds.length} 筆待收`
+            {selectedPendingIds.length > 0
+              ? `已選 ${selectedPendingIds.length} / ${pendingIds.length} 筆待收`
               : `待收 ${pendingIds.length} 筆`}
           </span>
+          {/* 配送日（老闆 2026-10-13）：選了某一天 → 清單、全選待收、收貨 (N)、依客人分貨單 (N)
+              都只算那一天（同一個勾選集合）。「全部」＝加這個選單之前的行為。 */}
+          <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-300">
+            配送日
+            <select
+              value={activeWaveDate}
+              onChange={(e) => changeWaveDate(e.target.value)}
+              className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800"
+            >
+              <option value="all">{`全部（${waveDateOptions.reduce((s, [, n]) => s + n, 0)}）`}</option>
+              {waveDateOptions.map(([k, n]) => (
+                <option key={k} value={k}>
+                  {`${k === NO_WAVE_DATE ? "無配送日" : `${Number(k.slice(5, 7))}/${Number(k.slice(8, 10))}`}（${n}）`}
+                </option>
+              ))}
+            </select>
+          </label>
           <SpinButton
             type="button"
             onClick={selectAllPending}
-            disabled={selected.size === pendingIds.length}
+            disabled={selectedPendingIds.length === pendingIds.length}
             className="rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
           >
             全選待收
@@ -1768,19 +1854,17 @@ export default function TransfersInboxPage() {
             <SpinButton
               type="button"
               onClick={batchReceive}
-              disabled={selected.size === 0 || batchBusy}
+              disabled={selectedPendingIds.length === 0 || batchBusy}
               title="收貨後依下單時間由早到晚自動配給訂單"
               className="ml-auto rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:disabled:bg-zinc-700"
             >
-              {batchBusy ? "處理中…" : `✓ 批次收貨·自動配${selected.size > 0 ? ` (${selected.size})` : ""}`}
+              {batchBusy ? "處理中…" : `✓ 批次收貨·自動配${selectedPendingIds.length > 0 ? ` (${selectedPendingIds.length})` : ""}`}
             </SpinButton>
           )}
           <SpinButton
             type="button"
-            onClick={() =>
-              openManualReceive((transfers ?? []).filter((t) => selected.has(t.id)))
-            }
-            disabled={selected.size === 0 || batchBusy}
+            onClick={() => openManualReceive(selectedPendingTransfers)}
+            disabled={selectedPendingIds.length === 0 || batchBusy}
             title="先跳出這批單對到的訂單勾選要配給誰,按「確認收貨」才完成收貨(限同一家分店)"
             className={`rounded-md border border-emerald-600 px-4 py-1.5 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:text-zinc-400 dark:text-emerald-400 dark:hover:bg-emerald-950 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500 ${selectedStore ? "ml-auto" : ""}`}
           >
@@ -1789,8 +1873,21 @@ export default function TransfersInboxPage() {
                 「合併成一顆,就寫收貨兩個字」);總倉同時看得到「✓ 批次收貨·自動配」,
                 兩顆都叫收貨會分不出來按哪顆 → 總倉端維持「✋ 批次配單」。
                 判準沿用同一顆自動配在用的 selectedStore,沒有新增任何邏輯。 */}
-            {`${selectedStore ? "收貨" : "✋ 批次配單"}${selected.size > 0 ? ` (${selected.size})` : ""}`}
+            {`${selectedStore ? "收貨" : "✋ 批次配單"}${selectedPendingIds.length > 0 ? ` (${selectedPendingIds.length})` : ""}`}
           </SpinButton>
+          {/* 依客人分貨單：帶的單跟左邊那顆一模一樣 —— 同一個 selectedPendingIds（都是 shipped，
+              openManualReceive 內部再濾一次 shipped 也不會少）。勾到好幾家店時，列印頁會依目的店
+              分開算、分開印。只印不收貨。 */}
+          {selectedPendingIds.length > 0 && (
+            <Link
+              href={`/transfers/print-sort?transfer_ids=${selectedPendingIds.join(",")}`}
+              target="_blank"
+              className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+              title="照收貨視窗預設勾的客人，把勾選的待收單依客人列出來（A4），倉庫可以先照著分袋；只印，不會收貨"
+            >
+              🖨 依客人分貨單 ({selectedPendingIds.length})
+            </Link>
+          )}
         </div>
       )}
 
