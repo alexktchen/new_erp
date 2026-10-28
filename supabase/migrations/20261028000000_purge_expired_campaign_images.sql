@@ -28,7 +28,8 @@
 -- 還原：佇列列（deleted_at IS NULL）代表檔案還沒刪，可依 source / source_id 把
 -- path 加回 products.images / cover_image_url 再刪掉佇列列；deleted_at 有值就救不回來。
 --
--- 2026-10-28 試算：658 個商品、4,484 張、1,151 MB（products bucket 共 8.8 GB）。
+-- 2026-10-28 正式庫交易內試跑後回滾：323 個商品、2,206 張、557 MB（products bucket 共 8.8 GB），
+-- 0.6 秒，重跑排 0 筆。
 -- 開團封面目前 0 張（cover_image_url 從 8/20 漂漂館才開始有）。
 --
 -- 部署（Edge Function 部署方式見 CLAUDE.md）：
