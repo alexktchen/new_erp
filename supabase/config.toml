@@ -457,3 +457,8 @@ verify_jwt = false
 # （函式內自行驗 secret 或使用者 JWT 的管理角色），所以 verify_jwt 關掉。
 [functions.line-note-worker]
 verify_jwt = false
+
+# storage-purge：pg_cron 每天打（_storage_purge_tick）。只刪 storage_purge_queue 裡的路徑，
+# 佇列只有 SQL 函式寫得進去，所以不驗身分。
+[functions.storage-purge]
+verify_jwt = false
